@@ -1,12 +1,10 @@
-import numbers
-from abc import ABC, abstractmethod
 from collections import defaultdict
 from functools import singledispatchmethod
 
 import numpy as np
 
 import ir
-from visitor import walk_multiple, AssignCollector
+from visitor import AssignCollector
 
 # initially supported, untyped ints and other ranges require additional
 # work, and they are less commonly used
@@ -281,52 +279,15 @@ class TypedNameRef:
         self.types.add(t)
 
 
-class TypeBase(ABC):
+class MonoTypeVar:
+    may_grow = False
 
-    @abstractmethod
-    def add_type(self, t):
-        raise NotImplementedError
+    def __init__(self, t):
+        self.type = t
 
-    @property
-    @abstractmethod
-    def type(self):
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def may_grow(self):
-        raise NotImplementedError
-
-
-class TypedSubscript(TypeBase):
-
-    def __init__(self, is_single_index):
-        self.types = set()
-        self.assigned_to = set()
-        self.is_single_index = is_single_index
-
-    @abstractmethod
-    def add_type(self, t):
-        self.types.add(t)
-
-    @property
-    def type(self):
-        if len(self.types) == 1:
-            t = next(iter(self.types))
-            if not isinstance(t, ir.ArrayType):
-                return TypedInvalidRef(self, msg="Subscripting non-array types is unsupported.")
-            if self.is_single_index:
-                if t.ndims == 1:
-                    return t.dtype
-                else:
-                    return ir.ArrayType(t.ndims - 1, t.dtype)
-            else:
-                return t
-        return TypedInvalidRef(self, msg="Subscripted datatype is not monomorphic.")
-
-    @property
-    def may_grow(self):
-        return False
+    # may raise error elsewhere
+    def add_type(self):
+        pass
 
 
 class TypedExpr:
@@ -376,37 +337,6 @@ class TypedInvalidRef:
         self.msg = msg
 
 
-def unpack_expressions(exprs):
-    """
-    Expands all expressions, yielding
-
-    top: a set of expressions, which are not sub-expressions of any other
-    params: the free variable parameters required by each expression
-    expr_set: the set of all expressions, expanded to include sub-expressions
-
-    """
-    params = {}
-    subexprs = set()
-    expr_set = set()
-    for expr in walk_multiple(exprs):
-        if not expr.is_expr:
-            continue
-        expr_set.add(expr)
-        p = set()
-        for subexpr in expr.subexprs:
-            if subexpr.is_expr:
-                subexprs.add(subexpr)
-                p.update(params.get(subexpr))
-            else:
-                p.add(subexpr)
-        params[expr] = p
-    top = expr_set.difference(subexprs)
-    expr_set.difference_update(top)
-    top = {t: params[t] for t in top}
-    subexprs = {s: params[s] for s in expr_set}
-    return top, subexprs
-
-
 class Typer:
 
     def __init__(self, typed, call_typing=None):
@@ -421,16 +351,13 @@ class Typer:
         if node in self.typed:
             return self.typed.get(node).type
         elif isinstance(node, (ir.BoolOp, ir.BoolNode, ir.CompareOp)):
-            tn = None
-            self.typed[node] = tn
+            self.typed[node] = MonoTypeVar(bool)
             return bool
         elif isinstance(node, ir.IntNode):
-            tn = None
-            self.typed[node] = tn
+            self.typed[node] = MonoTypeVar(int)
             return int
         elif isinstance(node, ir.FloatNode):
-            tn = None
-            self.typed[node] = tn
+            self.typed[node] = MonoTypeVar(float)
             return float
         else:
             raise NotImplementedError(f"cannot find type for node: {node}")
@@ -444,24 +371,14 @@ class Typer:
         if not isinstance(v, ir.ArrayType):
             return TypedInvalidRef(node, f"Cannot subscript type: {v}")
         ndims = v.ndims
-        s = self.infer_type(node.slice)
-        if isinstance(s, TypedInvalidRef):
-            return TypedInvalidRef(node, "invalid slice")
-        else:
-            # Check if single index, otherwise dims remains unchanged
-            t = TypedSubscript(ir.ArrayType(ndims - 1, v.dtype))
-            self.typed[node] = t
-            return t
+        if not isinstance(node.slice, ir.SimpleSlice):
+            # assume this is a single index
+            # validation should catch invalid cases
+            v = ir.ArrayType(ndims - 1, v.dtype)
+        t = MonoTypeVar(v)
+        self.typed[node] = t
 
-    @infer_type.register
-    def _(self, node: ir.SimpleSlice):
-        if node in self.typed:
-            return self.typed[node]
-        for subexpr in node.subexprs:
-            if subexpr not in self.typed:
-                t = self.infer_type(subexpr)
-                if isinstance(t, TypedInvalidRef) or not issubclass(t.type, numbers.Integral):
-                    return TypedInvalidRef(node, msg="invalid slice component: " + t.msg)
+        return v
 
     @infer_type.register
     def _(self, node: ir.NameRef):
@@ -474,10 +391,6 @@ class Typer:
 
     @infer_type.register
     def _(self, node: ir.Call):
-        # These need to be registered prior to this point.
-        # These should receive fixed signatures that may be used
-        # as sentinels for typing. It also makes type constraints
-        # better behaved.
         t = self.call_typing.get(type(node))
         if t is None:
             t = TypedInvalidRef(node, "No type for call")
@@ -487,15 +400,14 @@ class Typer:
     def _(self, node: ir.UnaryOp):
         # reasonable outside of unsigned types
         if node in self.typed:
-            t = self.typed[node].type
+            return self.typed[node].type
         elif node.op == 'not':
-            t = None  # TypedScalar(bool)
-            self.typed[node] = t
-            return t
+            self.typed[node] = MonoTypeVar(bool)
+            return bool
         else:
             t = self.infer_type(node.operand)
             self.typed[node] = t
-        return t
+            return t.type
 
     @infer_type.register
     def _(self, node: ir.BinOp):
@@ -527,34 +439,36 @@ class Typer:
             else:
                 return ir.ArrayType(ndims - 1, basetype.dtype)
         elif isinstance(iterable, ir.Counter):
-            pass
-            # return TypedScalar(int)
+            return int
         return TypedInvalidRef(iterable, f"Non-iterable type {basetype}")
 
     def update_user_types(self, v):
-        for u in self.users.get(v):
-            type_var = self.typed.get(u)
-            t = tuple(self.typed.get(s).type for s in u.subexprs)
+        for user in self.users.get(v):
+            type_var = self.typed[user]
+            if isinstance(type_var, MonoTypeVar):
+                continue
+            t = tuple(self.typed[subexpr].type for subexpr in user.subexprs)
             type_var.add_type(t)
 
     def register(self, assign):
         target = assign.target
         value = assign.value
         if assign.iterated:
-            vtype = self.infer_iterated(assign.value)
+            t = self.infer_iterated(value)
         else:
-            # Ignore whether this is a subscript, and check what types are assigned to it.
-            vtype = self.infer_type(value)
+            t = self.infer_type(value)
+            self.users[value].add(target)
 
-        # make this generic flow more complete..
-        # Right now it has to assume a type variable exists, and they don't
-        # have perfect matching interfaces (could be fixed somewhat)
-        target_type_ref = self.typed.get(target)
-        target_type_ref.add_type(vtype)
-        # If get doesn't return one, we need to add it
-        # may be better to factor out creation of these
-        # self.typed[target] = target_type_ref
-        self.update_user_types(target)
+        if not isinstance(t, TypedInvalidRef):
+            if target in self.typed:
+                self.typed[target].add_type(t)
+                self.update_user_types(target)
+            elif isinstance(target, ir.NameRef):
+                target_name_ref = TypedNameRef()
+                target_name_ref.add_type(t)
+                self.typed[target] = t
+            else:
+                self.infer_type(target)
 
 
 def compute_variable_types(entry, input_types):
@@ -563,5 +477,3 @@ def compute_variable_types(entry, input_types):
     typer = Typer(input_types)
     for assign in assigns:
         typer.register(assign)
-    # need input signatures for validation
-    # get unified types

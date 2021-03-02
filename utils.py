@@ -1,9 +1,41 @@
 import operator
 
 import ir
+from visitor import walk_multiple
 
 
 # anything that doesn't fit elsewhere at the moment
+
+
+def unpack_expressions(exprs):
+    """
+    Expands all expressions, yielding
+
+    top: a set of expressions, which are not sub-expressions of any other
+    params: the free variable parameters required by each expression
+    expr_set: the set of all expressions, expanded to include sub-expressions
+
+    """
+    params = {}
+    subexprs = set()
+    expr_set = set()
+    for expr in walk_multiple(exprs):
+        if not expr.is_expr:
+            continue
+        expr_set.add(expr)
+        p = set()
+        for subexpr in expr.subexprs:
+            if subexpr.is_expr:
+                subexprs.add(subexpr)
+                p.update(params.get(subexpr))
+            else:
+                p.add(subexpr)
+        params[expr] = p
+    top = expr_set.difference(subexprs)
+    expr_set.difference_update(top)
+    top = {t: params[t] for t in top}
+    subexprs = {s: params[s] for s in expr_set}
+    return top, subexprs
 
 
 def map_permute(lhs: ir.Tuple, rhs: ir.Tuple):
