@@ -1,242 +1,161 @@
 import itertools
 import operator
+import typing
 from functools import singledispatch, singledispatchmethod
 
 import ir
 from utils import negate_condition
-from visitor import TransformBase
+from visitor import TransformBase, walk_branches
+
+
+class TerminatedPath(ir.StmtBase):
+    """
+    sentinel providing an unambiguous method to convey that an unterminated path
+    is not available
+    """
+    __slots__ = ()
+
+
+def unreachable_branches(node: ir.IfElse):
+    """
+    Determines whether either branch can statically be determined to be unreachable in simple
+    cases.
+    """
+    if not node.test.constant:
+        return False, False
+    if isinstance(node.test, ir.Expression):
+        raise NotImplementedError("constant expression folding isn't yet implemented")
+    branch_cond = operator.truth(node.test)
+    return (False, True) if operator.truth(branch_cond) else (True, False)
+
+
+def simplify_branch(node: ir.IfElse) -> typing.Union[ir.IfElse, list]:
+    unreachable = unreachable_branches(node)
+    if unreachable == (True, False):
+        node = node.else_branch
+    elif unreachable == (False, True):
+        node = node.if_branch
+    else:
+        if not node.if_branch:
+            test = negate_condition(node.test)
+            if_branch, else_branch = node.else_branch, node.if_branch
+            pos = node.pos
+            node = ir.IfElse(test, if_branch, else_branch, pos)
+    return node
+
+
+def contains_break(entry):
+    for stmt in walk_branches(entry):
+        if isinstance(stmt, ir.Break):
+            return True
+    return False
 
 
 @singledispatch
-def is_terminated(node):
-    msg = f"Termination check is not implemented for {type(node)}"
-    raise NotImplementedError(msg)
+def terminates_control_flow(node):
+    msg = f"No method to test whether control flow may pass through node of type {type(node)}"
+    raise TypeError(msg)
 
 
-@is_terminated.register
-def _(node: ir.IfElse):
-    if node.test.is_constant:
-        t = operator.truth(node.test)
-        if t:
-            return is_terminated(node.if_branch)
-        else:
-            return is_terminated(node.else_branch)
-    return is_terminated(node.if_branch) and is_terminated(node.else_branch)
-
-
-@is_terminated.register
+@terminates_control_flow.register
 def _(node: ir.StmtBase):
     return node.is_terminator
 
 
-@is_terminated.register
+@terminates_control_flow.register
 def _(node: list):
-    for stmt in node:
-        if stmt.is_terminator:
-            return True
-        elif stmt.is_conditional_branch:
-            if is_terminated(stmt):
-                return True
-    return False
+    return terminates_control_flow(node[-1]) if node else False
 
 
-def find_unterminated_stmtlist(node):
-    if not isinstance(node, list):
+@terminates_control_flow.register
+def _(node: ir.IfElse):
+    unreachable = unreachable_branches(node)
+    if unreachable == (True, False):
+        return terminates_control_flow(node.else_branch)
+    elif unreachable == (False, True):
+        return terminates_control_flow(node.if_branch)
+    else:
+        return terminates_control_flow(node.if_branch) and terminates_control_flow(node.else_branch)
+
+
+def terminated_branches(node: ir.IfElse) -> typing.Tuple[bool, bool]:
+    unreachable = unreachable_branches(node)
+    if unreachable == (True, False):
+        return True, terminates_control_flow(node.else_branch)
+    elif unreachable == (False, True):
+        return terminates_control_flow(node.if_branch), False
+    else:
+        return terminates_control_flow(node.if_branch), terminates_control_flow(node.else_branch)
+
+
+def find_unterminated_stmtlist(stmt_list):
+    if not isinstance(stmt_list, list):
         raise TypeError("expected a list of statements")
-    if node:
-        if node[-1].is_terminator:
-            return
-        elif node[-1].is_conditional_branch:
-            if_branch = find_unterminated_stmtlist(node[-1].if_branch)
-            else_branch = find_unterminated_stmtlist(node[-1].else_branch)
-            if if_branch is None:
-                if else_branch is None:
-                    return
-                else:
-                    return else_branch
-            elif else_branch is None:
-                return if_branch
-            else:  # ends in a pair of unterminated branches
-                return node
-        else:  # unterminated statement list
-            return node
-    else:  # empty unterminated statement list
-        return node
-
-
-class RemoveUnreachable(TransformBase):
-    """
-    Main point of unreachable code removal.
-    This removes statements that are statically blocked by {Continue, Break, Return}.
-    This also removes identifiable dead branches.
-
-    # Example 1
-
-    if True:
-        ...
-    else:
-        ...  # unreachable, since condition is never False, we can merge the True branch statements into the parent list
-
-    
-    # Example 2
-
-    if condition:
-        ...
-        continue
-    else:
-        continue
-
-    ... # unreachable, since both branches terminate control flow
-
-    """
-
-    def __init__(self):
-        self.loops = []
-
-    def __call__(self, node):
-        if self.loops:
-            raise RuntimeError("Transformer called with existing loops")
-        node = self.visit(node)
-        return node
-
-    @singledispatchmethod
-    def visit(self, node):
-        return super().visit(node)
-
-    @visit.register
-    def _(self, node: ir.IfElse):
-        test = node.test
-        if_branch = node.if_branch
-        else_branch = node.else_branch
-        pos = node.pos
-        if test.is_constant:
-            if test:
-                node = ir.IfElse(test, self.visit(if_branch), [], pos)
-            else:
-                node = ir.IfElse(test, [], self.visit(else_branch), pos)
-        else:
-            node = ir.IfElse(test, self.visit(if_branch), self.visit(else_branch), pos)
-        return node
-
-    @visit.register
-    def _(self, node: ir.ForLoop):
-        self.loops.append(node)
-        node.body = self.visit(node.body)
-        header = self.loops.pop()
-        assert (header is node)
-        return node
-
-    @visit.register
-    def _(self, node: ir.WhileLoop):
-        self.loops.append(node)
-        node.body = self.visit(node.body)
-        header = self.loops.pop()
-        assert (header is node)
-        return node
-
-    @visit.register
-    def _(self, stmts: list):
-        repl = []
-        for s in stmts:
-            s = self.visit(s)
-            repl.append(s)
-            if is_terminated(s):
-                break
-        return repl
-
-
-class BranchCleanup(TransformBase):
-    """
-    Covers removal of now empty ifelse statements
-    and normalizes branch conditions so that if either
-    branch is non-empty, the true branch is non-empty.
-
-
-    """
-
-    @singledispatchmethod
-    def visit(self, node):
-        return super().visit(node)
-
-    @visit.register
-    def _(self, node: ir.Function):
-        body = self.visit(node.body)
-        node = ir.Function(node.name, node.args, body, node.types, node.arrays)
-        return node
-
-    @visit.register
-    def _(self, node: ir.IfElse):
-        if node.test.is_constant:
-            node = self.visit(node.if_branch) if node.test else self.visit(node.else_branch)
-        else:
-            if_branch = self.visit(node.if_branch)
-            else_branch = self.visit(node.else_branch)
-            test = node.test
-            pos = node.pos
-            if if_branch is None:
-                if else_branch is None:
-                    node = None
-                else:
-                    test = negate_condition(test)
-                    node = ir.IfElse(test, else_branch, [], pos)
-            elif else_branch is None:
-                # If both are non-empty and one is terminated, move it to the else branch
-                node = ir.IfElse(test, if_branch, [], pos)
-            elif is_terminated(if_branch) and not is_terminated(else_branch):
-                if else_branch:
-                    test = negate_condition(test)
-                    node = ir.IfElse(test, else_branch, if_branch, pos)
-        return node
-
-    @visit.register
-    def _(self, node: list):
-        repl = []
-        for index, stmt in enumerate(node):
-            stmt = self.visit(stmt)
-            if stmt is not None:
-                if isinstance(stmt, list):
-                    repl.extend(stmt)
-                else:
-                    repl.append(stmt)
-        return repl
+    if stmt_list:
+        last_stmt = stmt_list[-1]
+        if isinstance(last_stmt, ir.IfElse):
+            terminated = terminated_branches(last_stmt)
+            if terminated == (True, True):
+                return TerminatedPath()
+            elif terminated == (True, False):
+                return find_unterminated_path(last_stmt.else_branch)
+            elif terminated == (False, True):
+                return find_unterminated_path(last_stmt.if_branch)
+        elif terminates_control_flow(last_stmt):
+            return TerminatedPath()
+    return stmt_list
 
 
 def get_unused_name(gen=itertools.count()):
     return ir.NameRef(f"tmp_{next(gen)}")
 
 
-def find_unterminated_path(node):
-    for stmt in node:
-        if stmt.is_terminator:
-            return
-        elif stmt.is_conditional_branch:
-            if_branch_result = find_unterminated_path(stmt.if_branch)
-            else_branch_result = find_unterminated_path(stmt.else_branch)
-            if if_branch_result is None and else_branch_result is None:
-                return
+def find_unterminated_path(stmts: list):
+    if len(stmts) == 0:
+        # empty statement list
+        return stmts
+    last_stmt = stmts[-1]
+    if isinstance(last_stmt, ir.IfElse):
+        # Check for reachable branches
+        normalized = simplify_branch(last_stmt)
+        if not isinstance(normalized, ir.IfElse):
+            return find_unterminated_path(normalized)
+        if_path = find_unterminated_path(normalized.if_branch)
+        else_path = find_unterminated_path(normalized.else_branch)
+        if isinstance(if_path, TerminatedPath):
+            return else_path
+        elif isinstance(else_path, TerminatedPath):
+            return if_path
+    elif terminates_control_flow(last_stmt):
+        return TerminatedPath()
+    return stmts
+
+
+def remove_trailing_continues(node: typing.Union[list, ir.IfElse]) -> typing.Union[list, ir.IfElse]:
+    """
+    Remove continues that are the last statement along some execution path without entering
+    nested loops.
+
+    """
+    if isinstance(node, ir.IfElse):
+        true_branch = remove_trailing_continues(node.if_branch)
+        false_branch = remove_trailing_continues(node.else_branch)
+        return ir.IfElse(node.test, true_branch, false_branch, node.pos)
+    elif node:
+        last_stmt = node[-1]
+        if isinstance(last_stmt, ir.Continue):
+            node = node[:-1]
+        elif isinstance(last_stmt, ir.IfElse):
+            last_stmt = remove_trailing_continues(last_stmt)
+            node = node[:-1]
+            node.append(last_stmt)
     return node
 
 
-class RemoveTrailingContinues(TransformBase):
-    """
-    Removes continues that are the last executable 
-    statement in a loop, with respect to any path that contains them
+class RemoveContinues(TransformBase):
 
-    for v in value:
-        ...
-        if cond:
-            continue
-
-    after this pass, we should have
-
-    for v in value:
-        ...
-        if cond:
-
-    
-    The if statement is now redundant and could be removed as well. 
-    
-    """
+    def __call__(self, entry):
+        return self.visit(entry)
 
     @singledispatchmethod
     def visit(self, node):
@@ -246,31 +165,28 @@ class RemoveTrailingContinues(TransformBase):
     def _(self, node: list):
         repl = []
         for stmt in node:
-            if stmt.is_terminator:
-                if not isinstance(stmt, ir.Continue):
-                    repl.append(stmt)
-                break
-            else:
-                repl.append(self.visit(stmt))
+            repl.append(self.visit(stmt))
         return repl
 
     @visit.register
-    def _(self, node: ir.IfElse):
-        test = node.test
-        if_branch = self.visit(node.if_branch)
-        else_branch = self.visit(node.else_branch)
-        pos = node.pos
-        if else_branch and not if_branch:
-            test = negate_condition(test)
-            node = ir.IfElse(test, else_branch, if_branch, pos)
-        else:
-            node = ir.IfElse(test, if_branch, else_branch, pos)
-        return node
+    def _(self, node: ir.ForLoop):
+        repl = self.visit(node.body)
+        repl = remove_trailing_continues(repl)
+        # Fix branches that now look like
+        # if cond:
+        #   blank...
+        # else:
+        #   do_something
+        for index, stmt in enumerate(repl):
+            if isinstance(stmt, ir.IfElse):
+                repl[index] = simplify_branch(stmt)
+        return ir.ForLoop(node.assigns, repl, node.pos)
 
     @visit.register
-    def _(self, node: ir.ForLoop):
-        node.body = self.visit(node.body)
-        return node
+    def _(self, node: ir.WhileLoop):
+        repl = self.visit(node.body)
+        repl = remove_trailing_continues(repl)
+        return ir.WhileLoop(node.test, repl, node.pos)
 
 
 class MergePaths(TransformBase):
@@ -278,31 +194,10 @@ class MergePaths(TransformBase):
 
     At any branch point, corresponding to an if else condition, where one branch is terminated by break, continue,
     or return move any statements that follow the ifelse to the unterminated path.
-    This results in a CFG with fewer stray edges.
 
     This ensures that whenever we conditionally encounter a break, return, or continue within
     a loop, it's encountered as the last statement along that path within the loop.
 
-    Whenever a continue statement is encountered along one branch of a path
-
-    Starting from something of the form:
-
-    if cond:
-        ...
-    else:
-        ...
-        continue
-
-    ... # more statements
-
-
-    We end with something of the form:
-
-    if cond:
-        ...
-        ... # more statements
-    else:
-        continue
 
     """
 
@@ -324,18 +219,20 @@ class MergePaths(TransformBase):
     @visit.register
     def _(self, node: ir.ForLoop):
         self.loops.append(node)
-        target = node.target
-        iterable = node.iterable
+        assigns = node.assigns
         body = self.visit(node.body)
         pos = node.pos
         header = self.loops.pop()
         assert (header is node)
-        return ir.ForLoop(iterable, target, body, pos)
+        return ir.ForLoop(assigns, body, pos)
 
     @visit.register
     def _(self, node: ir.WhileLoop):
-        self.loops.append(node)
         test = node.test
+        if test.constant:
+            if not operator.truth(test):
+                return []
+        self.loops.append(node)
         body = self.visit(node.body)
         pos = node.pos
         header = self.loops.pop()
@@ -343,22 +240,32 @@ class MergePaths(TransformBase):
         return ir.WhileLoop(test, body, pos)
 
     @visit.register
+    def _(self, node: ir.IfElse):
+        node = simplify_branch(node)
+        if isinstance(node, ir.IfElse):
+            if_branch = self.visit(node.if_branch)
+            else_branch = self.visit(node.else_branch)
+            node = ir.IfElse(node.test, if_branch, else_branch, node.pos)
+        return node
+
+    @visit.register
     def _(self, node: list):
         repl = []
-        appendto = repl
+        append_to = repl
         for stmt in node:
             stmt = self.visit(stmt)
-            appendto.append(stmt)
-            if stmt.is_terminator:
-                break
-            elif stmt.is_conditional_branch:
-                if not stmt.empty:
-                    if_branch = find_unterminated_path(stmt.if_branch)
-                    else_branch = find_unterminated_path(stmt.else_branch)
-                    if if_branch == else_branch is None:
+            if isinstance(stmt, list):
+                repl.extend(stmt)
+            else:
+                append_to.append(stmt)
+                if isinstance(stmt, ir.IfElse):
+                    terminated = terminated_branches(stmt)
+                    if terminated == (True, False):
+                        append_to = find_unterminated_path(stmt.else_branch)
+                    elif terminated == (False, True):
+                        append_to = find_unterminated_path(stmt.if_branch)
+                    elif terminated == (True, True):
                         break
-                    elif if_branch is None:
-                        appendto = else_branch
-                    elif else_branch is None:
-                        appendto = if_branch
+                elif terminates_control_flow(stmt):
+                    break
         return repl

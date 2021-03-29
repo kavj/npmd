@@ -251,7 +251,7 @@ def unify_type(types):
 
 
 def is_negative_number(node):
-    if not node.is_constant:
+    if not node.constant:
         return False
     if isinstance(node, (ir.IntNode, ir.FloatNode)):
         return node.value < 0
@@ -371,7 +371,7 @@ class Typer:
         if not isinstance(v, ir.ArrayType):
             return TypedInvalidRef(node, f"Cannot subscript type: {v}")
         ndims = v.ndims
-        if not isinstance(node.slice, ir.SimpleSlice):
+        if not isinstance(node.slice, ir.Slice):
             # assume this is a single index
             # validation should catch invalid cases
             v = ir.ArrayType(ndims - 1, v.dtype)

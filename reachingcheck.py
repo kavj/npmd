@@ -1,7 +1,7 @@
 from functools import singledispatchmethod
 
 import ir
-from visitor import VisitorBase, walk_assignments
+from visitor import VisitorBase
 
 
 class ReachingCheck(VisitorBase):
@@ -25,8 +25,8 @@ class ReachingCheck(VisitorBase):
         self.seen = self.unknowns = self.raw = self.war = self.enclosing = None
         return unknowns, raw, war
 
-    def may_be_unbound(self, value: ir.ObjectBase):
-        if value.is_constant:
+    def may_be_unbound(self, value):
+        if value.constant:
             return False
         if value in self.seen:
             return False
@@ -36,7 +36,7 @@ class ReachingCheck(VisitorBase):
         return True
 
     def mark_reference(self, node, stmt=None):
-        if node.is_expr:
+        if isinstance(node, ir.Expression):
             for e in node.subexprs:
                 self.mark_reference(e, stmt)
         elif self.may_be_unbound(node):
@@ -46,7 +46,7 @@ class ReachingCheck(VisitorBase):
             self.raw.add(node)
 
     def mark_assignment(self, target, stmt):
-        if target.is_expr:
+        if isinstance(target, ir.Expression):
             self.mark_reference(target, stmt)
         else:
             if target in self.seen:
@@ -58,6 +58,13 @@ class ReachingCheck(VisitorBase):
         return super().visit(node)
 
     @visit.register
+    def _(self, node: list):
+        repl = []
+        for stmt in node:
+            repl.append(self.visit(stmt))
+        return repl
+
+    @visit.register
     def _(self, node: ir.Module):
         raise NotImplementedError("Reaching pass is meant to run on a per function basis.")
 
@@ -67,14 +74,19 @@ class ReachingCheck(VisitorBase):
         assert (node is self.entry)
         for arg in node.args:
             self.mark_assignment(arg.name, node)
-        self.visit(node.body)
+        for stmt in node.body:
+            self.visit(stmt)
 
     @visit.register
     def _(self, node: ir.SingleExpr):
         self.mark_reference(node.expr, node)
 
     @visit.register
-    def _(self, node: ir.ObjectBase):
+    def _(self, node: ir.NameRef):
+        self.mark_reference(node)
+
+    @visit.register
+    def _(self, node: ir.Expression):
         self.mark_reference(node)
 
     @visit.register
@@ -83,16 +95,8 @@ class ReachingCheck(VisitorBase):
             self.mark_reference(node.target, node)
             self.mark_reference(node.value, node)
         else:
-            for _, value in walk_assignments(node):
-                self.mark_reference(value, node)
-            for target, value in walk_assignments(node):
-                self.mark_assignment(target, value)
-
-    @visit.register
-    def _(self, node: ir.CascadeAssign):
-        self.mark_reference(node.value, node)
-        for t in node.targets:
-            self.mark_assignment(t, node)
+            self.mark_reference(node.value, node)
+            self.mark_assignment(node.target, node.value)
 
     @visit.register
     def _(self, node: ir.ForLoop):
@@ -100,11 +104,9 @@ class ReachingCheck(VisitorBase):
         self.enclosing.append(seen)
         self.seen = set()
         # mark iterables first
-        for _, iterable in walk_assignments(node):
-            self.mark_reference(iterable, node)
-            # Skip assignments that are assumed to be
-            # unpacking mismatches.
-        for target, iterable in walk_assignments(node):
+        for _, value in node.assigns:
+            self.mark_reference(value)
+        for target, _ in node.assigns:
             self.mark_assignment(target, node)
         self.visit(node.body)
         self.seen = self.enclosing.pop()
@@ -125,12 +127,14 @@ class ReachingCheck(VisitorBase):
         self.visit(node.test)
         seen = self.seen
         self.enclosing.append(seen)
-        seen_if_branch = set()
-        seen_else_branch = set()
-        self.seen = seen_if_branch
+        self.seen = set()
         self.visit(node.if_branch)
-        self.seen = seen_else_branch
+        seen_if = self.seen
+        self.seen = set()
         self.visit(node.else_branch)
-        self.seen = self.enclosing.pop()
+        seen_else = self.seen
+        self.seen = seen
+        seen = self.enclosing.pop()
         assert (seen is self.seen)
-        self.seen.update(seen_if_branch.intersection(seen_else_branch))
+        seen_ifelse = seen_if.intersection(seen_else)
+        self.seen.update(seen_ifelse)

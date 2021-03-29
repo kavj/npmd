@@ -65,7 +65,7 @@ def repl_len(arg):
     Stub to merge len() and .shape
 
     """
-    return ir.Subscript(ir.ShapeRef(arg), ir.IntNode(0))
+    return ir.ShapeRef(arg, ir.IntNode(0))
 
 
 def replace_builtin_call(funcname, args, keywords):
@@ -82,7 +82,7 @@ def replace_builtin_call(funcname, args, keywords):
     elif funcname == "len":
         if len(args) != 1:
             raise ValueError("Incorrect number of arguments")
-        return ir.Subscript(ir.ShapeRef(args[0]), ir.IntNode(0))
+        return ir.ShapeRef(args[0], ir.IntNode(0))
     else:
         expr = ir.Call(funcname, args, ())
     return expr

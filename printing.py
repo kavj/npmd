@@ -3,6 +3,15 @@ from functools import singledispatchmethod
 import ir
 
 
+# Zip and Enumerate aren't really used explicitly elsewhere now
+# so these are just sentinel classes
+
+class Enumerate:
+    def __init__(self, iterables, start):
+        self.iterables = iterables
+        self.start = start
+
+
 class prettystringify:
     """
     The pretty printer is intended as a way to show the state of the IR in a way that resembles a
@@ -14,12 +23,26 @@ class prettystringify:
     def __call__(self, node):
         return self.visit(node)
 
+    def parenthesize_expr(self, node):
+        if isinstance(node, ir.Expression):
+            return f"({self.visit(node)})"
+        else:
+            return self.visit(node)
+
     @singledispatchmethod
     def visit(self, node):
         # handle non-parametric statements
         if isinstance(node, ir.EllipsisNode):
             return "..."
         return node.__class__.__name__.lower()
+
+    @visit.register
+    def _(self, node: Enumerate):
+        if node.start != ir.IntNode(0):
+            s = f"enumerate({self.visit(node.iterables)}, {self.visit(node.start)})"
+        else:
+            s = f"enumerate({self.visit(node.iterables)})"
+        return s
 
     @visit.register
     def _(self, node: ir.Argument):
@@ -48,24 +71,15 @@ class prettystringify:
             return f"{target} = {value}"
 
     @visit.register
-    def _(self, node: ir.CascadeAssign):
-        s = " = ".join(self.visit(t) for t in node.targets)
-        v = self.visit(node.value)
-        return f"{s} = {v}"
-
-    @visit.register
-    def _(self, node: ir.CompareOp):
-        s = f"{self.visit(node.operands[0])}"
-        for operand, op in zip(node.operands[1:], node.ops):
-            s += f" {op} {self.visit(operand)}"
-        return s
-
-    @visit.register
     def _(self, node: ir.IfExpr):
         s = f"{self.visit(node.if_expr)} if {self.visit(node.test)}"
         if node.else_expr is not None:
             s += f" {self.visit(node.else_expr)}"
         return s
+
+    @visit.register
+    def _(self, node: ir.BoolNode):
+        return str(node.value)
 
     @visit.register
     def _(self, node: ir.IntNode):
@@ -85,12 +99,23 @@ class prettystringify:
 
     @visit.register
     def _(self, node: ir.BinOp):
-        return f"{self.visit(node.left)} {node.op} {self.visit(node.right)}"
+        left = self.parenthesize_expr(node.left)
+        right = self.parenthesize_expr(node.right)
+        return f"{left} {node.op} {right}"
 
     @visit.register
     def _(self, node: ir.BoolOp):
         j = f" {node.op} "
-        s = j.join(self.visit(operand) for operand in node.operands)
+        s = j.join(self.parenthesize_expr(operand) for operand in node.operands)
+        if node.op == "and" and len(node.operands) > 1:
+            if all(isinstance(operand, ir.BinOp) for operand in node.operands):
+                if all(operand.op in ir.compareops for operand in node.operands):
+                    if all(first.right == sec.left for (first, sec) in zip(node.operands[:-1], node.operands[1:])):
+                        # We have a chained comparison, like a < b < c
+                        s = f"{self.parenthesize_expr(node.operands[0].left)} " \
+                            f"{node.operands[0].op} {self.parenthesize_expr(node.operands[0].right)}"
+                        for expr in node.operands[1:]:
+                            s += f" {expr.op} {self.parenthesize_expr(expr.right)}"
         return s
 
     @visit.register
@@ -135,8 +160,10 @@ class prettystringify:
 
     @visit.register
     def _(self, node: ir.Counter):
-        assert (node.stop is not None)
-        if node.start == ir.IntNode(0):
+        if node.stop is None:
+            # rarely used, just marking enumerate without full context
+            s = "enumerate()"
+        elif node.start == ir.IntNode(0):
             if node.step == ir.IntNode(1):
                 s = f"range({self.visit(node.stop)})"
             else:
@@ -182,6 +209,32 @@ class prettystringify:
     @visit.register
     def _(self, node: ir.SingleExpr):
         return self.visit(node.expr)
+
+
+def rebuild_enumerate_nesting(assigns):
+    zipped_targets = []
+    zipped_values = []
+    for index, (target, value) in enumerate(assigns):
+        value = value
+        if isinstance(value, ir.Counter) and value.stop is None and value.step == ir.IntNode(1):
+            # hit enumerate, wrap remainder
+            t, v = rebuild_enumerate_nesting(assigns[index + 1:])
+            zipped_values.append(Enumerate(v, value.start))
+            zipped_targets.append(target)
+            zipped_targets.append(t)
+            break
+        else:
+            zipped_targets.append(target)
+            zipped_values.append(value)
+    if len(zipped_targets) == 1:
+        zipped_targets = zipped_targets[0]
+    else:
+        zipped_targets = ir.Tuple(tuple(zipped_targets))
+    if len(zipped_values) == 1:
+        zipped_values = zipped_values[0]
+    else:
+        zipped_values = ir.Zip(tuple(zipped_values))
+    return zipped_targets, zipped_values
 
 
 class printtree:
@@ -253,14 +306,27 @@ class printtree:
         self.unindent()
 
     @visit.register
+    def _(self, node: list):
+        for stmt in node:
+            self.visit(stmt)
+
+    @visit.register
     def _(self, node: ir.ForLoop):
-        tar = self.format(node.target)
-        it = self.format(node.iterable)
+        assigns = node.assigns
+        if len(assigns) == 1:
+            tar, it = assigns[0]
+            tar = self.format(tar)
+            it = self.format(it)
+        else:
+            # These are typically generated as flat assignments to whatever degree is possible,
+            # but we still have to rebuild enumerate constructs
+            tar, it = rebuild_enumerate_nesting(assigns)
+            tar = self.format(tar)
+            it = self.format(it)
         print(f"{self.leading}for {tar} in {it}:")
         self.indent()
         if node.body:
-            for stmt in node.body:
-                self.visit(stmt)
+            self.visit(node.body)
         else:
             print(f"{self.leading}pass")
         self.unindent()
@@ -271,8 +337,7 @@ class printtree:
         print(f"{self.leading}while {test}:")
         self.indent()
         if node.body:
-            for stmt in node.body:
-                self.visit(stmt)
+            self.visit(node.body)
         else:
             print(f"{self.leading}pass")
         self.unindent()
@@ -281,14 +346,13 @@ class printtree:
     def _(self, node: ir.IfElse):
         test = self.format(node.test)
         print(f"{self.leading}if {test}:")
-        if node.empty_if:
+        if not node.if_branch:
             self.indent()
             print(f"{self.leading}pass")
             self.unindent()
         else:
             self.indent()
-            for stmt in node.if_branch:
-                self.visit(stmt)
+            self.visit(node.if_branch)
             self.unindent()
         if node.else_branch:
             possible_elif = node.else_branch[0]
@@ -297,8 +361,7 @@ class printtree:
             else:
                 print(f"{self.leading}else:")
                 self.indent()
-                for stmt in node.else_branch:
-                    self.visit(stmt)
+                self.visit(node.else_branch)
                 self.unindent()
 
     @visit.register

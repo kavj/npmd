@@ -1,11 +1,8 @@
 import builtins
 import keyword
 from dataclasses import dataclass
-from functools import singledispatchmethod
 
 import ir
-from loopanalysis import LoopHeaderChecker
-from visitor import VisitorBase, walk_assignments
 
 
 @dataclass
@@ -95,64 +92,9 @@ def find_unsafe_exprs(exprs):
     for e in exprs:
         if isinstance(e, ir.BinOp):
             if e.op in ("/", "//", "/=", "//="):
-                if e.right.is_constant:
+                if e.right.constant:
                     pass
                     # if e.right.value == 0:
                     #    unsafe.add(e)
     return unsafe
 
-
-class UntypedChecker(VisitorBase):
-
-    def __call__(self, entry):
-        self.errors = []
-        self.visit(entry)
-
-    @singledispatchmethod
-    def visit(self, node):
-        super().visit(node)
-
-    @visit.register
-    def _(self, node: ir.Assign):
-        is_tuple_target = isinstance(node, ir.Tuple)
-        for target, iterable in walk_assignments(node):
-            if is_tuple_target and not isinstance(target, ir.NameRef):
-                msg = "Only unpacking to variable name targets is supported."
-                pos = node.pos
-                self.errors.append(ErrorValue(msg, pos))
-            elif shadows_builtin_name(target):
-                msg = "Builtin names and reserved keywords may not be assignment targets."
-                pos = node.pos
-                self.errors.append(ErrorValue(msg, pos))
-
-    @visit.register
-    def _(self, node: ir.CascadeAssign):
-        value = node.value
-        for target in node.targets:
-            if not isinstance(target, ir.NameRef):
-                msg = ""
-                pos = node.pos
-            elif shadows_builtin_name(target):
-                msg = "Builtin names and reserved keywords may not be assignment targets."
-                pos = node.pos
-                self.errors.append(ErrorValue(msg, pos))
-
-    @visit.register
-    def _(self, node: ir.ForLoop):
-        checker = LoopHeaderChecker(node)
-        msg = ""
-        if checker.tuple_valued_targets:
-            msg = "For loop iterables must be fully unpacked"
-        elif checker.unpacking_errors:
-            msg = "Not enough values to unpack"
-        elif checker.complex_assignments:
-            msg = "Only name-valued targets are supported as unpacking targets."
-        if msg != "":
-            self.errors.append(ErrorValue(msg, node.pos))
-
-    @visit.register
-    def _(self, node: ir.Function):
-        dupes = find_duplicate_args(node)
-        if dupes:
-            pos = ir.Position(0, 0, 0, 0)
-            self.errors.append(ErrorValue("duplicate arguments in function", pos))

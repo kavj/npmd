@@ -46,11 +46,6 @@ class ArrayRefRepl(TransformBase):
         self.visit(node.value)
 
     @visit.register
-    def _(self, node: ir.CascadeAssign):
-        node.value = self.visit(node.value)
-        node.targets = [self.visit(t) for t in node.targets]
-
-    @visit.register
     def _(self, node):
         pass
 

@@ -156,7 +156,7 @@ def LenBuilder(mapping):
     Stub to merge len() and .shape
 
     """
-    return ir.Subscript(ir.ShapeRef(mapping["obj"]), ir.IntNode(0))
+    return ir.ShapeRef(mapping["obj"], ir.IntNode(0))
 
 
 def RangeBuilder(node: ir.Call):
@@ -197,6 +197,7 @@ builders = {"enumerate": CallSpecialize(name="enumerate",
                                        repl=ReversedBuilder,
                                        defaults={},
                                        allows_keywords=False),
+
             "iter": CallSpecialize(name="iter",
                                    args=("iterable",),
                                    repl=IterBuilder,

@@ -1,13 +1,10 @@
 import ast
-import itertools
 import numbers
 import sys
 import typing
 
 import ir
 from replace_call import replace_builtin_call
-
-# from normalizecalls import replace_builtin_call
 
 binaryops = {ast.Add: "+",
              ast.Sub: "-",
@@ -58,6 +55,63 @@ compareops = {ast.Eq: "==",
 
 supported_builtins = {"iter", "range", "enumerate", "zip", "all", "any", "max", "min", "abs", "pow",
                       "round", "reversed"}
+
+
+def serialize_iterated_assignments(target, iterable) -> typing.List[typing.Tuple[ir.Targetable, ir.ValueRef]]:
+    """
+    Serializes (target, iterable) pairs by unpacking order
+    """
+    if (isinstance(target, ir.Tuple)
+            and isinstance(iterable, ir.Zip)
+            and len(target.elements) == len(iterable.elements)):
+
+        queued = [zip(target.elements, iterable.elements)]
+        assigns = []
+
+        while queued:
+            try:
+                t, v = next(queued[-1])
+                if (isinstance(t, ir.Tuple)
+                        and isinstance(v, ir.Zip)
+                        and len(t.elements) == len(v.elements)):
+                    queued.append(zip(t.elements, v.elements))
+                else:
+                    assigns.append((t, v))
+            except StopIteration:
+                queued.pop()
+    else:
+        assigns = [(target, iterable)]
+
+    return assigns
+
+
+def serialize_assignments(node: ir.Assign):
+    """
+    This is here to break things like
+
+    (a,b,c,d) = (b,d,c,a)
+
+    into a series of assignments, since these are somewhat rare, and explicitly lowering them
+    to shuffles is not worthwhile here.
+
+    """
+    if not isinstance(node.target, ir.Tuple) or not isinstance(node.value, ir.Tuple) \
+            or len(node.target.elements) != len(node.value.elements):
+        return [node]
+
+    queued = [zip(node.target.elements, node.value.elements)]
+    assigns = []
+    while queued:
+        try:
+            t, v = next(queued[-1])
+            if (isinstance(node.target, ir.Tuple)
+                    and isinstance(node.value, ir.Tuple)
+                    and len(node.target.elements) == len(node.value.elements)):
+                queued.append(zip(t.elements, v.elements))
+            else:
+                assigns.append(ir.Assign(t, v, node.pos))
+        except StopIteration:
+            queued.pop()
 
 
 def is_ellipsis(node):
@@ -145,7 +199,7 @@ class AnnotationCollector(ast.NodeVisitor):
         lower = self.visit(node.lower) if node.lower is not None else None
         upper = self.visit(node.upper) if node.upper is not None else None
         step = self.visit(node.step) if node.step is not None else None
-        return ir.SimpleSlice(lower, upper, step)
+        return ir.Slice(lower, upper, step)
 
     def generic_visit(self, node):
         raise NotImplementedError(f"{type(node)} is not supported here for type annotations.")
@@ -161,6 +215,16 @@ class TreeBuilder(ast.NodeVisitor):
         assert (not self.loops)
         return func, self.nested_scopes
 
+    def visit_body(self, stmts: list):
+        body = []
+        for stmt in stmts:
+            ir_stmt = self.visit(stmt)
+            if isinstance(ir_stmt, list):
+                body.extend(ir_stmt)
+            else:
+                body.append(ir_stmt)
+        return body
+
     def visit_Attribute(self, node: ast.Attribute) -> ir.AttributeRef:
         value = self.visit(node.value)
         if node.attr == "shape":
@@ -171,8 +235,7 @@ class TreeBuilder(ast.NodeVisitor):
             value = ir.AttributeRef(value, (node.attr,))
         return value
 
-    def visit_Constant(self, node: ast.Constant) -> typing.Union[ir.IntNode, ir.FloatNode, ir.BoolNode,
-                                                                 ir.StringNode]:
+    def visit_Constant(self, node: ast.Constant) -> ir.Constant:
         if is_ellipsis(node.value):
             raise TypeError
         if isinstance(node.value, str):
@@ -204,7 +267,7 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_UnaryOp(self, node: ast.UnaryOp) -> ir.UnaryOp:
         op = unaryops.get(type(node.op))
         operand = self.visit(node.operand)
-        return ir.UnaryOp(operand, op)
+        return ir.UnaryOp(operand, op) if op != "+" else operand
 
     def visit_BinOp(self, node: ast.BinOp) -> ir.BinOp:
         op = binaryops.get(type(node.op))
@@ -217,12 +280,23 @@ class TreeBuilder(ast.NodeVisitor):
         operands = tuple(self.visit(value) for value in node.values)
         return ir.BoolOp(operands, op)
 
-    def visit_Compare(self, node: ast.Compare) -> ir.CompareOp:
-        ops = tuple(compareops[type(op)] for op in node.ops)
-        operands = tuple(self.visit(v) for v in itertools.chain((node.left,), node.comparators))
-        return ir.CompareOp(operands, ops)
+    def visit_Compare(self, node: ast.Compare) -> typing.Union[ir.BinOp, ir.BoolOp]:
+        left = self.visit(node.left)
+        right = self.visit(node.comparators[0])
+        op = compareops[type(node.ops[0])]
+        initial_compare = ir.BinOp(left, right, op)
+        if len(node.ops) == 1:
+            return initial_compare
+        compares = [initial_compare]
+        for index, ast_op in enumerate(node.ops[1:], 1):
+            # expressions are immutable, so we can safely reuse them
+            left = right
+            right = self.visit(node.comparators[index])
+            op = compareops[type(ast_op)]
+            compares.append(ir.BinOp(left, right, op))
+        return ir.BoolOp(tuple(compares), "and")
 
-    def visit_Call(self, node: ast.Call) -> typing.Union[ir.Expression, ir.ObjectBase]:
+    def visit_Call(self, node: ast.Call) -> typing.Union[ir.Expression, ir.NameRef]:
         if isinstance(node.func, ast.Name):
             funcname = node.func.id
         else:
@@ -246,17 +320,18 @@ class TreeBuilder(ast.NodeVisitor):
         value = ir.Subscript(target, s)
         return value
 
-    def visit_Index(self, node: ast.Index) -> typing.Union[ir.Expression, ir.ObjectBase]:
+    def visit_Index(self, node: ast.Index) -> typing.Union[ir.Expression, ir.NameRef, ir.Constant]:
         return self.visit(node.value)
 
-    def visit_Slice(self, node: ast.Slice) -> ir.SimpleSlice:
+    def visit_Slice(self, node: ast.Slice) -> ir.Slice:
         lower = self.visit(node.lower) if node.lower is not None else None
         upper = self.visit(node.upper) if node.upper is not None else None
         step = self.visit(node.step) if node.step is not None else None
-        return ir.SimpleSlice(lower, upper, step)
+        return ir.Slice(lower, upper, step)
 
     def visit_ExtSlice(self, node: ast.ExtSlice) -> ir.Unsupported:
-        # This takes too much effort to support at the moment.
+        # This is probably never going to be supported, because it requires inlining
+        # a large number of calculations in ways that may sometimes hamper performance.
         return ir.Unsupported("ast.ExtSlice", msg="Extended slices are currently unsupported. This supports single"
                                                   "slices per dimension")
 
@@ -267,16 +342,16 @@ class TreeBuilder(ast.NodeVisitor):
         pos = extract_positional_info(node)
         return ir.Assign(target, ir.BinOp(target, operand, op), pos)
 
-    def visit_Assign(self, node: ast.Assign) -> ir.Assign:
-        # Keeping this simple, since I would prefer not to have to undo parts of it later
+    def visit_Assign(self, node: ast.Assign) -> typing.List[ir.Assign]:
         value = self.visit(node.value)
         targets = [self.visit(t) for t in node.targets]
         pos = extract_positional_info(node)
-        if len(targets) == 1:
-            stmt = ir.Assign(targets[0], value, pos)
-        else:
-            stmt = ir.CascadeAssign(targets, value, pos)
-        return stmt
+        # lower a = b = c into a = c; b = c
+        # (Notice Python uses cascading rules that differ from C, which would serialize
+        #  a = b = c into b = c; a = b;)
+        assigns = [ir.Assign(target, value, pos) for target in targets]
+        # Serialize the case of (a,b,c,d) = (e,f,g,h)
+        return assigns
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> ir.Assign:
         target = self.visit(node.target)
@@ -293,24 +368,25 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_If(self, node: ast.If) -> ir.IfElse:
         pos = extract_positional_info(node)
         compare = self.visit(node.test)
-        on_true = [self.visit(stmt) for stmt in node.body]
-        on_false = [self.visit(stmt) for stmt in node.orelse]
+        on_true = self.visit_body(node.body)
+        on_false = self.visit_body(node.orelse)
         ifstat = ir.IfElse(compare, on_true, on_false, pos)
         return ifstat
 
     def visit_With(self, node: ast.With):
         pass
 
-    def visit_For(self, node: ast.For):
+    def visit_For(self, node: ast.For) -> ir.ForLoop:
         if node.orelse:
             raise ValueError("or else clause not supported for for statements")
         it = self.visit(node.iter)
         target = self.visit(node.target)
         pos = extract_positional_info(node)
+        assigns = serialize_iterated_assignments(target, it)
         self.loops.append(node)
-        body = [self.visit(stmt) for stmt in node.body]
+        body = self.visit_body(node.body)
         self.loops.pop()
-        return ir.ForLoop(it, target, body, pos)
+        return ir.ForLoop(assigns, body, pos)
 
     def visit_While(self, node: ast.While) -> ir.WhileLoop:
         if node.orelse:
@@ -318,7 +394,7 @@ class TreeBuilder(ast.NodeVisitor):
         compare = self.visit(node.test)
         pos = extract_positional_info(node)
         self.loops.append(node)
-        body = [self.visit(stmt) for stmt in node.body]
+        body = self.visit_body(node.body)
         self.loops.pop()
         return ir.WhileLoop(compare, body, pos)
 
@@ -345,9 +421,7 @@ class TreeBuilder(ast.NodeVisitor):
         if node is self.entry:
             name = node.name
             args = build_func_params(node)
-            body = []
-            for stmt in node.body:
-                body.append(self.visit(stmt))
+            body = self.visit_body(node.body)
             return ir.Function(name, args, body, [], [])
         else:
             self.nested_scopes.append(node)
@@ -375,7 +449,7 @@ def build_module_ir(src):
     # Type info helps annotate things that
     # are not reasonable to type via annotations
     # It's not optimal, but this isn't necessarily
-    # meant to be user facinng.
+    # meant to be user facing.
     tree = ast.parse(src)
     tree = ast.fix_missing_locations(tree)
 

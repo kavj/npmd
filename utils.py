@@ -1,7 +1,7 @@
 import operator
 
 import ir
-from visitor import walk_multiple
+from visitor import walk_expressions
 
 
 # anything that doesn't fit elsewhere at the moment
@@ -19,7 +19,7 @@ def unpack_expressions(exprs):
     params = {}
     subexprs = set()
     expr_set = set()
-    for expr in walk_multiple(exprs):
+    for expr in walk_expressions(exprs):
         if not expr.is_expr:
             continue
         expr_set.add(expr)
@@ -58,19 +58,20 @@ def map_permute(lhs: ir.Tuple, rhs: ir.Tuple):
 
 def negate_condition(node):
     repl = ir.UnaryOp(node, "not")
-    if node.is_constant:
+    if node.constant:
         repl = ir.BoolNode(operator.invert(operator.truth(node)))
     elif isinstance(node, ir.UnaryOp):
         if node.op == "not":
             repl = node.operand
-    elif isinstance(node, ir.CompareOp):
+    elif isinstance(node, ir.BinOp):
         # Only fold cases with a single operator that has a negated form.
         # Otherwise we have to worry about edge cases involving unordered operands.
-        if len(node.operands) == 2 and len(node.ops) == 1:
-            if node.ops[0] == "==":
-                repl = ir.CompareOp(node.operands, ("!=",))
-            elif node.ops[0] == "!=":
-                repl = ir.CompareOp(node.operands, ("==",))
+        if node.op == "==":
+            repl = ir.BinOp(node.left, node.right, "!=")
+        elif node.op == "!=":
+            repl = ir.BinOp(node.left, node.right, "==")
+    else:
+        repl = ir.UnaryOp(node, "not")
     return repl
 
 
