@@ -2,6 +2,7 @@ from ASTTransform import build_module_ir
 from Canonicalize import RemoveContinues, MergePaths
 from folding import fold_constant_expressions
 from reachingcheck import ReachingCheck
+from lowering import loop_lower
 
 
 def run_tree_pipeline(pth):
@@ -11,6 +12,7 @@ def run_tree_pipeline(pth):
     remove_continues = RemoveContinues()
     reaching_check = ReachingCheck()
     merge_paths = MergePaths()
+    ll = loop_lower("lindex")
     mod = build_module_ir(r)
     repl = []
     for func in mod.funcs:
@@ -19,7 +21,7 @@ def run_tree_pipeline(pth):
         func = merge_paths(func)
         func = fold_constant_expressions(func)
         func = remove_continues(func)
-
+        func = ll(func)
         repl.append(func)
 
     mod.funcs = repl

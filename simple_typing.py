@@ -4,7 +4,6 @@ from functools import singledispatchmethod
 import numpy as np
 
 import ir
-from visitor import AssignCollector
 
 # initially supported, untyped ints and other ranges require additional
 # work, and they are less commonly used
@@ -350,7 +349,8 @@ class Typer:
     def infer_type(self, node):
         if node in self.typed:
             return self.typed.get(node).type
-        elif isinstance(node, (ir.BoolOp, ir.BoolNode, ir.CompareOp)):
+        # needs a revisit since the removal of compare op
+        elif isinstance(node, (ir.BoolOp, ir.BoolNode, ir.BinOp)):
             self.typed[node] = MonoTypeVar(bool)
             return bool
         elif isinstance(node, ir.IntNode):
@@ -472,8 +472,10 @@ class Typer:
 
 
 def compute_variable_types(entry, input_types):
-    ac = AssignCollector()
-    assigns, truth_tested, return_values = ac(entry)
-    typer = Typer(input_types)
-    for assign in assigns:
-        typer.register(assign)
+    pass
+    # removed
+    # ac = AssignCollector()
+    # assigns, truth_tested, return_values = ac(entry)
+    # typer = Typer(input_types)
+    # for assign in assigns:
+    #    typer.register(assign)

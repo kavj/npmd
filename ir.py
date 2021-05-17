@@ -57,7 +57,6 @@ class Expression:
 
     """
 
-    constant: clscond = False
     subscripted: clscond = False
 
     @property
@@ -76,7 +75,7 @@ class Expression:
         """
 
         seen = set()
-        queued: typing.List[typing.Tuple[typing.Optional[Expression], typing.Generator]] = [(None, node.subexprs)]
+        queued: typing.List[typing.Tuple[typing.Optional[Expression], typing.Generator]] = [(None, self.subexprs)]
 
         while queued:
             try:
@@ -202,8 +201,8 @@ class ArrayRef:
     constant: clscond = False
     subscripted: clscond = False
 
-    def __post_init__(self):
-        assert (self.dims is None or (self.ndims == len(self.dims)))
+    # def __post_init__(self):
+    #    assert (self.dims is None or (self.ndims == len(self.dims)))
 
     @property
     def is_view(self):
@@ -219,13 +218,22 @@ class ArrayRef:
 
 
 @dataclass(frozen=True)
-class ShapeRef:
-    array: ArrayRef
+class ShapeRef(Expression):
+    array: typing.Any
     dim: typing.Optional[ValueRef] = None
 
     @property
     def ndims(self):
         return self.array.ndims
+
+    @property
+    def subexprs(self):
+        yield self.array
+        yield self.dim
+
+    # not quite constant since it can refer to single definitions
+    # which appear in loops
+    constant: typing.ClassVar[bool] = False
 
 
 @dataclass
@@ -276,6 +284,11 @@ class Slice(Expression):
 class Unsupported(Expression):
     name: str
     msg: str
+
+    # dummy class, just treats expression as a protocol
+    @property
+    def subexprs(self):
+        raise StopIteration
 
 
 @dataclass(frozen=True)
@@ -395,6 +408,19 @@ class Call(Expression):
 
 
 @dataclass(frozen=True)
+class MinConstraint(Expression):
+    """
+    used primarily for lowering for loops with zip and enumerate
+    """
+    constraints: set
+
+    @property
+    def subexprs(self):
+        for c in self.constraints:
+            yield c
+
+
+@dataclass(frozen=True)
 class Counter(Expression):
     """
     This is used to distinguish either an unpacked counter of an enumerate
@@ -482,7 +508,7 @@ class Zip(Expression):
     Enumerate(object) is handled by Zip(Counter, object).
     """
 
-    elements: typing.Tuple[ObjectBase, ...]
+    elements: typing.Tuple[ValueRef, ...]
 
     def __post_init__(self):
         assert (isinstance(self.elements, tuple))
@@ -491,6 +517,7 @@ class Zip(Expression):
     def subexprs(self):
         for e in self.elements:
             yield e
+
 
 @dataclass
 class Assign(StmtBase):
@@ -544,7 +571,7 @@ class ForLoop(StmtBase, Walkable):
 
     def walk_assignments(self):
         for target, value in self.assigns:
-            yield assign
+            yield target, value
 
 
 @dataclass

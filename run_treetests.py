@@ -6,7 +6,7 @@ from printing import printtree
 tests = ("unpack_with_subscripts.py", "test_nested.py", "test_cascade_if.py", "test_dead.py", "test_dead2.py",
          "test_while.py", "test_cascade_assign.py", "test_for.py", "test_forif.py", "test_while.py", "test_retval.py",
          "test_pass.py", "test_conditional_terminated.py", "test_bothterminated.py", "test_chained_comparisons.py",
-         "test_folding.py", "test_fold_unreachable.py")
+         "test_folding.py", "test_fold_unreachable.py", "test_normalize_return_flow.py")
 
 P = printtree()
 

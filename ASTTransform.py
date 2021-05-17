@@ -248,11 +248,12 @@ class TreeBuilder(ast.NodeVisitor):
             raise TypeError("unrecognized constant type")
 
     def visit_Tuple(self, node: ast.Tuple) -> ir.Tuple:
-        version = sys.version_info
-        if (3, 9) <= (version.major, version.minor):
+        # refactor seems to have gone wrong here..
+        #version = sys.version_info
+        #if (3, 9) <= (version.major, version.minor):
             # 3.9 removes ext_slice in favor of a tuple of slices
             # need to check a lot of cases for this            
-            raise NotImplementedError
+        #    raise NotImplementedError
         elts = tuple(self.visit(elt) for elt in node.elts)
         return ir.Tuple(elts)
 

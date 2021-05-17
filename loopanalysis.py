@@ -1,5 +1,3 @@
-import typing
-
 import ir
 from reachingcheck import ReachingCheck
 from visitor import walk_branches
@@ -11,58 +9,106 @@ All utilities used
 
 # function utilities
 
-def collect_function_exits(func):
+
+def starts_from_zero(ir_counter):
+    return ir_counter.start == ir.IntNode(0)
+
+
+def has_unit_step(ir_counter):
+    return ir_counter.step == ir.IntNode(1)
+
+
+def suitable_loop_counters(header: ir.ForLoop, clobbers, liveouts):
+    counters = set()
+    for target, value in header.walk_assignments():
+        if isinstance(value, ir.Counter):
+            if target not in clobbers and target not in liveouts:
+                if starts_from_zero(value) and has_unit_step(value):
+                    counters.add(target)
+    return counters
+
+
+def find_loop_counter_bound(header, array_refs, loop_index):
+    # find expression for counter limits
+    # This needs a way to deal with subscripted array references
+    ub = set()
+    for target, value in header.walk_assignments():
+        if target is loop_index:
+            continue
+        # any array refs should eventually get a dimref here
+        if isinstance(value, ir.Counter):
+            # avoid intermingling numeric and symbolic components, since we can evaluate
+            # min integer at compile time
+            if isinstance(value.stop, ir.IntNode):
+                ub.add(value.stop.value)
+            elif value.stop is not None:
+                ub.add(value.stop)
+        else:
+            ub.add(value)
+    # need to collapse any numeric results, then return a min expression
+    return ub
+
+
+def lower_loop_iterator(header, clobbers, liveouts, array_refs):
     """
-    Find places the function may exit.
-    This checks for exit by dropping out of scope, explicit return statements, dynamic buffer allocation,
-    and bounds checking.
+    convert a for or while loop construct into something suitable for widening
+    don't worry about widening or sinking here.
+    live out variables must be identified before this since any temporary generated variables are not live out
+    since python semantics determine that a range variable is assigned as it enters the body rather than crossing
+    the latch, any live out enumerate/range arguments must be moved to the beginning of the loop body with new
+    loop counters generated here.
 
     """
-    pass
-
-
-def find_varying_statements(entry):
-    """
-    Find statements that may vary in their output across a packet.
-
-    """
-
-    pass
+    # assume post ordering already handled
+    counters = suitable_loop_counters(header, clobbers, liveouts)
+    if counters:
+        loop_index = counters.pop()
+    else:
+        loop_index = ""  # insert get unused name here
+    move_to_body = []
+    for target, value in header.walk_assignments():
+        if target is loop_index:
+            continue
+        if isinstance(value, ir.Counter):
+            if starts_from_zero(value):
+                # fix positions later or make a pass that does it
+                if has_unit_step(value):
+                    stmt = ir.Assign(target, loop_index, header.pos)
+                else:
+                    stmt = ir.Assign(target, ir.BinOp(value.step, loop_index, "*"), header.pos)
+            else:
+                if has_unit_step(value):
+                    stmt = ir.Assign(target, ir.BinOp(loop_index, value.start, "+"), header.pos)
+                else:
+                    stmt = ir.Assign(target, ir.BinOp(ir.BinOp(value.step, loop_index, "*"), value.start, "+"),
+                                     header.pos)
+            move_to_body.append(stmt)
+        else:
+            # track dim change
+            # if this yields a scalar, then generate scalar assignment
+            ref = array_refs.get(value)
+            if ref is None:
+                raise ValueError
+            elif ref.ndims == 1:
+                # if ndims(base) > 1, this should get a multidimensional subscript with respect to base ref
+                move_to_body.append(ir.Assign(target, ir.Subscript(ref, loop_index), header.pos))
+            else:
+                # no explicit assignment, just check that this doesn't escape
+                # need real error logging
+                if target in liveouts:
+                    raise ValueError
+                if target in array_refs:
+                    existing = array_refs[target]
+                    assert (existing.ndims == ref.ndims - 1 and existing.dtype == ref.dtype)
+                assert (target not in array_refs)
+                array_refs[target] = ir.ArrayType(ref.ndims - 1, ref.dtype)
+    repl_body = move_to_body.extend(header.body)
+    return ir.ForLoop([(loop_index, ir.Counter(ir.IntNode(0), loop_index, ir.IntNode(1)),)], repl_body, header.pos)
+    # Check each loop header for suitable loop counters, otherwise generate them
+    # These are suitable to become the counter when the value cannot escape and it is not clobbered.
 
 
 # Loop utilities
-
-
-def find_simple_inductions(header):
-    pass
-
-
-def get_counters(header):
-    """
-    Get any counting iterables and their targets, defined here.
-    When simplifying loops to range form, this helps determine if any existing
-    counter may be reused.
-
-    """
-    pass
-
-
-def build_scevs(assign):
-    """
-    Build a scalar evolution for the case where a single assignment
-    to an index variable is used within the loop of interest.
-
-    """
-
-    # post order loop nest
-    # For each loop from inner to outer
-    # find counters
-    # find additional clobbers
-    # mark step and depth.
-    # patch outer loop evols into inner
-
-    pass
-
 
 def post_order_loops(header):
     """
@@ -106,6 +152,10 @@ def is_divergent_loop(header):
                 if isinstance(stmt, ir.Return):
                     return True
     return False
+
+
+def is_innermost_loop(header):
+    return not any(stmt.is_loop_entry for stmt in walk_branches(header))
 
 
 def get_directly_nested_loops(header):
@@ -201,44 +251,6 @@ def find_loopnest_conflicts(assign, entry):
     pass
 
 
-def collect_iterator_offsets(it):
-    """
-    Map iterables to their starting offsets, with respect to their current view.
-    This is used to determine if offsets can be folded into range.start.
-
-    """
-
-    pass
-
-
-def get_iterator_stride(it):
-    """
-    unit step, non-unit constant step, symbolic step,
-
-    """
-    pass
-
-
-def get_iterable_length(it):
-    """
-    This is used to define a canonical iterable length expression for an iterable nest.
-    Since it's deterministic, we can check whether such an expression is already bound to some variable
-    name, using its hash.
-
-    """
-    pass
-
-
-def find_unpacking_mismatches(node):
-    """
-    Old version is invalid now due to more aggressive serialization.
-    """
-
-    errors = []
-
-    pass
-
-
 def get_named_iterables(header):
     """
     Get any named array references that are iterated over here.
@@ -275,77 +287,6 @@ def find_live_across_latch(header):
 # Assignment utilities
 
 # Array handling utilities
-
-
-def flatten_index_expr(sub):
-    """
-    Turn a subscripted expression, which may dereference a strided or sliced array into an expression depicting
-    a flat index offset.
-
-    """
-    pass
-
-
-def may_be_negative(sub):
-    """
-    It's not yet clear what info will be needed here, even though we're only focusing on simple cases.
-
-    Find cases where we cannot guarantee that the reaching value of an index is strictly positive.
-
-    These are mostly cases where slicing contains subtraction or addition of possibly negative values.
-    It may be worth warning. I haven't yet decided on exact default behavior. Wrapping doesn't mix with simd.
-
-    """
-    pass
-
-
-def collect_subscripts():
-    """
-    Gathered to try to prove away the need for bounds checking within a loop.
-
-    """
-    pass
-
-
-def find_augmenting(assigns):
-    """
-    Find anything that is clobbered by name assignment or subscripted assignment, starting from entry.
-
-    """
-
-    pass
-
-
-def get_array_index_name(view):
-    """
-    Construct an abi specific unversioned name for this array dimension and stride pattern.
-
-    It should be array name with _i, _j, _k, etc appended, starting from i.
-    In cases of conflicts, these can be versioned, so we might have _i0, _j0, _k0.
-
-    This is readable enough and doesn't greatly extend name lengths.
-
-    """
-    pass
-
-
-class BoundsCheck:
-    """
-    A stub class for an instrumentation node, indicating a bounds check barrier.
-    This ia an IR node to hide its implementation and lowering from other analyses.
-    It isn't an external call, because it may divert control flow and I don't want to deal with noreturn functions.
-
-    This should be added prior to lowering iterators, so as not to add unnecessary instrumentation.
-
-    """
-
-    upper_constr: typing.Union[ir.NameRef, ir.IntNode]
-    lower_constr: typing.Union[ir.NameRef, ir.IntNode]
-    failure_msg: str
-
-
-def insert_bounds_check():
-    pass
 
 
 def get_subscript_exprs(entry, enter_loops=False):
@@ -398,18 +339,3 @@ def filter_by_target(assigns):
         else:
             # by named should go here
             pass
-
-
-# find single assignments should proceed using results
-# of filter by target
-
-
-def find_implem_name_conflicts(ctx):
-    """
-    There will be abi specific details for index naming and some other things.
-    We'll need to check for cases where these conflict with names found in the original symbol
-    table.
-
-    """
-
-    pass

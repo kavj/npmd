@@ -103,7 +103,7 @@ def simplify_pow(base, coeff, in_place=False):
     return ir.BinOp(base, coeff, "**=" if in_place else "**")
 
 
-def simplify_binop(left, right, op, left_sym=None, right_sym=None):
+def simplify_binop(left, right, op):
     if right.constant:
         if left.constant:
             const_folder = binops.get(op)
@@ -121,23 +121,6 @@ def simplify_binop(left, right, op, left_sym=None, right_sym=None):
             if op in ("**", "*=") and right.value in (0, 1, 2, 0.5):
                 return simplify_pow(left, right, op == "**=")
         return ir.BinOp(left, right, op)
-
-
-def simplify_boolop(operands, op):
-    early_return_on = False if op == "and" else True
-    repl_operands = []
-    for operand in operands:
-        if isinstance(operand, ir.Constant):
-            if operator.truth(operand) == early_return_on:
-                return ir.BoolNode(early_return_on)
-        else:
-            repl_operands.append(operand)
-    if not repl_operands:
-        # all operands had constant truth tests and none satisfied
-        # early return criteria
-        return ir.BoolNode(True) if op == "and" else ir.BoolNode(False)
-    else:
-        return ir.BoolOp(tuple(repl_operands), op)
 
 
 class FoldExpressions(TransformBase):
@@ -183,11 +166,22 @@ class FoldExpressions(TransformBase):
         for operand in node.operands:
             repl = self.visit(operand)
             operands.append(repl)
-        as_const = [self.as_constant(operand) for operand in operands]
-        simplified = simplify_boolop(as_const, node.op)
-        # Unlike other expressions, boolean expressions don't suffer from a pile up of constants
-        # since they can either be ignored or propagated.
-        return simplified
+        early_return_on = False if node.op == "and" else True
+        repl_operands = []
+        for operand in node.operands:
+            operand = self.visit(operand)
+            operand = self.as_constant(operand)
+            if isinstance(operand, ir.Constant):
+                if operator.truth(operand) == early_return_on:
+                    return ir.BoolNode(early_return_on)
+                else:
+                    repl_operands.append(operand)
+        if not repl_operands:
+            # all operands had constant truth tests and none satisfied
+            # early return criteria
+            return ir.BoolNode(True) if node.op == "and" else ir.BoolNode(False)
+        else:
+            return ir.BoolOp(tuple(repl_operands), node.op)
 
     @visit.register
     def _(self, node: ir.Call):
@@ -213,22 +207,25 @@ class FoldExpressions(TransformBase):
             # check if range
             if node.stop is None:
                 raise RuntimeError("Cannot reverse enumerate")
-            start = self.visit(node.stop)
-            stop = self.visit(node.start)
-            step = self.visit(node.step)
-            # wrap in unary negate and immediately try to fold
-            step = ir.UnaryOp(step, "-")
-            step = self.visit(step)
-            const_start = self.as_constant(start)
-            const_stop = self.as_constant(stop)
-            const_step = self.as_constant(step)
-            if not isinstance(start, ir.NameRef):
-                start = const_start
-            if not isinstance(stop, ir.NameRef):
-                stop = const_stop
-            if not isinstance(step, ir.NameRef):
-                step = const_step
+            repl = []
+            for key, s in (node.start, node.stop, node.step):
+                s = self.visit(s)
+                const_s = self.as_constant(s)
+                if not isinstance(s, ir.NameRef):
+                    s = const_s
+                repl.append(s)
+            # swap start and stop
+            stop, start, step = repl
+
+            # negate step
+            if isinstance(step, ir.IntNode):
+                step = ir.IntNode(operator.neg(step.value))
+            else:
+                # try to fold negation
+                step = self.visit(ir.UnaryOp(step, "-"))
+
             return ir.Counter(start, stop, step)
+
         return ir.Reversed(self.visit(node.iterable))
 
     @visit.register

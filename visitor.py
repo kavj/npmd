@@ -112,8 +112,10 @@ class VisitorBase:
 
     @visit.register
     def _(self, node: ir.ForLoop):
-        for assign in node.assigns:
-            self.visit(assign)
+        for _, iterable in node.assigns:
+            self.visit(iterable)
+        for target, _ in node.assigns:
+            self.visit(target)
         self.visit(node.body)
 
     @visit.register

@@ -90,6 +90,11 @@ class ReachingCheck(VisitorBase):
         self.mark_reference(node)
 
     @visit.register
+    def _(self, node: ir.ShapeRef):
+        # not set up as an expression right now... instantiate so it stops coming up as unbound
+        return
+
+    @visit.register
     def _(self, node: ir.Assign):
         if node.in_place:
             self.mark_reference(node.target, node)
