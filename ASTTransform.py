@@ -423,7 +423,7 @@ class TreeBuilder(ast.NodeVisitor):
             name = node.name
             args = build_func_params(node)
             body = self.visit_body(node.body)
-            return ir.Function(name, args, body, [], [])
+            return ir.Function(name, args, body)
         else:
             self.nested_scopes.append(node)
 

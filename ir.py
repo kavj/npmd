@@ -7,6 +7,7 @@ import typing
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
 inplace_ops = frozenset({"+=", "-=", "*=", "/=", "//=", "%=", "**=", "<<=", ">>=", "|=", "^=", "&=", "@="})
 unaryops = frozenset({"+", "-", "~", "not"})
@@ -155,7 +156,62 @@ class NameRef:
     subscripted: clscond = False
 
 
-ValueRef = typing.TypeVar('ValueRef', Expression, Constant, NameRef, AttributeRef)
+@dataclass(frozen=True)
+class ArrayRef:
+    # This is necessary to easily describe the type of an otherwise anonymous subscript,
+    # particularly in cases of subscripts that are not bound to explicit array references.
+    name: NameRef
+    dtype: type
+    ndims: int
+    dims: typing.Optional[typing.Tuple[IntNode,...]]
+    constant: clscond = False
+    subscripted: clscond = False
+
+    def __post_init__(self):
+        assert(self.dims is None or len(self.dims) == self.ndims)
+
+
+@dataclass(frozen=True)
+class ViewRef:
+    derived_from: typing.Union[ArrayRef, ViewRef]
+    subscript: Subscript
+    transposed: bool = False
+
+    @property
+    def base(self):
+        d = self.derived_from
+        seen = {self}
+        while isinstance(d, ViewRef):
+            if d in seen:
+                raise ValueError("contains view cycles")
+            seen.add(d)
+            d = d.derived_from
+        return d
+
+    # these could be cached_property
+
+    @property
+    def dtype(self):
+        return self.base.dtype
+
+    @property
+    def ndims(self):
+        d = self.derived_from
+        seen = {self}
+        reduce_by = 1 if isinstance(self.subscript, (NameRef, IntNode)) else 0
+        while isinstance(d, ViewRef):
+            if d in seen:
+                raise ValueError("contains view cycles")
+            # this may need work
+            if isinstance(d.subscript, (NameRef, IntNode)):
+                reduce_by += 1
+            seen.add(d)
+            d = d.derived_from
+        # negative if the array is over-subscripted
+        return d.ndims - reduce_by
+
+
+ValueRef = typing.TypeVar('ValueRef', Expression, Constant, NameRef, AttributeRef, ArrayRef, ViewRef)
 
 
 @dataclass(frozen=True)
@@ -182,42 +238,6 @@ class Argument:
 
 
 @dataclass(frozen=True)
-class ArrayType:
-    # This is necessary to easily describe the type of an otherwise anonymous subscript,
-    # particularly in cases of subscripts that are not bound to explicit array references.
-    ndims: int
-    dtype: type
-    constant: clscond = False
-    subscripted: clscond = False
-
-
-@dataclass(frozen=True)
-class ArrayRef:
-    atype: ArrayType
-    base: typing.Optional[typing.Union[NameRef, Subscript]] = None
-    # assume contiguous unless specified otherwise due to striding in
-    # array creation expression or input typing parameters
-    is_contiguous: bool = True
-    constant: clscond = False
-    subscripted: clscond = False
-
-    # def __post_init__(self):
-    #    assert (self.dims is None or (self.ndims == len(self.dims)))
-
-    @property
-    def is_view(self):
-        return self.base is not None
-
-    @property
-    def ndims(self):
-        return self.atype.ndims
-
-    @property
-    def dtype(self):
-        return self.atype.dtype
-
-
-@dataclass(frozen=True)
 class ShapeRef(Expression):
     array: typing.Any
     dim: typing.Optional[ValueRef] = None
@@ -241,8 +261,6 @@ class Function(Walkable):
     name: str
     args: typing.List[Argument]
     body: typing.List[Statement]
-    types: typing.List[type]
-    arrays: typing.List[ArrayRef]
 
     def walk(self):
         for n in self.body:

@@ -143,3 +143,107 @@ class ReachingCheck(VisitorBase):
         assert (seen is self.seen)
         seen_ifelse = seen_if.intersection(seen_else)
         self.seen.update(seen_ifelse)
+
+
+class VarScopeCheck(VisitorBase):
+    """
+    Checks what variable declarations may be move inside loops.
+    This also allows for slightly more aggressive optimization of loop indices.
+
+    The assumption is that if a variable is used, it's bound along all paths reaching that point.
+    This condition is checked by ReachingCheck. That allows for a simpler check here.
+
+    """
+
+    def __call__(self, entry):
+        self.entry = entry
+        self.closed = []
+        self.enclosing = set()
+        self.bound = set()
+        self.visit(entry)
+        assert not self.enclosing
+        self.closed.append((self.entry, self.bound))
+        closed = self.closed
+        self.enclosing = self.closed = self.bound = self.entry = None
+        return closed
+
+    def unseen(self, node):
+        return node not in self.bound and node not in self.enclosing
+
+    @singledispatchmethod
+    def visit(self, node):
+        return super().visit(node)
+
+    @visit.register
+    def _(self, node: ir.Assign):
+        if not isinstance(node.target, ir.Expression) and self.unseen(node.target):
+            self.bound.add(node.target)
+
+    @visit.register
+    def _(self, node: ir.Function):
+        if node is not self.entry:
+            # no support for nested scopes
+            return
+        self.bound.update(node.args)
+        self.visit(node.body)
+
+    @visit.register
+    def _(self, node: ir.ForLoop):
+        prev_bound = self.bound
+        if node is not self.entry:
+            self.enclosing.update(self.bound)
+            self.bound = set()
+        for target, _ in node.walk_assignments():
+            if not isinstance(target, ir.Expression) and self.unseen(target):
+                self.bound.add(target)
+        self.visit(node.body)
+        if node is not self.entry:
+            self.closed.append((node, self.bound))
+            self.enclosing.difference_update(self.bound)
+            self.bound = prev_bound
+
+    @visit.register
+    def _(self, node: ir.WhileLoop):
+        prev_bound = self.bound
+        if node is not self.entry:
+            self.enclosing.update(self.bound)
+            self.bound = set()
+        self.visit(node.body)
+        if node is not self.entry:
+            self.closed.append((node, self.bound))
+            self.enclosing.difference_update(self.bound)
+            self.bound = prev_bound
+
+
+class UsedCheck(VisitorBase):
+    """
+    Tests what variables are actually read for purposes other than inplace updates
+    """
+
+    def __call__(self, entry):
+        self.used = set()
+        self.visit(entry)
+        used = self.used
+        self.used = None
+        return used
+
+    @singledispatchmethod
+    def visit(self, node):
+        return super().visit(node)
+
+    @visit.register
+    def _(self, node: ir.Assign):
+        if isinstance(node.target, ir.Expression):
+            self.visit(node.target)
+        self.visit(node.value)
+
+    @visit.register
+    def _(self, node: ir.NameRef):
+        self.used.add(node)
+
+    @visit.register
+    def _(self, node: ir.ForLoop):
+        for target, value in node.walk_assignments():
+            if isinstance(target, ir.Expression):
+                self.used.add(target)
+            self.used.add(value)

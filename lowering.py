@@ -226,8 +226,10 @@ class VarInfoVisitor(visitor.VisitorBase):
                 self.visit(node.value)
 
 
-def find_valid_loop_counter(header: ir.ForLoop, info: typing.Dict[ir.NameRef, VarInfo]):
+def find_valid_loop_counter(header: ir.ForLoop, info: typing.Dict[ir.NameRef, VarInfo], no_escape):
     for target, iterable in header.walk_assignments():
+        if target not in no_escape:
+            continue
         if isinstance(iterable, ir.Counter):
             vi = info[target]
             if (iterable.start == ir.IntNode(0)
@@ -276,8 +278,8 @@ def lower_iterator_for_loop(header: ir.ForLoop, loop_index: ir.NameRef):
     return ir.ForLoop(assigns, body, header.pos)
 
 
-class loop_lower(visitor.TransformBase):
-
+class loop_lowering(visitor.TransformBase):
+    # Todo: use loop declared loop index where possible
     def make_index_name(self):
         return ir.NameRef(f"{self.prefix}_{next(self.counter)}")
 

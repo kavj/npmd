@@ -172,10 +172,8 @@ class TransformBase:
     def _(self, node: ir.Function):
         name = node.name
         repl = self.visit(node.body)
-        types = node.types
-        arrays = node.arrays
         # compute exact arrays in a later pass
-        return ir.Function(name, node.args, repl, types, arrays)
+        return ir.Function(name, node.args, repl)
 
     @visit.register
     def _(self, node: ir.Assign):
