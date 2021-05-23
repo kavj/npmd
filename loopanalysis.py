@@ -8,75 +8,31 @@ All utilities used
 
 # function utilities
 
-def get_loop_constraints(node: ir.ForLoop):
-    array_constraints = set()
-    scalar_constraints = set()
+def constraint_variables(node: ir.ForLoop):
+    iterable_constraints = set()
+    range_constraints = set()
     for _, iterable in node.walk_assignments():
         if isinstance(iterable, ir.Counter):
             if iterable.stop is not None:
                 #  keep step since we may not know sign
-                scalar_constraints.add((iterable.stop, iterable.step))
+                range_constraints.add(iterable)
         else:
-            array_constraints.add(iterable)
-    return array_constraints, scalar_constraints
+            iterable_constraints.add(iterable)
+    return iterable_constraints, range_constraints
 
 
-# info was typing.Dict[ir.NameRef, VarInfo]
-def find_valid_loop_counter(header: ir.ForLoop, info, no_escape):
-    for target, iterable in header.walk_assignments():
-        if target not in no_escape:
-            continue
-        if isinstance(iterable, ir.Counter):
-            vi = info[target]
-            if (iterable.start == ir.IntNode(0)
-                    and iterable.step == ir.IntNode(1)
-                    and vi.min_dim_constraint == 0
-                    and not vi.written
-                    and not vi.augmented):
-                return target
-
-
-def find_nested_loops(stmts):
+def find_nested(stmts):
     nested = []
     for stmt in stmts:
         if isinstance(stmt, ir.IfElse):
-            nested.extend(find_nested_loops(stmt.if_branch))
-            nested.extend(find_nested_loops(stmt.else_branch))
+            nested.extend(find_nested(stmt.if_branch))
+            nested.extend(find_nested(stmt.else_branch))
         elif isinstance(stmt, (ir.ForLoop, ir.WhileLoop)):
             nested.append(stmt)
     return nested
 
 
-def generate_header_assignments(header: ir.ForLoop, loop_index):
-    """
-    Generate a sequence of assignments that should move to the loop body.
-    If any target is to be reused as a loop index, we skip its explicit loop body assignment,
-    eg. don't generate an assignment of the form "i = i"
-
-    """
-    assigns = []
-
-    # ignore pos for now, this would need to update line number and generate new positional info
-    # it really needs a visitor to do this properly though.
-    current_pos = header.pos
-
-    for target, iterable in header.walk_assignments():
-        if isinstance(iterable, ir.Counter):
-            # for simplicity, make new loop index by default
-            # This requires far fewer checks..
-            expr = loop_index
-            if iterable.step != ir.IntNode(1):
-                expr = ir.BinOp(iterable.step, expr, "*")
-            if iterable.start != ir.IntNode(0):
-                expr = ir.BinOp(expr, iterable.start, "+")
-            assigns.append(ir.Assign(target, expr, current_pos))
-        else:
-            assigns.append(ir.Assign(target, ir.Subscript(iterable, loop_index), current_pos))
-
-    return assigns
-
-
-def generate_loop_assignments(header, loop_index):
+def generate_header_assignments(header, loop_index):
     assigns = []
     for target, iterable in header.walk_assignments():
         if target is loop_index:
@@ -99,9 +55,23 @@ def generate_loop_assignments(header, loop_index):
     return assigns
 
 
-# Loop utilities
+# Any of these that don't escape the loop body and aren't clobbered inside it
+# can be set as loop index.
+def normalized_counters(header):
+    options = set()
+    for target, iterable in header.walk_assignments():
+        if (isinstance(iterable, ir.Counter)
+                and iterable.start == ir.IntNode(0)
+                and iterable.step == ir.IntNode(1)):
+            options.add(target)
+        elif target in options:
+            # something that isn't a normalized counter
+            # replaces a normalized counter
+            options.discard(target)
+    return options
 
-def post_order_loops(header):
+
+def post_ordering(header):
     """
     Returns a sequence of loop headers for the nest enclosed by header, in post order.
     This could be a generator if we can guarantee a lack of modifications.
@@ -123,36 +93,19 @@ def post_order_loops(header):
     return ordered
 
 
-def is_divergent_loop(header):
+def exits_from_body(body):
     """
-    Check whether the current loop is divergent.
-    A divergent loop has a break statement at this level or a return statement at this level
-    or within any nested loop.
+    Checks whether break or return is found in this statement list, entering ifelse branches
+    but not nested loops.
     """
-    # Post order loop headers
-    # If any contain a return statement, that and enclosing are divergent
-    # If the loop contains break, just that loop is divergent.
-
-    for loop in post_order_loops(header):
-        if loop is header:
-            for stmt in loop.walk():
-                if isinstance(stmt, (ir.Continue, ir.Break, ir.Return)):
-                    return True
-        else:
-            for stmt in loop.walk():
-                if isinstance(stmt, ir.Return):
-                    return True
+    for stmt in body:
+        if isinstance(stmt, (ir.Break, ir.Return)):
+            return True
+        elif isinstance(stmt, ir.IfElse):
+            if exits_from_body(stmt.if_branch) or exits_from_body(stmt.else_branch):
+                return True
     return False
 
 
-def is_innermost_loop(header):
+def is_innermost(header):
     return not any(stmt.is_loop_entry for stmt in walk_branches(header))
-
-
-def get_directly_nested_loops(header):
-    """
-    Return any loop headers ordered by appearance, which appear within this loop body,
-    excluding further nesting levels.
-    """
-
-    return [stmt for stmt in walk_branches(header) if stmt.is_loop_entry]

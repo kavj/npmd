@@ -6,7 +6,7 @@ import operator
 import typing
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-
+from functools import cached_property
 
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
 inplace_ops = frozenset({"+=", "-=", "*=", "/=", "//=", "%=", "**=", "<<=", ">>=", "|=", "^=", "&=", "@="})
@@ -163,12 +163,16 @@ class ArrayRef:
     name: NameRef
     dtype: type
     ndims: int
-    dims: typing.Optional[typing.Tuple[IntNode,...]]
+    dims: typing.Optional[typing.Tuple[IntNode, ...]]
     constant: clscond = False
     subscripted: clscond = False
 
     def __post_init__(self):
-        assert(self.dims is None or len(self.dims) == self.ndims)
+        assert (self.dims is None or len(self.dims) == self.ndims)
+
+    @property
+    def base(self):
+        return self
 
 
 @dataclass(frozen=True)
@@ -177,7 +181,7 @@ class ViewRef:
     subscript: Subscript
     transposed: bool = False
 
-    @property
+    @cached_property
     def base(self):
         d = self.derived_from
         seen = {self}
@@ -190,11 +194,11 @@ class ViewRef:
 
     # these could be cached_property
 
-    @property
+    @cached_property
     def dtype(self):
         return self.base.dtype
 
-    @property
+    @cached_property
     def ndims(self):
         d = self.derived_from
         seen = {self}
@@ -209,6 +213,10 @@ class ViewRef:
             d = d.derived_from
         # negative if the array is over-subscripted
         return d.ndims - reduce_by
+
+    @cached_property
+    def name(self):
+        return self.base.name
 
 
 ValueRef = typing.TypeVar('ValueRef', Expression, Constant, NameRef, AttributeRef, ArrayRef, ViewRef)
@@ -360,11 +368,11 @@ class BinOp(Expression):
         yield self.left
         yield self.right
 
-    @property
+    @cached_property
     def is_compare_op(self):
         return self.op in compareops
 
-    @property
+    @cached_property
     def in_place(self):
         return self.op in inplace_ops
 

@@ -47,15 +47,15 @@ def contained_writes(entry):
 
     """
     # check separately writes on true branch, writes on false branch
-    writes_var = set()
-    writes_expr = set()
+    written_vars = set()
+    written_exprs = set()
     for stmt in entry:
         if isinstance(stmt, ir.Assign):
             if isinstance(stmt.target, ir.NameRef):
-                writes_var.add(stmt.target)
+                written_vars.add(stmt.target)
             else:
-                writes_expr.add(stmt.target)
-    return writes_var, writes_expr
+                written_exprs.add(stmt.target)
+    return written_vars, written_exprs
 
 
 def predicated_writes(body, varying):
