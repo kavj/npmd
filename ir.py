@@ -236,16 +236,6 @@ class Subscript(Expression):
 
 
 @dataclass(frozen=True)
-class Argument:
-    name: NameRef
-    annot: str = None
-    commt: str = None
-    defaultvalue: typing.Any = None
-    constant: clscond = False
-    subscripted: clscond = False
-
-
-@dataclass(frozen=True)
 class ShapeRef(Expression):
     array: typing.Any
     dim: typing.Optional[ValueRef] = None
@@ -267,7 +257,7 @@ class ShapeRef(Expression):
 @dataclass
 class Function(Walkable):
     name: str
-    args: typing.List[Argument]
+    args: typing.List[NameRef]
     body: typing.List[Statement]
 
     def walk(self):

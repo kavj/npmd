@@ -249,10 +249,10 @@ class TreeBuilder(ast.NodeVisitor):
 
     def visit_Tuple(self, node: ast.Tuple) -> ir.Tuple:
         # refactor seems to have gone wrong here..
-        #version = sys.version_info
-        #if (3, 9) <= (version.major, version.minor):
-            # 3.9 removes ext_slice in favor of a tuple of slices
-            # need to check a lot of cases for this            
+        # version = sys.version_info
+        # if (3, 9) <= (version.major, version.minor):
+        # 3.9 removes ext_slice in favor of a tuple of slices
+        # need to check a lot of cases for this
         #    raise NotImplementedError
         elts = tuple(self.visit(elt) for elt in node.elts)
         return ir.Tuple(elts)
@@ -418,12 +418,12 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ir.Function:
         # can't check just self.blocks, since we automatically 
         # instantiate entry and exit
-
         if node is self.entry:
             name = node.name
-            args = build_func_params(node)
+            # Todo: warn about unsupported argument features
+            params = [ir.NameRef(arg.arg) for arg in node.args.args]
             body = self.visit_body(node.body)
-            return ir.Function(name, args, body)
+            return ir.Function(name, params, body)
         else:
             self.nested_scopes.append(node)
 

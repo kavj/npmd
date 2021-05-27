@@ -45,15 +45,6 @@ class prettystringify:
         return s
 
     @visit.register
-    def _(self, node: ir.Argument):
-        s = node.name.name
-        if node.annot is not None:
-            s += f": {self.visit(node.annot)}"
-        if node.defaultvalue is not None:
-            s += f"={self.visit(node.defaultvalue)}"
-        return s
-
-    @visit.register
     def _(self, node: ir.AttributeRef):
         return self.visit(node.value)
 

@@ -1,11 +1,7 @@
-
-
-
-
-def test_n(n,m,p):
+def test_n(n, m, p):
     for i in range(n):
         for j in range(m):
-            print(i,j)
+            print(i, j)
             for k in range(p):
                 if p < k:
                     print(p)

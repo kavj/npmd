@@ -1,5 +1,7 @@
 import ir
+from reachingcheck import ReachingCheck
 from visitor import walk_branches
+
 
 """
 All utilities used
@@ -65,32 +67,26 @@ def normalized_counters(header):
                 and iterable.step == ir.IntNode(1)):
             options.add(target)
         elif target in options:
-            # something that isn't a normalized counter
-            # replaces a normalized counter
+            # targets with multiple header assignments are not
+            # considered normalized
             options.discard(target)
     return options
 
 
 def post_ordering(header):
     """
-    Returns a sequence of loop headers for the nest enclosed by header, in post order.
-    This could be a generator if we can guarantee a lack of modifications.
+    returns post ordering of a loop nest
+    consecutive loops at the same nesting level appear as nested sequences
     """
-
-    walkers = [(header, walk_branches(header))]
-    ordered = []
-
-    while walkers:
-        try:
-            stmt = next(walkers[-1][1])
-            if stmt.is_loop_entry:
-                walkers.append((stmt, walk_branches(stmt)))
-                ordered.append(stmt)
-        except StopIteration:
-            loop, _ = walkers.pop()
-            ordered.append(loop)
-
-    return ordered
+    nested = find_nested(header.body)
+    nested_count = len(nested)
+    if nested_count == 0:
+        nested = [header]
+    elif nested_count == 1:
+        nested.append(header)
+    else:
+        nested = [nested, header]
+    return nested
 
 
 def exits_from_body(body):
@@ -109,3 +105,54 @@ def exits_from_body(body):
 
 def is_innermost(header):
     return not any(stmt.is_loop_entry for stmt in walk_branches(header))
+
+
+def contained_writes(entry):
+    """
+    return (writes_normal, writes_subscript)
+
+    This way we can determine if it's legal to optimize to identity
+
+    This is useful for a lot of things. For example, we might have a uniform assignment
+    in a varying branch, which as a result still requires some kind of predication
+
+    """
+    # check separately writes on true branch, writes on false branch
+    written_vars = set()
+    written_exprs = set()
+    for stmt in entry:
+        if isinstance(stmt, ir.Assign):
+            if isinstance(stmt.target, ir.NameRef):
+                written_vars.add(stmt.target)
+            else:
+                written_exprs.add(stmt.target)
+    return written_vars, written_exprs
+
+
+def find_nested_loop_escapes(header):
+    """
+    This is a rough check as to whether anything could leak. Reaching check will only not declare anything
+    bound in an outer loop due to an assignment in an inner one, so it's safe to use here.
+    If something isn't declared prior to the loop and isn't marked as escaping, we can move the declaration
+    inside, which also means potentially reusing enumerate variables as loop
+
+    This isn't completely exact. For example, multiple inner loops at a given nesting level may induce false positives.
+
+    """
+    rc = ReachingCheck()
+    post_ordered = post_ordering(header)
+    writes, _ = contained_writes(post_ordered[0])
+    escapees = []
+    writes = []
+    w, _ = contained_writes(post_ordered[0])
+    writes.append(w)
+    cumulative_writes = w.copy()
+    for loop_header in post_ordered[1:]:
+        # find uses that may precede assignment
+        maybe_live_on_entry = rc(loop_header)
+        # this captures anything that may be read before written in this scope but not globally
+        # global checks for unboundedness take place early, thus this is probably good enough
+        escapees.append(maybe_live_on_entry.intersection(cumulative_writes))
+        w, _ = contained_writes(loop_header)
+        cumulative_writes.update(w)
+    return post_ordered, escapees, writes

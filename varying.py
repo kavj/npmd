@@ -74,7 +74,7 @@ class varying_check(visitor.VisitorBase):
     def __call__(self, entry, uniform_args, uniform_len_args):
         assert isinstance(entry, ir.Function)
         self.varies = {v for v in entry.args if v not in uniform_args}
-        self.uniform = uniform_args
+        self.uniform = uniform_args.copy()
         self.uniform_len_args = uniform_len_args
         self.used_by = set()
         self.visit(entry)
@@ -87,16 +87,21 @@ class varying_check(visitor.VisitorBase):
         super().visit(node)
 
     @visit.register
+    def _(self, node: ir.Constant):
+        self.uniform.add(node)
+
+    @visit.register
     def _(self, node: ir.Expression):
         for subexpr in node.subexprs:
             self.visit(subexpr)
-            if subexpr in self.varies:
-                self.varies.add(node)
+        if all(subexpr in self.uniform for subexpr in node.subexprs):
+            self.uniform.add(node)
+        else:
+            self.varies.add(node)
 
     @visit.register
     def _(self, node: ir.ForLoop):
         for target, iterable in node.assigns:
-            self.visit(iterable)
-            if iterable in self.varies:
+            if iterable not in self.uniform:
                 self.varies.add(target)
-            self.visit(target)
+        self.visit(node.body)

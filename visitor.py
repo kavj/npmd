@@ -95,6 +95,14 @@ class VisitorBase:
             self.visit(stmt)
 
     @visit.register
+    def _(self, node: ir.NameRef):
+        pass
+
+    @visit.register
+    def _(self, node: ir.Constant):
+        pass
+
+    @visit.register
     def _(self, node: ir.Module):
         for func in node.funcs:
             self.visit(func)
@@ -256,10 +264,6 @@ class TransformBase:
         op = node.op
         repl = ir.BoolOp(operands, op)
         return repl
-
-    @visit.register
-    def _(self, node: ir.Argument):
-        return node
 
     @visit.register
     def _(self, node: ir.NameRef):
