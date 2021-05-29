@@ -125,24 +125,6 @@ def is_ellipsis(node):
     return False
 
 
-def build_func_params(node: ast.FunctionDef):
-    typer = AnnotationCollector()
-    params = []
-    default_value_count = len(node.args.defaults)
-    arg_count = len(node.args.args)
-    for i in range(arg_count):
-        arg = node.args.args[arg_count - i - 1]
-        if i < default_value_count:
-            dv = node.args.defaults[default_value_count - i - 1]
-        else:
-            dv = None
-        annot = typer(arg.annotation) if arg.annotation else None
-        commt = typer(arg.type_comment) if arg.type_comment else None
-        params.append(ir.Argument(ir.NameRef(arg.arg), annot, commt, dv))
-    params.reverse()
-    return params
-
-
 def extract_positional_info(node):
     return ir.Position(line_begin=node.lineno,
                        line_end=node.end_lineno,
@@ -358,9 +340,9 @@ class TreeBuilder(ast.NodeVisitor):
         target = self.visit(node.target)
         value = self.visit(node.value)
         pos = extract_positional_info(node)
-        # This should be parsed here later on.
-        annot = node.annotation
-        return ir.Assign(target, value, pos, annot)
+        # We ignore these, because they don't scale well
+        # based on parametric constraints
+        return ir.Assign(target, value, pos)
 
     def visit_Pass(self, node: ast.Pass) -> ir.Pass:
         pos = extract_positional_info(node)
