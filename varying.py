@@ -70,17 +70,30 @@ class used_by_check(visitor.VisitorBase):
 
 
 class varying_check(visitor.VisitorBase):
+    # We only support varying arrays with uniform length at this point,
+    # since this covers multi-dimensional arrays without predication
+    # and sliding windows with attenuated edges.
 
-    def __call__(self, entry, uniform_args, uniform_len_args):
+    def __call__(self, entry, uniform_args):
         assert isinstance(entry, ir.Function)
         self.varies = {v for v in entry.args if v not in uniform_args}
         self.uniform = uniform_args.copy()
-        self.uniform_len_args = uniform_len_args
+        self.conflicts = set()
         self.used_by = set()
         self.visit(entry)
         varies = self.varies
-        self.varies = self.uniform = self.uniform_len_args = None
+        self.varies = self.uniform = self.conflicts = None
         return varies
+
+    def is_varying(self, node):
+        if isinstance(node, ir.NameRef):
+            return node in self.varies
+        elif isinstance(node, ir.Expression):
+            if node in self.varies:
+                return True
+            return any(subexpr in self.varies for subexpr in node.post_order_walk())
+        else:
+            raise TypeError
 
     @singledispatchmethod
     def visit(self, node):
@@ -91,13 +104,16 @@ class varying_check(visitor.VisitorBase):
         self.uniform.add(node)
 
     @visit.register
-    def _(self, node: ir.Expression):
-        for subexpr in node.subexprs:
-            self.visit(subexpr)
-        if all(subexpr in self.uniform for subexpr in node.subexprs):
-            self.uniform.add(node)
-        else:
-            self.varies.add(node)
+    def _(self, node: ir.Assign):
+        if self.is_varying(node.value):
+            self.varies.add(node.target)
+            # maybe rephrase, but this handles cases where
+            # a uniform input may be assigned a varying value,
+            # This means during lowering, we need to generate a
+            # copy of the original input, which can handle
+            # varying assignments
+            if node.target in self.uniform:
+                self.conflicts.add(node.target)
 
     @visit.register
     def _(self, node: ir.ForLoop):

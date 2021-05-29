@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from functools import cached_property
 
+
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
 inplace_ops = frozenset({"+=", "-=", "*=", "/=", "//=", "%=", "**=", "<<=", ">>=", "|=", "^=", "&=", "@="})
 unaryops = frozenset({"+", "-", "~", "not"})
@@ -37,10 +38,7 @@ class Walkable(ABC):
 
 
 class StmtBase:
-    is_loop_entry: clscond = False  # ForLoop, WhileLoop
-    is_terminator: clscond = False  # Continue, Break, Return
-    # statments that overwrite variable names or array indices within scope
-    clobbers: clscond = False  # Assign, ForLoop
+    pos = None
 
 
 Statement = typing.TypeVar('Statement', bound=StmtBase)
@@ -57,8 +55,6 @@ class Expression:
     assignment alters a data structure as opposed to simply binding a value to a name.
 
     """
-
-    subscripted: clscond = False
 
     @property
     @abstractmethod
@@ -101,7 +97,6 @@ class Constant:
 
     """
     constant: clscond = True
-    subscripted: clscond = False
     value: typing.ClassVar = None
 
     def __bool__(self):
@@ -153,19 +148,14 @@ class NameRef:
     # variable name ref
     name: typing.Union[str, AttributeRef]
     constant: clscond = False
-    subscripted: clscond = False
 
 
 @dataclass(frozen=True)
 class ArrayRef:
-    # This is necessary to easily describe the type of an otherwise anonymous subscript,
-    # particularly in cases of subscripts that are not bound to explicit array references.
-    name: NameRef
     dtype: type
     ndims: int
     dims: typing.Optional[typing.Tuple[IntNode, ...]]
     constant: clscond = False
-    subscripted: clscond = False
 
     def __post_init__(self):
         assert (self.dims is None or len(self.dims) == self.ndims)
@@ -178,7 +168,7 @@ class ArrayRef:
 @dataclass(frozen=True)
 class ViewRef:
     derived_from: typing.Union[ArrayRef, ViewRef]
-    subscript: Subscript
+    subscript: typing.Union[IntNode, Slice, NameRef, BinOp, UnaryOp]
     transposed: bool = False
 
     @cached_property
@@ -227,7 +217,6 @@ class Subscript(Expression):
     value: ValueRef
     slice: ValueRef
     constant: clscond = False
-    subscripted: clscond = True
 
     @property
     def subexprs(self):
@@ -545,10 +534,6 @@ class Assign(StmtBase):
     target: Targetable
     value: ValueRef
     pos: Position
-    # Record optional annotation, since we need to check
-    # reachability before applying.
-    annot: str = None
-    clobbers: clscond = True
 
     @property
     def in_place(self):
@@ -564,13 +549,11 @@ class SingleExpr(StmtBase):
 @dataclass
 class Break(StmtBase):
     pos: Position
-    is_terminator: clscond = True
 
 
 @dataclass
 class Continue(StmtBase):
     pos: Position
-    is_terminator: clscond = True
 
 
 @dataclass
@@ -578,8 +561,6 @@ class ForLoop(StmtBase, Walkable):
     assigns: typing.List[typing.Tuple[Targetable, ValueRef]]
     body: typing.List[Statement]
     pos: Position
-    is_loop_entry: clscond = True
-    clobbers: clscond = True
 
     def walk(self):
         for stmt in self.body:
@@ -596,7 +577,6 @@ class IfElse(StmtBase, Walkable):
     if_branch: typing.List[Statement]
     else_branch: typing.List[Statement]
     pos: Position
-    is_conditional_branch: clscond = True
 
     def walk(self):
         for stmt in itertools.chain(self.if_branch, self.else_branch):
@@ -627,7 +607,6 @@ class Pass(StmtBase):
 class Return(StmtBase):
     value: typing.Optional[ValueRef]
     pos: Position
-    is_terminator: clscond = True
 
 
 @dataclass
@@ -635,7 +614,6 @@ class WhileLoop(StmtBase, Walkable):
     test: ValueRef
     body: typing.List[Statement]
     pos: Position
-    is_loop_entry: clscond = True
 
     def walk(self):
         for n in self.body:

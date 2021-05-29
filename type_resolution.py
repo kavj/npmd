@@ -165,6 +165,8 @@ div_dispatch = {
     (np.float64, np.float64): np.float64,
 }
 
+# This rejects cases that require integer to float conversion,
+# since they violate static typing rules.
 div_inplace_dispatch = {
 
     (float, int),
@@ -234,6 +236,40 @@ dispatch = {
 }
 
 
+class TypeCanonicalizer:
+
+    def __init__(self):
+        self.types = {}
+
+    def get_canonical_type(self, initial_type):
+        """
+        Placeholder
+        This is meant to aggregate compatible types into single types in the case of aliasing and for cases
+        where we merely approximate the original type.
+
+        """
+        t = self.types.get(initial_type)
+        return t if t is not None else initial_type
+
+
+def is_array_creation(node: ir.Call):
+    """
+    needs to be updated to check against numpy api
+
+    """
+    return True
+
+
+def get_array_params(node: ir.Call):
+    """
+    Extract array params, set unknowns to None
+    return ir.ArrayRef describing this array
+
+    """
+    dtype = np.float64
+    return ir.ArrayRef(dtype, 1, None)
+
+
 class TypeChecker(VisitorBase):
     """
     This only enforces types on explicit assignment. Compound expressions take on monomorphic types
@@ -244,14 +280,15 @@ class TypeChecker(VisitorBase):
         self.vartypes = vartypes
         self.invalid_truth_tests = set()
         self.array_mismatches = defaultdict(set)
-        self.inferred = {}
+        self.expr_types = {}
         self.missing = set()
         self.visit(entry)
         missing = self.missing
-        inferred = self.inferred
+        expr_types = self.expr_types
         array_mismatches = self.array_mismatches
         invalid_truth_tests = self.invalid_truth_tests
-        self.missing = self.inferred = self.array_mismatches = self.invalid_truth_tests = None
+        self.missing = self.expr_types = self.array_mismatches = self.invalid_truth_tests = None
+        return missing, expr_types, array_mismatches, invalid_truth_tests
 
     def lookup_type(self, var_or_expr):
         if isinstance(var_or_expr, ir.NameRef):
@@ -259,7 +296,7 @@ class TypeChecker(VisitorBase):
             if t is None:
                 self.missing.add(var_or_expr)
         else:
-            t = self.inferred.get(var_or_expr)
+            t = self.expr_types.get(var_or_expr)
         return t
 
     @singledispatchmethod
@@ -272,9 +309,18 @@ class TypeChecker(VisitorBase):
             self.missing.add(node)
 
     @visit.register
+    def _(self, node: ir.Call):
+        if is_array_creation(node):
+            p = get_array_params(node)
+
+
+    @visit.register
     def _(self, node: ir.Assign):
         self.visit(node.value)
-        self.visit(node.target)
+        if isinstance(node.target, ir.Expression):
+            self.visit(node.target)
+
+
 
     @visit.register
     def _(self, node: ir.BinOp):
@@ -297,7 +343,7 @@ class TypeChecker(VisitorBase):
             if t is None:
                 self.missing.add(node)
             else:
-                self.inferred[node] = t
+                self.expr_types[node] = t
 
     @visit.register
     def _(self, node: ir.ForLoop):
@@ -346,3 +392,28 @@ class TypeChecker(VisitorBase):
             self.invalid_truth_tests.add(t)
         self.visit(node.if_expr)
         self.visit(node.else_expr)
+
+    @visit.register
+    def _(self, node: ir.Subscript):
+        self.visit(node.value)
+        self.visit(node.slice)
+        existing = self.lookup_type(node)
+        reduce_dims = not isinstance(node.slice, ir.Slice)
+        t = self.lookup_type(node.value)
+        if t is None:
+            self.missing.add(node)
+            return
+        if reduce_dims:
+            if isinstance(t, (ir.ArrayRef, ir.ViewRef)):
+                if t.ndims > 1:
+                    t = ir.ViewRef(node.value, node.slice)
+                else:
+                    t = node.value.dtype
+            else:
+                # over subscripted
+                self.array_mismatches.add(node)
+        if existing is None:
+            self.expr_types[node] = t
+        else:
+            if existing != t:
+                self.array_mismatches.add(node)

@@ -58,8 +58,23 @@ def terminates_control_flow(node):
 
 
 @terminates_control_flow.register
+def _(node: ir.Continue):
+    return True
+
+
+@terminates_control_flow.register
+def _(node: ir.Return):
+    return True
+
+
+@terminates_control_flow.register
+def _(node: ir.Break):
+    return True
+
+
+@terminates_control_flow.register
 def _(node: ir.StmtBase):
-    return node.is_terminator
+    return False
 
 
 @terminates_control_flow.register
