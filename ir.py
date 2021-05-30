@@ -151,14 +151,18 @@ class NameRef:
 
 
 @dataclass(frozen=True)
+class ScalarType:
+    signed: bool
+    boolean: bool
+    integral: bool
+    bitwidth: int
+
+
+@dataclass(frozen=True)
 class ArrayRef:
     dtype: type
     ndims: int
-    dims: typing.Optional[typing.Tuple[IntNode, ...]]
     constant: clscond = False
-
-    def __post_init__(self):
-        assert (self.dims is None or len(self.dims) == self.ndims)
 
     @property
     def base(self):
