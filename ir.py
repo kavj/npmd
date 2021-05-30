@@ -110,7 +110,7 @@ class AttributeRef:
 
     """
     value: NameRef
-    attr: typing.Tuple[str]
+    attr: str
     constant: clscond = False
 
 
@@ -160,8 +160,8 @@ class ScalarType:
 
 @dataclass(frozen=True)
 class ArrayRef:
-    dtype: type
     ndims: int
+    dtype: type
     constant: clscond = False
 
     @property

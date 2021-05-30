@@ -136,7 +136,7 @@ class EarlyTypeVerifier(VisitorBase):
         elif output_ndims == 0:
             output_type = ir.ArrayRef.dtype
         else:
-            output_type = ir.ArrayRef(base_type.dtype, output_ndims)
+            output_type = ir.ArrayRef(output_ndims, base_type.dtype)
         return output_type
 
     @visit.register
@@ -161,7 +161,7 @@ class EarlyTypeVerifier(VisitorBase):
             if iterable_type.ndims == 1:
                 predicted_target_type = iterable_type.dtype
             else:
-                predicted_target_type = ir.ArrayRef(iterable_type.dtype, iterable_type.ndims - 1)
+                predicted_target_type = ir.ArrayRef(iterable_type.ndims - 1, iterable_type.dtype)
             target_type = self.visit(target)
             if target_type is not None:
                 if target_type != predicted_target_type:
@@ -223,10 +223,10 @@ class EarlyTypeVerifier(VisitorBase):
                     if isinstance(right_type, ir.ArrayRef):
                         # Array op Array (no handling of broadcasting in this api)
                         if left_type.ndims == right_type.ndims:
-                            output_type = ir.ArrayRef(output_dtype, left_type.ndims)
+                            output_type = ir.ArrayRef(left_type.ndims, output_dtype)
                     else:  # Array op scalar
-                        output_type = ir.ArrayRef(output_dtype, left_type.ndims)
+                        output_type = ir.ArrayRef(left_type.ndims, output_dtype)
                 elif isinstance(right_type, ir.ArrayRef):
                     # Scalar op array
-                    output_type = ir.ArrayRef(output_dtype, right_type.ndims)
+                    output_type = ir.ArrayRef(right_type.ndims, output_dtype)
         return output_type

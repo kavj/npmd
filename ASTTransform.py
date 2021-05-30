@@ -5,6 +5,7 @@ import typing
 
 import ir
 from replace_call import replace_builtin_call
+from visitor import VisitorBase
 
 binaryops = {ast.Add: "+",
              ast.Sub: "-",
@@ -132,7 +133,7 @@ def extract_positional_info(node):
                        col_end=node.end_col_offset)
 
 
-class AnnotationCollector(ast.NodeVisitor):
+class AnnotationCollector(VisitorBase):
     """
     This tries to parse anything the grammar can handle.
 
@@ -214,7 +215,7 @@ class TreeBuilder(ast.NodeVisitor):
         elif isinstance(value, ir.AttributeRef):
             value = ir.AttributeRef(value.value, value.attr + node.attr)
         else:
-            value = ir.AttributeRef(value, (node.attr,))
+            value = ir.AttributeRef(value, node.attr)
         return value
 
     def visit_Constant(self, node: ast.Constant) -> ir.Constant:
