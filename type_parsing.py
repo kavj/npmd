@@ -2,8 +2,14 @@ import typing
 import numpy as np
 
 from dataclasses import dataclass
+from enum import Enum, auto
 
 import ir
+
+
+class array_creation_errors(Enum):
+    bad_arg_count = auto()
+    invalid_param = auto()
 
 
 @dataclass(frozen=True)
@@ -24,6 +30,10 @@ class ArrayCreationRoutine:
     shape: typing.Tuple[typing.Union[ir.NameRef, ir.IntNode], ...]
     dtype: ir.ScalarType
     fill_value: typing.Optional[typing.Union[ir.NameRef, ir.Constant]]
+
+    @property
+    def ndims(self):
+        return len(self.shape)
 
 
 # This will need some work for OS specific components..
@@ -73,7 +83,7 @@ array_creation_routines = {"zeros": parse_zeros,
                            "empty": parse_empty}
 
 
-def validate_typing(types: typing.Dict[str, typing.Union[type, ArrayType]]):
+def validate_typing(types):
     early_validation_types = {}
     missing = set()
     for name, type_ in types.items():

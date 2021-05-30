@@ -174,8 +174,8 @@ class FoldExpressions(TransformBase):
             if isinstance(operand, ir.Constant):
                 if operator.truth(operand) == early_return_on:
                     return ir.BoolNode(early_return_on)
-                else:
-                    repl_operands.append(operand)
+            else:
+                repl_operands.append(operand)
         if not repl_operands:
             # all operands had constant truth tests and none satisfied
             # early return criteria

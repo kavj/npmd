@@ -7,6 +7,9 @@ from functools import singledispatchmethod
 import ir
 from visitor import VisitorBase
 
+# Todo: At the tree layer, this should be much with fine grained tests moving to dataflow layer.
+#       In particular, just check for bad use of division and truth testing of arrays
+
 # initially supported, untyped ints and other ranges require additional
 # work, and they are less commonly used
 scalar_types = {int, float, np.float32, np.float64, np.int32, np.int64}
@@ -313,14 +316,11 @@ class TypeChecker(VisitorBase):
         if is_array_creation(node):
             p = get_array_params(node)
 
-
     @visit.register
     def _(self, node: ir.Assign):
         self.visit(node.value)
         if isinstance(node.target, ir.Expression):
             self.visit(node.target)
-
-
 
     @visit.register
     def _(self, node: ir.BinOp):

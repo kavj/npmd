@@ -1,15 +1,11 @@
 import builtins
 import keyword
-from dataclasses import dataclass
+
+from functools import singledispatchmethod
 
 import ir
 
-
-@dataclass
-class ErrorValue:
-    msg: str
-    pos: ir.Position
-
+from visitor import VisitorBase
 
 keywords = frozenset(set(keyword.kwlist))
 builtin_names = frozenset(set(dir(builtins)))
@@ -19,82 +15,62 @@ def shadows_builtin_name(name):
     return name in keywords or name in builtin_names
 
 
-def check_array_access():
+class TreeValidator(VisitorBase):
     """
-    Check for dimension count mismatches.
-    Check that each subscript refers to an array input.
-
-    """
-    pass
-
-
-def find_array_allocation():
-    pass
-
-
-def find_zero_dim_array():
-    pass
-
-
-def find_invalid_step():
-    pass
-
-
-def check_for_loop():
-    pass
-
-
-def find_aliased_array_names():
-    pass
-
-
-def find_bad_call_sigs():
-    """
+    A visitor to perform early checks for common errors
 
     """
-    pass
+    reserved = frozenset(set(keyword.kwlist).union(set(dir(builtins))))
 
+    def __call__(self, entry):
+        self.entry = entry
+        self.errors = []
+        self.visit(entry)
+        errors = self.errors
+        self.entry = self.errors = None
+        return errors
 
-def find_invalid_slices():
-    pass
+    @singledispatchmethod
+    def visit(self, node):
+        super().visit(node)
 
-
-def is_supported_directive(name, args):
-    """
-    Check if matches simd or parallel directive
-
-    """
-    pass
-
-
-def find_duplicate_args(func):
-    """
-    Haven't decided on keyword support...
-
-    """
-    args = set()
-    dupes = set()
-    for arg in func.args:
-        if arg in args:
-            dupes.add(arg)
+    @visit.register
+    def _(self, node: ir.Function):
+        if node.name in self.reserved:
+            self.errors.append(f"Function: {node.name} shadows a keyword or builtin function")
+        if node is self.entry:
+            seen = set()
+            for arg in node.args:
+                if arg in seen:
+                    self.errors.append(f"Duplciate argument {arg} in function {node.name}")
+                elif arg in self.reserved:
+                    self.errors.append(f"Argument {arg} in function {node.name} shadows a keyword or builtin function")
+                seen.add(arg)
+                self.visit(node.body)
         else:
-            args.add(arg)
-    if dupes:
-        return dupes
+            self.errors.append(f"Nested functions are not supported. Encountered {node.name}")
 
+    @visit.register
+    def _(self, node: ir.ForLoop):
+        targets = set()
+        iterables = set()
+        for target, iterable in node.walk_assignments():
+            if target in targets:
+                # it's fine for iterables to appear in more than one location, particularly if tracking different
+                # positions
+                self.errors.append(f"duplicate target variable in for loop on line {node.pos.line_begin}")
+            iterables.add(iterable)
+        conflicts = targets.intersection(iterables)
+        if conflicts:
+            for conflict in conflicts:
+                self.errors.append(f"{conflict} appears as both an iterable and target in for loop on line "
+                                   f"{node.pos.line_begin}.")
+        self.visit(node.body)
 
-def find_zero_step_size():
-    pass
-
-
-def find_unsafe_exprs(exprs):
-    unsafe = set()
-    for e in exprs:
-        if isinstance(e, ir.BinOp):
-            if e.op in ("/", "//", "/=", "//="):
-                if e.right.constant:
-                    pass
-                    # if e.right.value == 0:
-                    #    unsafe.add(e)
-    return unsafe
-
+    @visit.register
+    def _(self, node: ir.Assign):
+        if isinstance(node.target, ir.NameRef):
+            name = node.target.name
+            if name in self.reserved:
+                self.errors.append(f"Assignment target {name} at line {node.pos.line_begin} shadows a keyword or "
+                                   f"builtin function")
