@@ -5,6 +5,7 @@ from functools import singledispatchmethod
 
 import ir
 
+from loopanalysis import target_iterable_conflicts
 from visitor import VisitorBase
 
 keywords = frozenset(set(keyword.kwlist))
@@ -52,19 +53,16 @@ class TreeValidator(VisitorBase):
 
     @visit.register
     def _(self, node: ir.ForLoop):
-        targets = set()
-        iterables = set()
-        for target, iterable in node.walk_assignments():
-            if target in targets:
-                # it's fine for iterables to appear in more than one location, particularly if tracking different
-                # positions
-                self.errors.append(f"duplicate target variable in for loop on line {node.pos.line_begin}")
-            iterables.add(iterable)
-        conflicts = targets.intersection(iterables)
-        if conflicts:
-            for conflict in conflicts:
-                self.errors.append(f"{conflict} appears as both an iterable and target in for loop on line "
-                                   f"{node.pos.line_begin}.")
+        conflicts, duplicate_targets = target_iterable_conflicts(node)
+        for conflict in conflicts:
+            self.errors.append(f"Variable {conflict} appears as both an iterable and target in for loop on line "
+                               f"{node.pos.line_begin}.")
+        for dupe in duplicate_targets:
+            self.errors.append(f"duplicate target variable '{dupe}' in for loop on line {node.pos.line_begin}")
+        for target, _ in node.walk_assignments():
+            if isinstance(target, ir.Expression):
+                self.errors.append(f"Only simple name assignment is supported in for loop targets: "
+                                   f"line {node.pos.line_begin}")
         self.visit(node.body)
 
     @visit.register

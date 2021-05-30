@@ -109,6 +109,8 @@ class VisitorBase:
 
     @visit.register
     def _(self, node: ir.Function):
+        for arg in node.args:
+            self.visit(arg)
         for stmt in node.walk():
             self.visit(stmt)
 

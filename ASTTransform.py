@@ -4,7 +4,7 @@ import sys
 import typing
 
 import ir
-from replace_call import replace_builtin_call
+from Canonicalize import replace_builtin_call
 from visitor import VisitorBase
 
 binaryops = {ast.Add: "+",
@@ -356,9 +356,6 @@ class TreeBuilder(ast.NodeVisitor):
         on_false = self.visit_body(node.orelse)
         ifstat = ir.IfElse(compare, on_true, on_false, pos)
         return ifstat
-
-    def visit_With(self, node: ast.With):
-        pass
 
     def visit_For(self, node: ast.For) -> ir.ForLoop:
         if node.orelse:

@@ -60,17 +60,6 @@ def contained_loops(stmts):
     return nested
 
 
-def reassigned_loop_targets(header):
-    multiple = set()
-    seen = set()
-    for target, iterable in header.walk_assignments():
-        if target in seen:
-            multiple.add(target)
-        else:
-            seen.add(target)
-    return multiple
-
-
 def target_iterable_conflicts(header):
     """
     Python permits a target to clobber an iterable name, since the value obtained for an iterable
@@ -80,10 +69,14 @@ def target_iterable_conflicts(header):
 
     targets = set()
     iterables = set()
+    duplicate_targets = set()
     for target, iterable in header.walk_assignments():
+        if target in targets:
+            duplicate_targets.add(target)
         targets.add(target)
         iterables.add(iterable)
-    return targets.intersection(iterables)
+    conflicts = targets.intersection(iterables)
+    return conflicts, duplicate_targets
 
 
 def final_header_assignments(header):

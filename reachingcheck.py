@@ -73,7 +73,7 @@ class ReachingCheck(VisitorBase):
         # no support for nested scopes
         assert (node is self.entry)
         for arg in node.args:
-            self.mark_assignment(arg.name, node)
+            self.mark_assignment(arg, node)
         for stmt in node.body:
             self.visit(stmt)
 

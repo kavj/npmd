@@ -49,4 +49,3 @@ class UsageCheck(VisitorBase):
             self.visit(target)
             self.visit(value)
             self.used_by[value].add(target)
-
