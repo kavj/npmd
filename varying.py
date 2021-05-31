@@ -70,19 +70,33 @@ class used_by_check(visitor.VisitorBase):
 
 
 class varying_check(visitor.VisitorBase):
-    # We only support varying arrays with uniform length at this point,
-    # since this covers multi-dimensional arrays without predication
-    # and sliding windows with attenuated edges.
+    """
+    This checks for variables that can be privatized
 
-    def __call__(self, entry, uniform_args):
-        assert isinstance(entry, ir.Function)
-        self.varies = {v for v in entry.args if v not in uniform_args}
-        self.uniform = uniform_args.copy()
-        self.conflicts = set()
-        self.used_by = set()
+    On scope entry (loop or statement list), we check for upward exposed variables, with the assumption
+    that any upward exposed variable is bound along every path that reaches this point.
+    An earlier check verifies this, and passes aren't allowed to break that.
+
+    If something is not upward exposed here or following this region, then we privatize the variable.
+    The advantage in doing this is that a corresponding variable name can be uniform of varying here, independent
+    of the same condition outside this region.
+
+    It's worth noting this isn't a full liveness analysis. It runs early enough that we aren't likely to get
+    false positives from other passes, and compound expressions are not yet serialized to three address form and
+    therefore cannot create ordering conflicts.
+
+    """
+
+    def __call__(self, entry, uniform_on_entry, declared, assumed_live_out):
+        self.entry = entry
+        self.varies = {v for v in declared if v not in uniform_on_entry}
+        self.uniform = uniform_on_entry.copy()
+        self.declared = declared
+        use_checker = used_by_check()
+        self.used_by, self.assigned_to = use_checker(entry)
         self.visit(entry)
         varies = self.varies
-        self.varies = self.uniform = self.conflicts = None
+        self.varies = self.uniform = self.used_by = self.assigned_to = self.declared = None
         return varies
 
     def is_varying(self, node):
@@ -107,11 +121,6 @@ class varying_check(visitor.VisitorBase):
     def _(self, node: ir.Assign):
         if self.is_varying(node.value):
             self.varies.add(node.target)
-            # maybe rephrase, but this handles cases where
-            # a uniform input may be assigned a varying value,
-            # This means during lowering, we need to generate a
-            # copy of the original input, which can handle
-            # varying assignments
             if node.target in self.uniform:
                 self.conflicts.add(node.target)
 

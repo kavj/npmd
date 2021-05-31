@@ -49,6 +49,7 @@ class TreeValidator(VisitorBase):
                 seen.add(arg)
                 self.visit(node.body)
         else:
+            # don't bother visiting nested functions, since they aren't supported
             self.errors.append(f"Nested functions are not supported. Encountered {node.name}")
 
     @visit.register
@@ -67,6 +68,7 @@ class TreeValidator(VisitorBase):
 
     @visit.register
     def _(self, node: ir.Assign):
+        # ignore anything that will be caught by the parser, such as assignment to a constant.
         if isinstance(node.target, ir.NameRef):
             name = node.target.name
             if name in self.reserved:
