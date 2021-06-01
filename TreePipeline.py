@@ -1,10 +1,7 @@
-import ir
-
 from ASTTransform import build_module_ir
 from Canonicalize import RemoveContinues, MergePaths
 from folding import fold_constant_expressions
 from reachingcheck import ReachingCheck
-from varying import varying_check
 
 
 def run_tree_pipeline(pth):
@@ -16,6 +13,13 @@ def run_tree_pipeline(pth):
     merge_paths = MergePaths()
     mod = build_module_ir(r)
     repl = []
+    for func in mod.funcs:
+        func = merge_paths(func)
+        func = fold_constant_expressions(func)
+        func = merge_paths(func)
+        func = fold_constant_expressions(func)
+        func = remove_continues(func)
+        repl.append(func)
 
     mod.funcs = repl
     unbound = []
@@ -30,9 +34,4 @@ def run_tree_pipeline(pth):
             print("used:", key, "\n")
         for key in war:
             print("overwritten after read:", key, "\n")
-    for func in mod.funcs:
-        print("varying")
-        for stuff in varies:
-            print(stuff)
-
     return mod

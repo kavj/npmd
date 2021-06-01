@@ -29,110 +29,108 @@ This is a may reach problem.. so that doesn't work as well..
 """
 
 
+class liveness_info:
+    # branch points need an entry and exit
+    def __init__(self, uevs):
+        self.uevs = uevs
+
+
 class UpwardExposed(VisitorBase):
     """
-    This embeds upward exposed information into predecessors of a given block.
-    The information is calculated for entry and exit points of statement lists and ForLoop, IfElse, and WhileLoop
-    IR constructs.
-
-    This differs slightly from the same concept on a CFG in that statement lists may span multiple basic blocks.
-
-    Suppose we have
-
-    def f(x):
-       i = 0
-       for i in x:
-          ...
-       print(i)
-
-    Here the for loop header's IR appears in the same statement list as the print statement, even though
-    the first statement, the loop body, and the print statement would map to different basic blocks upon lowering.
-
-    To avoid splitting the statement list or recording multiple offsets, we associate entry and exit info for
-    any statement which marks an entry/exit point of a control flow region. This means that a statement list
-    only records this info for the beginning and end of the list.
-
-    Here the difference is that we don't associate entry/exit info for the for loop header with the enclosing statement
-    list right before and right after. If we need that info, we retrieve it from the loop header instead.
-
-    In a CFG format, the statements before and after the loop would be in different basic blocks, with their own
-    local upward exposure information.
 
     """
 
+    def __init__(self):
+        self.read_first = None
+        self.written = None
+
     def __call__(self, entry):
-        self.uevs = [set()]
-        self.written = [set()]
-        self.upward_exposed = {}
+        self.uevs = {}
+        self.kills = {}
         self.visit(entry)
+        uevs = self.uevs
+        kills = self.kills
+        self.uevs = self.read = self.written = self.kills = None
+        return uevs, kills
+
+    def enter_scope(self, node):
+        key = id(node)
+        self.read_first = set()
+        self.written = set()
+        entry = self.uevs.get(key)
+        # slightly weird, but this handles nodes that mark control flow points
+        # embedded in a statement list
+        if entry is None:
+            self.uevs[key] = self.read_first
+            self.kills[key] = self.written
+        else:
+            self.uevs[key] = (entry, self.read_first)
+            self.kills[key] = (entry, self.written)
+
+    def register_read(self, target):
+        if isinstance(target, ir.NameRef):
+            if target not in self.written:
+                self.read_first.add(target)
+        elif isinstance(target, ir.Expression):
+            for subexpr in target.post_order_walk():
+                if isinstance(subexpr, ir.NameRef):
+                    if subexpr not in self.written:
+                        self.read_first.add(subexpr)
+
+    def register_write(self, target):
+        if isinstance(target, ir.NameRef):
+            self.written.add(target)
+        else:
+            self.register_read(target)
 
     @staticmethod
     def is_control_flow_entry_exit(node):
         return isinstance(node, (ir.IfElse, ir.ForLoop, ir.WhileLoop))
-
-    def enter_scope(self):
-        self.uevs.append(set())
-
-    def exit_scope(self):
-        scoped = self.uevs.pop()
-        return scoped
-
-    def register_write(self, name):
-        self.uevs[-1].discard(name)
-
-    @singledispatchmethod
-    def register_read(self, node):
-        # this could attempt to pretty print
-        raise TypeError(f"No method known for read of type {type(node)}")
-
-    @register_read.register
-    def _(self, node: ir.Constant):
-        pass
-
-    @register_read.register
-    def _(self, node: ir.NameRef):
-        self.uevs[-1].add(node)
-
-    @register_read.register
-    def _(self, node: ir.Expression):
-        for n in node.post_order_walk():
-            self.register_read(n)
 
     @singledispatchmethod
     def visit(self, node):
         super().visit(node)
 
     @visit.register
-    def _(self, node: list):
-        for stmt in reversed(list):
-            self.visit(stmt)
+    def _(self, node: ir.IfElse):
+        self.enter_scope(node)
+        self.register_read(node.test)
+        self.visit(node.if_branch)
+        self.visit(node.else_branch)
+        # push an exit
+        self.enter_scope(node)
 
     @visit.register
     def _(self, node: ir.ForLoop):
+        # target and iterable list must not intersect
+        self.enter_scope(node)
+        targets = set()
+        iterables = set()
+        for t, i in node.walk_assignments():
+            targets.add(t)
+            iterables.add(i)
+            self.register_read(i)
+        assert not targets.intersection(iterables)
         self.visit(node.body)
-        for t, v in node.walk_assignments():
-            self.register_read(v)
-            self.register_write(t)
+        self.enter_scope(node)
+
+    @visit.register
+    def _(self, node: ir.WhileLoop):
+        self.enter_scope(node)
+        self.register_read(node.test)
+        self.visit(node.body)
+        self.enter_scope(node)
 
     @visit.register
     def _(self, node: ir.Assign):
-        self.visit(node.value)
-        if isinstance(node.target, ir.Expression):
-            self.register_read(node.target)
-        else:
-            # mark variable names that are written but not read
-            if isinstance(node.value, ir.Expression):
-                target = node.target
-                if isinstance(target, ir.NameRef):
-                    if all(target != subexpr for subexpr in node.value.post_order_walk()):
-                        self.register_write(target)
+        self.register_read(node.value)
+        self.register_write(node.target)
 
     @visit.register
-    def _(self, node: ir.IfElse):
-        self.enter_scope()
-        self.visit(node.if_branch)
-        self.enter_scope()
-        self.visit(node.else_branch)
-        self.exit_scope()
-        self.visit(node.test)
-
+    def _(self, node: list):
+        self.enter_scope(node)
+        self.uevs[id(node)] = self.read_first
+        for stmt in node:
+            self.visit(stmt)
+            if self.is_control_flow_entry_exit(stmt):
+                self.enter_scope(stmt)
