@@ -1,132 +1,56 @@
 from collections import defaultdict
-from functools import singledispatchmethod
 
 import ir
-import visitor
+from visitor import walk_all
 
 """
-Determines whether things should be assumed to vary across calls
-
-The motivation here is that we may have an array like calculation, with something like
-
-for row in ndarray:
-    output[i] = f(row)
-    
-or a sliding window type..
-
-for i in range(n):
-    # window along leading dim
-    output[i] = f(ndarray[i:i+windowlen])
-
-Within the call itself, we may have a separate
-
-for i in ...:
-   for j in ...:
-       for k in ...:
-           ...
-           
-It's possible for the intervals of i,j,k to be uniform across calls, in which case
-we only need to wrap varying data in the innermost loop.
-
-This is valuable in that it allows function level vectorization to be converted to inner loop vectorization
-in cases with varying dataflow and uniform control flow.
-
+Very conservative varying checks. These determine uniformity at a variable name level, ignoring local dataflow
+information. 
 
 """
 
 
-class used_by_check(visitor.VisitorBase):
-
-    def __call__(self, entry):
-        self.used_by = defaultdict(set)
-        self.assigned_to = defaultdict(set)
-        self.visit(entry)
-        used_by = self.used_by
-        assigned_to = self.assigned_to
-        self.used_by = self.assigned_to = None
-        return used_by, assigned_to
-
-    @singledispatchmethod
-    def visit(self, node):
-        return super().visit(node)
-
-    @visit.register
-    def _(self, node: ir.Expression):
-        for subexpr in node.subexprs:
-            self.visit(subexpr)
-            self.used_by[subexpr].add(node)
-
-    @visit.register
-    def _(self, node: ir.MinConstraint):
-        # exception, as these can still have uniform length parameters
-        # pass should be run before these are introduced anyway
-        pass
-
-    @visit.register
-    def _(self, node: ir.Assign):
-        self.visit(node.target)
-        self.visit(node.value)
-        self.assigned_to[node.target].add(node.value)
+def collect_assigned(entry):
+    exprs = defaultdict(set)
+    for stmt in walk_all(entry):
+        if isinstance(stmt, ir.Assign):
+            # only record expressions recorded as top level expressions
+            if isinstance(stmt.target, ir.NameRef):
+                if not isinstance(stmt.value, ir.Constant):
+                    exprs[stmt.value].add(stmt.target)
+        elif isinstance(stmt, ir.ForLoop):
+            for target, iterable in stmt.walk_assignments():
+                exprs[iterable].add(target)
+    return exprs
 
 
-class varying_check(visitor.VisitorBase):
-    """
-    This checks for variables that can be privatized
+def map_parameters(exprs):
+    params = {}
+    for expr in exprs:
+        p = {subexpr for subexpr in expr.post_order_walk() if isinstance(subexpr, ir.NameRef)}
+        params[expr] = p
+    return params
 
-    On scope entry (loop or statement list), we check for upward exposed variables, with the assumption
-    that any upward exposed variable is bound along every path that reaches this point.
-    An earlier check verifies this, and passes aren't allowed to break that.
 
-    If something is not upward exposed here or following this region, then we privatize the variable.
-    The advantage in doing this is that a corresponding variable name can be uniform of varying here, independent
-    of the same condition outside this region.
+def varying_from_exprs(exprs, params, varying_inputs):
+    varying = varying_inputs.copy()
+    changed = True
+    while changed:
+        changed = False
+        # update expressions
+        for expr, targets in exprs.items():
+            if expr in varying:
+                continue
+            if any(p in varying for p in params.get(expr, ())):
+                changed = True
+                varying.add(expr)
+                for target in targets:
+                    varying.add(target)
+    return varying
 
-    It's worth noting this isn't a full liveness analysis. It runs early enough that we aren't likely to get
-    false positives from other passes, and compound expressions are not yet serialized to three address form and
-    therefore cannot create ordering conflicts.
 
-    """
-
-    def __call__(self, entry, uniform_on_entry, declared, assumed_live_out):
-        self.entry = entry
-        self.varies = {v for v in declared if v not in uniform_on_entry}
-        self.uniform = uniform_on_entry.copy()
-        self.declared = declared
-        use_checker = used_by_check()
-        self.used_by, self.assigned_to = use_checker(entry)
-        self.visit(entry)
-        varies = self.varies
-        self.varies = self.uniform = self.used_by = self.assigned_to = self.declared = None
-        return varies
-
-    def is_varying(self, node):
-        if isinstance(node, ir.NameRef):
-            return node in self.varies
-        elif isinstance(node, ir.Expression):
-            if node in self.varies:
-                return True
-            return any(subexpr in self.varies for subexpr in node.post_order_walk())
-        else:
-            raise TypeError
-
-    @singledispatchmethod
-    def visit(self, node):
-        super().visit(node)
-
-    @visit.register
-    def _(self, node: ir.Constant):
-        self.uniform.add(node)
-
-    @visit.register
-    def _(self, node: ir.Assign):
-        if self.is_varying(node.value):
-            self.varies.add(node.target)
-            if node.target in self.uniform:
-                self.conflicts.add(node.target)
-
-    @visit.register
-    def _(self, node: ir.ForLoop):
-        for target, iterable in node.assigns:
-            if iterable not in self.uniform:
-                self.varies.add(target)
-        self.visit(node.body)
+def find_varying(entry, varying_inputs):
+    exprs = collect_assigned(entry)
+    params = map_parameters(exprs.keys())
+    varying = varying_from_exprs(exprs, params, varying_inputs)
+    return varying

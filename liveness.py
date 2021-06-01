@@ -35,6 +35,10 @@ class liveness_info:
         self.uevs = uevs
 
 
+def is_control_flow_entry_exit(node):
+    return isinstance(node, (ir.IfElse, ir.ForLoop, ir.WhileLoop))
+
+
 class UpwardExposed(VisitorBase):
     """
 
@@ -47,11 +51,15 @@ class UpwardExposed(VisitorBase):
     def __call__(self, entry):
         self.uevs = {}
         self.kills = {}
+        self.exit_kills = {}
+        self.exit_uevs = {}
         self.visit(entry)
         uevs = self.uevs
         kills = self.kills
+        exit_uevs = self.exit_uevs
+        exit_kills = self.exit_kills
         self.uevs = self.read = self.written = self.kills = None
-        return uevs, kills
+        return uevs, kills, exit_uevs, exit_kills
 
     def enter_scope(self, node):
         key = id(node)
@@ -82,10 +90,6 @@ class UpwardExposed(VisitorBase):
             self.written.add(target)
         else:
             self.register_read(target)
-
-    @staticmethod
-    def is_control_flow_entry_exit(node):
-        return isinstance(node, (ir.IfElse, ir.ForLoop, ir.WhileLoop))
 
     @singledispatchmethod
     def visit(self, node):
@@ -132,5 +136,38 @@ class UpwardExposed(VisitorBase):
         self.uevs[id(node)] = self.read_first
         for stmt in node:
             self.visit(stmt)
-            if self.is_control_flow_entry_exit(stmt):
+            if is_control_flow_entry_exit(stmt):
                 self.enter_scope(stmt)
+
+
+def get_block_ordering(entry):
+    ordering = []
+
+
+class LivenessSolver(VisitorBase):
+
+    def __call__(self, entry, uevs, kills):
+        self.uevs = uevs
+        self.kills = kills
+        self.uevs_local = None
+        self.kills_local = None
+        self.liveout = {}
+        self.changed = True
+        while self.changed:
+            self.changed = False
+            self.visit(entry)
+        liveout = self.liveout
+        self.uevs = self.read = self.written = self.kills = self.changed = None
+        self.liveout = self.kills_local = self.uevs_local = self.liveout_local = None
+        return liveout
+
+    @singledispatchmethod
+    def visit(self, node):
+        super().visit(node)
+
+    @visit.register
+    def _(self, node: list):
+        # recompute liveness
+        for stmt in node:
+            if is_control_flow_entry_exit(stmt):
+                self.visit(stmt)
