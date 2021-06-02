@@ -1,3 +1,6 @@
+import math
+import operator
+
 import ir
 from visitor import walk_branches
 
@@ -50,6 +53,41 @@ def constraint_variables(node: ir.ForLoop):
         else:
             iterable_constraints.add(iterable)
     return iterable_constraints, range_constraints
+
+
+def get_simple_range_step_count(counter):
+    """
+    return range step count if it requires little to no computation
+    If step count is difficult to determine, return None.
+
+    This has a very large number of possibilities, some of which can be expensive to compute at runtime
+    if lowered to compute an exact count rather than break on induction bounds
+
+    """
+    if isinstance(counter.step, ir.IntNode):
+        if counter.step.value == 1:
+            if isinstance(counter.stop, ir.IntNode) and isinstance(counter.start, ir.IntNode):
+                diff = ir.IntNode(operator.sub(counter.stop, counter.start)
+                                  if counter.stop.value > counter.start.value else 0)
+            else:
+                diff = (ir.IfExpr(ir.BinOp(counter.stop, counter.start, ">"),
+                                  ir.BinOp(counter.stop, counter.start, "-"), ir.IntNode(0)))
+            return diff
+        elif counter.step.value == 0:
+            raise ValueError("range step of size 0")
+        elif isinstance(counter.start, ir.IntNode) and isinstance(counter.stop, ir.IntNode):
+            if (counter.stop.value > counter.start.value) and (counter.step.value > 0):
+                diff = operator.sub(counter.stop.value, counter.start.value)
+                count = math.ceil(operator.div(diff, counter.step.value))
+            elif (counter.stop.value < counter.start.value) and (counter.step.value < 0):
+                diff = operator.sub(counter.start.value, counter.stop.value)
+                count = math.ceil(operator.div(diff, operator.abs(counter.step.value)))
+            else:
+                count = 0
+            return count
+        else:
+            # may require runtime division, lower to affine inducation instead
+            return None
 
 
 def contained_loops(stmts):
