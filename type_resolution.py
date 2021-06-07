@@ -5,6 +5,7 @@ from collections import defaultdict
 from functools import singledispatchmethod
 
 import ir
+from type_parsing import parse_array_create
 from visitor import VisitorBase
 
 # Todo: At the tree layer, this should be much with fine grained tests moving to dataflow layer.
@@ -255,24 +256,6 @@ class TypeCanonicalizer:
         return t if t is not None else initial_type
 
 
-def is_array_creation(node: ir.Call):
-    """
-    needs to be updated to check against numpy api
-
-    """
-    return True
-
-
-def get_array_params(node: ir.Call):
-    """
-    Extract array params, set unknowns to None
-    return ir.ArrayRef describing this array
-
-    """
-    dtype = np.float64
-    return ir.ArrayRef(dtype, 1, None)
-
-
 class TypeChecker(VisitorBase):
     """
     This only enforces types on explicit assignment. Compound expressions take on monomorphic types
@@ -313,14 +296,21 @@ class TypeChecker(VisitorBase):
 
     @visit.register
     def _(self, node: ir.Call):
-        if is_array_creation(node):
-            p = get_array_params(node)
+        return parse_array_create(node)
 
     @visit.register
     def _(self, node: ir.Assign):
         self.visit(node.value)
         if isinstance(node.target, ir.Expression):
             self.visit(node.target)
+        else:
+            assigned_type = self.visit(node.target)
+            expr_type = self.visit(node.value)
+            # check for invalid casts
+            if assigned_type != expr_type:
+                if (isinstance(assigned_type, (ir.ArrayRef, ir.ViewRef))
+                        or isinstance(expr_type, (ir.ArrayRef, ir.ViewRef))):
+                    self.array_mismatches.add(node.target)
 
     @visit.register
     def _(self, node: ir.BinOp):

@@ -1,9 +1,64 @@
 from collections import defaultdict
-from functools import singledispatchmethod
+from functools import singledispatch, singledispatchmethod
 
 import ir
 
 from visitor import VisitorBase
+
+
+def get_reads(node):
+    if isinstance(node, ir.Expression):
+        return {subexpr for subexpr in node.post_order_walk() if isinstance(subexpr, ir.NameRef)}
+    elif isinstance(node, ir.NameRef):
+        return {node}
+    else:
+        return set()
+
+
+@singledispatchmethod
+def reads_writes(node):
+    raise NotImplementedError
+
+
+@reads_writes.register
+def _(node: ir.Assign):
+    if isinstance(node.target, ir.NameRef):
+        writes = {node.target}
+        reads = get_reads(node.value)
+    else:
+        writes = set()
+        reads = get_reads(node.target).union(get_reads(node.value))
+    return reads, writes
+
+
+@reads_writes
+def _(node: ir.Expression):
+    return {subexpr for subexpr in node.post_order_walk() if not subexpr.constant}, ()
+
+
+@reads_writes.register
+def _(node: ir.ForLoop):
+    reads = set()
+    writes = set()
+    for r, w in node.walk_assignments():
+        writes.add(w)
+        reads.add(r)
+    return reads, writes
+
+
+@reads_writes.register
+def _(node: ir.WhileLoop):
+    return get_reads(node.test), set()
+
+
+@reads_writes.register
+def _(node: ir.IfElse):
+    return get_reads(node.test), set()
+
+
+@reads_writes.register
+def _(node: ir.SingleExpr):
+    return get_reads(node.expr), set()
 
 
 class UsageCheck(VisitorBase):

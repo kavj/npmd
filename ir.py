@@ -162,6 +162,7 @@ class ScalarType:
 class ArrayRef:
     ndims: int
     dtype: type
+    dims: typing.Union[int, str]
     constant: clscond = False
 
     @property
@@ -172,7 +173,7 @@ class ArrayRef:
 @dataclass(frozen=True)
 class ViewRef:
     derived_from: typing.Union[ArrayRef, ViewRef]
-    subscript: typing.Union[IntNode, Slice, NameRef, BinOp, UnaryOp]
+    subscript: typing.Optional[typing.Union[IntNode, Slice, NameRef, BinOp, UnaryOp]]
     transposed: bool = False
 
     @cached_property
@@ -581,6 +582,7 @@ class IfElse(StmtBase, Walkable):
     if_branch: typing.List[Statement]
     else_branch: typing.List[Statement]
     pos: Position
+    is_elif: bool = False
 
     def walk(self):
         for stmt in itertools.chain(self.if_branch, self.else_branch):
