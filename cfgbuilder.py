@@ -2,6 +2,7 @@ import ast
 import numbers
 import typing
 
+from collections import defaultdict
 from contextlib import ContextDecorator
 from itertools import count
 from functools import singledispatchmethod
@@ -142,11 +143,10 @@ class Block:
         self.stmts.reverse()
 
 
-class loop_entry:
-    def __init__(self, builder):
+class loop_entry(ContextDecorator):
+    def __init__(self, builder, break_target):
         self.builder = builder
-        self.break_target = None
-        self.stashed = None
+        self.break_target = break_target
 
     def __enter__(self):
         self.stashed = self.builder.break_target
@@ -195,36 +195,41 @@ class CFGBuilder(ast.NodeVisitor):
     def __init__(self):
         self.entry = None
         self.labeler = count()
+        self.succ_map = defaultdict(set)
         self.blocks = set()
         self.break_target = None
         self.current_block = None
-        self.last_block = None
 
     def __call__(self, entry: ast.FunctionDef):
         self.entry = entry
         func = self.visit(entry)
         return func
 
+    def terminate_block(self, stmt):
+        self.current_block.clear()
+        self.succ_map[self.current_block].clear()
+        self.current_block.append(stmt)
+
     def next_block(self):
         # need to make new block a predecessor of the old one
-        self.blocks.add(self.current_block)
-        self.current_block = Block(next(self.labeler))
-
-    @singledispatchmethod
-    def handle_terminator(self, node):
-        raise NotImplementedError(f"{type(node)} is not a known terminator")
+        current = self.current_block
+        self.blocks.add(current)
+        predecessor = Block(next(self.labeler))
+        self.succ_map[predecessor].add(current)
+        self.current_block = predecessor
+        return predecessor
 
     def visit_body(self, stmts: list):
         # should be like with fill block
-        for partition in reversed(block_partitioned(stmts)):
-            # need to add a version to handle this
-            if is_control_flow_entry(partition):
-                self.visit(partition)
-            else:
-                self.next_block()
-                for stmt in reversed(partition):
-                    self.visit(stmt)
-                self.current_block.reverse()
+        if len(stmts) > 0:
+            self.next_block()
+            self.visit(stmts[-1])
+            prev = stmts[-1]
+            for stmt in reversed(stmts[:-1]):
+                if is_control_flow_entry(prev):
+                    self.next_block()
+                self.visit(stmt)
+                prev = stmt
 
     # def visit_Attribute(self, node: ast.Attribute) -> ir.AttributeRef:
     #    value = self.visit(node.value)
@@ -361,48 +366,54 @@ class CFGBuilder(ast.NodeVisitor):
 
     def visit_If(self, node: ast.If):
         pos = extract_positional_info(node)
+        at_exit = self.current_block
+        self.visit(node.body)
+        if_head = self.current_block
+        self.current_block = at_exit
+        self.visit(node.orelse)
+        else_head = self.current_block
+        self.next_block()
+        self.succ_map[self.current_block].add(if_head)
         compare = self.visit(node.test)
         current = self.current_block
-        self.visit_body(node.body)
-        on_true = self.current_block
-        # Todo: revisit this
-        self.current_block = current
-        self.visit_body(node.orelse)
-        on_false = self.current_block
-        ifstat = ir.IfElse(compare, on_true, on_false, pos)
+        ifstat = ir.IfElse(compare, if_head, else_head, pos)
         self.current_block.append(ifstat)
 
     def visit_For(self, node: ast.For):
         if node.orelse:
             raise ValueError("or else clause not supported for for statements")
-        it = self.visit(node.iter)
-        target = self.visit(node.target)
-        pos = extract_positional_info(node)
-        assigns = serialize_iterated_assignments(target, it)
-        with loop_entry(self):
+        le = loop_entry(self, self.current_block)
+        with le:
             self.visit_body(node.body)
-        body = self.current_block
-        self.next_block()
-        self.current_block.append(ir.ForLoop(assigns, body, pos))
+            body = self.current_block
+            it = self.visit(node.iter)
+            target = self.visit(node.target)
+            pos = extract_positional_info(node)
+            # Following Python semantics, these need to be assigned as we enter
+            # the loop body, not after the latch
+            assigns = serialize_iterated_assignments(target, it)
+            self.next_block()
+            self.current_block.append(ir.ForLoop(assigns, body, pos))
+            self.succ_map[self.current_block].add(self.break_target)
 
     def visit_While(self, node: ast.While):
         if node.orelse:
             raise ValueError("or else clause not supported for for statements")
         pos = extract_positional_info(node)
-        with loop_entry(self):
+        le = loop_entry(self, self.current_block)
+        with le:
             self.visit_body(node.body)
-        body = self.current_block
-        self.next_block()
-        compare = self.visit(node.test)
-        self.current_block.append(ir.WhileLoop(compare, body, pos))
+            body = self.current_block
+            self.next_block()
+            compare = self.visit(node.test)
+            self.current_block.append(ir.WhileLoop(compare, body, pos))
 
     def visit_Break(self, node: ast.Break):
         if self.break_target:
             pos = extract_positional_info(node)
             stmt = ir.Break(pos)
-            self.current_block.clear()
-            self.current_block.append(stmt)
-            return stmt
+            self.terminate_block(stmt)
+            self.succ_map[self.current_block].add(self.break_target)
         else:
             raise ValueError("Break encountered outside of loop.")
 
@@ -413,9 +424,8 @@ class CFGBuilder(ast.NodeVisitor):
             # if visiting a sequence of statements in reversed order, the statements
             # added to this block and its current successors are unreachable unless
             # with the exception of the current continue target
-            self.current_block.clear()
+            self.clear_current_block()
             self.current_block.append(ir.Continue(pos))
-            return ir.Continue(pos)
         else:
             raise ValueError("Continue encountered outside of loop.")
 
@@ -431,10 +441,10 @@ class CFGBuilder(ast.NodeVisitor):
         body = self.current_block
         return ir.Function(name, params, body)
 
-    def visit_Return(self, node: ast.Return) -> ir.Return:
+    def visit_Return(self, node: ast.Return):
         pos = extract_positional_info(node)
         value = self.visit(node.value) if node.value is not None else None
-        return ir.Return(value, pos)
+        self.terminate_block(ir.Return(value, pos))
 
     def generic_visit(self, node):
         raise NotImplementedError(f"{type(node)} is unsupported")

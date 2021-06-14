@@ -1,12 +1,12 @@
 import ctypes
 import numpy as np
-import operator
 
-from collections import deque
+from contextlib import ContextDecorator
+from functools import singledispatchmethod
 
 import ir
 import loopanalysis
-from lowering import extract_name, get_strided_refs
+from lowering import extract_name
 from visitor import VisitorBase, walk_all
 
 """
@@ -136,18 +136,20 @@ def make_func_header_string(func, types, return_type, array_dim_type):
     return sig
 
 
-def generate_for_loop_entry(header: ir.ForLoop, types, symbols, array_dim_type):
-    # needs to be able to generate loop index names
-    # will need to later add something for liveness info
-    header_text = []
-    body_stmts = []
-    loop_index_name = symbols.generate_name()
+def extract_leading_dim(array):
+    return array.dims[0]
+
+
+def generate_for_loop_entry(header: ir.ForLoop, ctx):
+    loop_index_name = ctx.symbols.generate_name()
     # this needs to actually generate a min over array params
     # for loop bounds
+
     array_refs = {it for target, it in header.walk_assignments() if not isinstance(it, ir.Counter)}
+
     # These take a trivial assignment from the loop index
     normalized_counters = loopanalysis.normalized_counters(header)
-    strided = get_strided_refs(header, types)
+    # strided = get_strided_refs(header, types)
 
     # return header_text, body_assignments
 
@@ -158,25 +160,6 @@ def generate_expression(expr):
 
 def generate_while_loop_entry(header: ir.WhileLoop):
     return f"while({generate_expression(header.test)})"
-
-
-def flatten_branches(header: ir.IfElse):
-    """
-    return something that matches an elif structure
-    the notion is needed to distinguish these from independently taken branches
-
-    """
-    if (operator.truth(header.else_branch)
-            and len(header.else_branch) == 1
-            and isinstance(header.else_branch[0], ir.IfElse)):
-        if_stmts = ir.IfElse(header.test, header.if_branch, [], header.pos)
-        elif_ = flatten_branches(header.else_branch[0])
-        elif_[0].is_elif = True
-        elif_.appendleft(if_stmts)
-    else:
-        if_stmts = deque()
-        if_stmts.append(header)
-    return if_stmts
 
 
 # this should be context managed, like with predicated_scope()
@@ -205,6 +188,147 @@ class code_generator:
     type_map: dict
 
     def print(self):
+        pass
+
+
+class indent_manager(ContextDecorator):
+    # tracks indentation
+    pass
+
+
+class string_builder:
+    # should maybe be a base class
+    def __init__(self, types, encoding, linewrap=True, indent="    ", indent_level=0):
+        self.encoding = encoding
+        self.types = types
+        self.linewrap = linewrap
+        self.indent = indent
+        self.indent_level = indent_level
+        self.prefix = self.indent
+
+    def build_declarations(self):
+        # used to build declarations for all existing types at this point
+        decls = []
+        for t, names in self.types.items():
+            decls.append(f"{str(t)} {', '.join(name for name in names)};\n")
+        return decls
+
+    def print(self, stmt):
+        pass
+
+    @singledispatchmethod
+    def build_string(self, node, *args):
+        raise NotImplementedError
+
+    @build_string.register
+    def _(self, node: ir.IfElse):
+        return f"if({self.build_string(node.test)})"
+
+    @build_string.register
+    def _(self, node: ir.ForLoop):
+        assign_index = -1
+        for assign_index, (_,_) in node.walk_assignments():
+            pass
+        if assign_index == 0:
+            raise ValueError
+        loop_index, counter = next(node.walk_assignments())
+        target_type = self.types[loop_index]
+        self.print(f"for({target_type}{loop_index} = {counter.start}; {loop_index} < {counter.stop}; ++{loop_index})")
+
+    @build_string.register
+    def _(self, node: ir.WhileLoop):
+        self.print(f"while({self.build_string(node.test)})")
+
+    @build_string.register
+    def _(self, node: ir.Assign, types, declare=False):
+        target_type = types[node.target]
+        expr_type = types[node.value]
+        if node.in_place:
+            assert not declare
+            return f"{self.build_string(node.value)};"
+        else:
+            if declare:
+                decl = f"{str(types[node.target])} "
+            else:
+                decl = ""
+            if target_type == expr_type:
+                # actually needs formatting but whatever
+                stmt = f"{decl}{node.target} = {node.value}"
+                pass
+            else:
+                pass
+
+    @build_string.register
+    def _(self, node: ir.IfExpr):
+        pass
+
+    @build_string.register
+    def _(self, node: ir.BinOp):
+        pass
+
+    @build_string.register
+    def _(self, node: ir.UnaryOp):
+        pass
+
+
+class scope_entry(ContextDecorator):
+    def __init__(self):
+        pass
+
+    def __enter__(self):
+        pass
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+
+class Builder(VisitorBase):
+
+    def __call__(self, entry, printer, ctx):
+        self.printer = printer
+        self.ctx = ctx
+
+    @singledispatchmethod
+    def visit(self, node):
+        super().visit(node)
+
+    @visit.register
+    def _(self, node: ir.Function):
+        header = make_func_header_string(node, self.ctx.types, self.ctx.return_type, self.ctx.array_dim_type)
+        self.printer.print(header)
+        with scope_entry():
+            self.visit(node.body)
+
+    @visit.register
+    def _(self, node: list):
+        for stmt in node:
+            self.visit(stmt)
+
+    @visit.register
+    def _(self, node: ir.WhileLoop):
+        # print while header
+        self.visit(node.body)
+
+    @visit.register
+    def _(self, node: ir.ForLoop):
+        # Todo: rewrite, previous one was terrible
+        raise NotImplementedError
+
+    @visit.register
+    def _(self, node: ir.IfElse):
+        # print header
+        with scope_entry:
+            self.visit(node.if_branch)
+        if node.else_branch:
+            with scope_entry:
+                self.visit(node.else_branch)
+
+    @visit.register
+    def _(self, node: ir.Assign):
+        pass
+
+    @visit.register
+    def _(self, node: ir.BinOp):
         pass
 
 

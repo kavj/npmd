@@ -162,7 +162,7 @@ class ScalarType:
 class ArrayRef:
     ndims: int
     dtype: type
-    dims: typing.Union[int, str]
+    dims: typing.Tuple[typing.Union[int, str], ...]
     constant: clscond = False
 
     @property
@@ -582,7 +582,6 @@ class IfElse(StmtBase, Walkable):
     if_branch: typing.List[Statement]
     else_branch: typing.List[Statement]
     pos: Position
-    is_elif: bool = False
 
     def walk(self):
         for stmt in itertools.chain(self.if_branch, self.else_branch):
@@ -630,6 +629,7 @@ class WhileLoop(StmtBase, Walkable):
 
 @dataclass(frozen=True)
 class IntegralType:
+    name: str
     bit_width: int
     is_numpy_dtype: bool
     is_signed: bool
@@ -641,7 +641,7 @@ class FloatType:
     Used to aggregate numpy and python floating point types
 
     """
-
+    name: str
     bit_width: int
     is_numpy_dtype: bool
     is_signed: clscond = True
@@ -663,3 +663,30 @@ class Cast(Expression):
     @property
     def subexprs(self):
         yield self.expr
+
+
+@dataclass(frozen=True)
+class CPtrRef:
+    name: str
+    dtype: str
+
+
+@dataclass(frozen=True)
+class VarRef:
+    name: str
+    dtype: typing.Union[CPtrRef, NameRef]
+    declare: bool = False
+    stride: int = 0
+
+
+@dataclass
+class CForLoop(StmtBase):
+    start: Assign
+    stop: Expression
+    increment_by: typing.Union[NameRef, IntNode]
+    body: typing.List[Statement]
+    pos: Position
+
+    def walk(self):
+        for stmt in self.body:
+            yield stmt

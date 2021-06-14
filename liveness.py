@@ -1,3 +1,4 @@
+from contextlib import ContextDecorator
 from functools import cached_property, singledispatch, singledispatchmethod
 
 import ir
@@ -27,6 +28,17 @@ This is a may reach problem.. so that doesn't work as well..
 
 
 """
+
+
+class LoopClosure(ContextDecorator):
+
+    def __enter__(self, visitor, header):
+        self.visitor = visitor
+        self.stashed = visitor.enclosing_loop
+        visitor.enclosing_loop = header
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.visitor.enclosing_loop = self.stashed
 
 
 class liveness_info:
@@ -166,8 +178,24 @@ class LivenessSolver(VisitorBase):
         super().visit(node)
 
     @visit.register
+    def _(self, node: ir.ForLoop):
+        while self.changed:
+            self.changed = False
+            self.visit(node.body)
+        # visit header at end
+
+    @visit.register
+    def _(self, node: ir.IfElse):
+        self.visit(node.if_branch)
+        self.visit(node.else_branch)
+        self.visit(node.test)
+
+    @visit.register
     def _(self, node: list):
         # recompute liveness
-        for stmt in node:
+        self.current_block = id(node)
+        for index, stmt in enumerate(reversed(node)):
+            self.visit(stmt)
             if is_control_flow_entry_exit(stmt):
-                self.visit(stmt)
+                if index != len(node) - 1:
+                    self.current_block = id(stmt)
