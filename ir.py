@@ -8,7 +8,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from functools import cached_property
 
-
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
 inplace_ops = frozenset({"+=", "-=", "*=", "/=", "//=", "%=", "**=", "<<=", ">>=", "|=", "^=", "&=", "@="})
 unaryops = frozenset({"+", "-", "~", "not"})
@@ -627,6 +626,16 @@ class WhileLoop(StmtBase, Walkable):
 
 # utility nodes
 
+
+@dataclass(frozen=True)
+class Min(Expression):
+    exprs: typing.Tuple[typing.Union[NameRef, Expression], ...]
+
+    def subexprs(self):
+        for subexpr in self.exprs:
+            yield subexpr
+
+
 @dataclass(frozen=True)
 class IntegralType:
     name: str
@@ -665,6 +674,13 @@ class Cast(Expression):
         yield self.expr
 
 
+@dataclass
+class CascadeIf(StmtBase):
+    tests: typing.List[typing.Union[Constant, NameRef, Expression], ...]
+    if_branches: typing.List[list, ...]
+    else_branch: list
+
+
 @dataclass(frozen=True)
 class CPtrRef:
     name: str
@@ -677,16 +693,3 @@ class VarRef:
     dtype: typing.Union[CPtrRef, NameRef]
     declare: bool = False
     stride: int = 0
-
-
-@dataclass
-class CForLoop(StmtBase):
-    start: Assign
-    stop: Expression
-    increment_by: typing.Union[NameRef, IntNode]
-    body: typing.List[Statement]
-    pos: Position
-
-    def walk(self):
-        for stmt in self.body:
-            yield stmt

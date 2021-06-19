@@ -5,7 +5,6 @@ from functools import singledispatchmethod
 
 import ir
 
-from loopanalysis import target_iterable_conflicts
 from visitor import VisitorBase
 
 keywords = frozenset(set(keyword.kwlist))
@@ -14,6 +13,25 @@ builtin_names = frozenset(set(dir(builtins)))
 
 def shadows_builtin_name(name):
     return name in keywords or name in builtin_names
+
+
+def target_iterable_conflicts(header):
+    """
+    Python permits a target to clobber an iterable name, since the value obtained for an iterable
+    is based on whatever the name or expression evaluates to at the time the loop is first encountered.
+    This violates static typing though, thus it must be checked.
+    """
+
+    targets = set()
+    iterables = set()
+    duplicate_targets = set()
+    for target, iterable in header.walk_assignments():
+        if target in targets:
+            duplicate_targets.add(target)
+        targets.add(target)
+        iterables.add(iterable)
+    conflicts = targets.intersection(iterables)
+    return conflicts, duplicate_targets
 
 
 class TreeValidator(VisitorBase):

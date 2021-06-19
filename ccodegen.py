@@ -1,11 +1,12 @@
 import ctypes
 import numpy as np
+import textwrap
+import tempfile
 
 from contextlib import ContextDecorator
 from functools import singledispatchmethod
 
 import ir
-import loopanalysis
 from lowering import extract_name
 from visitor import VisitorBase, walk_all
 
@@ -20,7 +21,7 @@ At this point, statements are serialized to the level expected by C code.
 """
 
 
-def get_req_headers(types):
+def get_req_headers(types, imports):
     pass
 
 
@@ -49,22 +50,6 @@ class mangler:
     sets up function names by argument specialization
     """
     pass
-
-
-def build_symbols(entry):
-    # grabs all names that can be declared at outmermost scope
-    names = set()
-    if isinstance(entry, ir.Function):
-        for arg in entry.args:
-            names.add(extract_name(arg))
-    for stmt in walk_all(entry):
-        if isinstance(stmt, ir.Assign):
-            if isinstance(stmt.target, ir.NameRef):
-                names.add(extract_name(stmt.target))
-        elif isinstance(stmt, ir.ForLoop):
-            for target, _ in stmt.walk_assignments():
-                names.add(extract_name(target))
-    return names
 
 
 def requires_cast(expr, type_info):
@@ -104,81 +89,44 @@ def get_raw_scalar_name(basetype):
     return lltypes.get(basetype)
 
 
-def make_func_header_string(func, types, return_type, array_dim_type):
-    array_params = set()
-    args = func.args
-    for arg in args:
-        t = types.get(arg)
-        if isinstance(t, ir.ArrayRef):
-            for value in t.dims:
-                # append symbolic parameters
-                if isinstance(value, (str, ir.NameRef)):
-                    array_params.add(value)
-
-    lltypes = build_lltypes()
+def enter_func(func, lltypes, return_type):
     func_name = extract_name(func.name)
     rt = lltypes.get(return_type)
     assert rt is not None
-    added = set()
-    textual = []
-    for arg in args:
-        t = types.get(arg)
-        arg = extract_name(arg)
-        assert t is not None
-        textual.append(f"{t} {arg}")
-    for arg in array_params:
-        arg = extract_name(arg)
-        if arg in added:
-            raise ValueError(f"Array input parameter {arg} shadows argument name")
-        textual.append(f"{array_dim_type} {arg}")
-    sig = f"{rt} {func_name}({','.join(arg for arg in textual)})"
-    # Todo: make this wrap if necessary
-    return sig
+    args = (f"{lltypes[arg]} {extract_name(arg)}" for arg in func.args)
+    return f"{rt} {func_name} ({', '.join(arg for arg in args)})"
 
 
 def extract_leading_dim(array):
     return array.dims[0]
 
 
-def generate_for_loop_entry(header: ir.ForLoop, ctx):
-    loop_index_name = ctx.symbols.generate_name()
-    # this needs to actually generate a min over array params
-    # for loop bounds
+def enter_for_loop(header: ir.ForLoop, lltypes):
+    loop_index, counter = next(header.walk_assignments())
+    # we'll need to add the exception code for illegal (here) step
+    if counter.reversed:
+        end_expr = ">"
+        if counter.step == ir.IntNode(1):
+            step_expr = f"--{loop_index}"
+        else:
+            step_expr = f"{loop_index} -= {counter.step}"
+    else:
+        end_expr = "<"
+        if counter.step == ir.IntNode(1):
+            step_expr = f"++{loop_index}"
+        else:
+            step_expr = f"{loop_index} += {counter.step}"
 
-    array_refs = {it for target, it in header.walk_assignments() if not isinstance(it, ir.Counter)}
-
-    # These take a trivial assignment from the loop index
-    normalized_counters = loopanalysis.normalized_counters(header)
-    # strided = get_strided_refs(header, types)
-
-    # return header_text, body_assignments
+    return f"for({str(lltypes[loop_index])} {loop_index.name} = {counter.start}; {loop_index} {end_expr}" \
+           f" {counter.stop}; {step_expr})"
 
 
 def generate_expression(expr):
     return
 
 
-def generate_while_loop_entry(header: ir.WhileLoop):
+def enter_while_loop(header: ir.WhileLoop):
     return f"while({generate_expression(header.test)})"
-
-
-# this should be context managed, like with predicated_scope()
-# type observer
-def predicated_scope():
-    pass
-
-
-class scalar_code_printer(VisitorBase):
-    def __call__(self, entry, declared):
-        # for simplicity, declare
-        # at function entry unless single use
-        self.declared = declared
-        assert isinstance(entry, ir.Function)
-
-
-class vector_code_printer(VisitorBase):
-    # We need to split this into its own thing
-    pass
 
 
 class code_generator:
@@ -220,56 +168,6 @@ class string_builder:
     def build_string(self, node, *args):
         raise NotImplementedError
 
-    @build_string.register
-    def _(self, node: ir.IfElse):
-        return f"if({self.build_string(node.test)})"
-
-    @build_string.register
-    def _(self, node: ir.ForLoop):
-        assign_index = -1
-        for assign_index, (_,_) in node.walk_assignments():
-            pass
-        if assign_index == 0:
-            raise ValueError
-        loop_index, counter = next(node.walk_assignments())
-        target_type = self.types[loop_index]
-        self.print(f"for({target_type}{loop_index} = {counter.start}; {loop_index} < {counter.stop}; ++{loop_index})")
-
-    @build_string.register
-    def _(self, node: ir.WhileLoop):
-        self.print(f"while({self.build_string(node.test)})")
-
-    @build_string.register
-    def _(self, node: ir.Assign, types, declare=False):
-        target_type = types[node.target]
-        expr_type = types[node.value]
-        if node.in_place:
-            assert not declare
-            return f"{self.build_string(node.value)};"
-        else:
-            if declare:
-                decl = f"{str(types[node.target])} "
-            else:
-                decl = ""
-            if target_type == expr_type:
-                # actually needs formatting but whatever
-                stmt = f"{decl}{node.target} = {node.value}"
-                pass
-            else:
-                pass
-
-    @build_string.register
-    def _(self, node: ir.IfExpr):
-        pass
-
-    @build_string.register
-    def _(self, node: ir.BinOp):
-        pass
-
-    @build_string.register
-    def _(self, node: ir.UnaryOp):
-        pass
-
 
 class scope_entry(ContextDecorator):
     def __init__(self):
@@ -282,10 +180,9 @@ class scope_entry(ContextDecorator):
         pass
 
 
-class Builder(VisitorBase):
+class LoweringBuilder(VisitorBase):
 
-    def __call__(self, entry, printer, ctx):
-        self.printer = printer
+    def __call__(self, entry, ctx):
         self.ctx = ctx
 
     @singledispatchmethod
@@ -293,44 +190,22 @@ class Builder(VisitorBase):
         super().visit(node)
 
     @visit.register
-    def _(self, node: ir.Function):
-        header = make_func_header_string(node, self.ctx.types, self.ctx.return_type, self.ctx.array_dim_type)
-        self.printer.print(header)
-        with scope_entry():
-            self.visit(node.body)
+    def _(self, node: ir.ForLoop):
+        pass
+        # bounds = lower_for_loop_header_bounds(node, self.ctx.symbols)
 
     @visit.register
     def _(self, node: list):
+        repl = []
         for stmt in node:
-            self.visit(stmt)
+            if isinstance(stmt, ir.ForLoop):
+                pass
+                # bounds = lower_for_loop_header_bounds(node, self.ctx.symbols)
+                loop_index = self.ctx.make_unique_name()
+                # These are all affine statements, thus simple
+                # entry_prologue = lower_iterator_access_funcs(stmt, loop_index)
+                # body = self.visit(stmt.body)
+                # header = ir.ForLoop([(loop_index, bounds)], body, stmt.pos)
+                # repl.append(header)
+            # elif isinstance()
 
-    @visit.register
-    def _(self, node: ir.WhileLoop):
-        # print while header
-        self.visit(node.body)
-
-    @visit.register
-    def _(self, node: ir.ForLoop):
-        # Todo: rewrite, previous one was terrible
-        raise NotImplementedError
-
-    @visit.register
-    def _(self, node: ir.IfElse):
-        # print header
-        with scope_entry:
-            self.visit(node.if_branch)
-        if node.else_branch:
-            with scope_entry:
-                self.visit(node.else_branch)
-
-    @visit.register
-    def _(self, node: ir.Assign):
-        pass
-
-    @visit.register
-    def _(self, node: ir.BinOp):
-        pass
-
-
-class compile_driver(VisitorBase):
-    pass

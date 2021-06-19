@@ -5,7 +5,6 @@ import typing
 from collections import defaultdict
 from contextlib import ContextDecorator
 from itertools import count
-from functools import singledispatchmethod
 
 import ir
 from Canonicalize import replace_builtin_call
@@ -230,16 +229,6 @@ class CFGBuilder(ast.NodeVisitor):
                     self.next_block()
                 self.visit(stmt)
                 prev = stmt
-
-    # def visit_Attribute(self, node: ast.Attribute) -> ir.AttributeRef:
-    #    value = self.visit(node.value)
-    #    if node.attr == "shape":
-    #        value = ir.ShapeRef(value)
-    #    elif isinstance(value, ir.AttributeRef):
-    #        value = ir.AttributeRef(value.value, value.attr + node.attr)
-    #    else:
-    #        value = ir.AttributeRef(value, node.attr)
-    #    return value
 
     def visit_Constant(self, node: ast.Constant) -> ir.Constant:
         if isinstance(node.value, str):
