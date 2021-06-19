@@ -8,7 +8,7 @@ from functools import singledispatchmethod
 
 import ir
 from lowering import extract_name
-from visitor import VisitorBase, walk_all
+from visitor import VisitorBase
 
 """
 
@@ -19,6 +19,16 @@ This still needs a customized visitor to generate statements.
 At this point, statements are serialized to the level expected by C code.
 
 """
+
+
+class ctx:
+
+    def __init__(self, uniform, decl_map, type_mapping, lltype_mapping):
+        self.uniform = uniform
+        self.decl_map = decl_map
+        self.unique_call_names = set()
+        self.type_mapping = type_mapping
+        self.lltype_mapping = lltype_mapping
 
 
 def get_req_headers(types, imports):

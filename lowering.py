@@ -21,28 +21,6 @@ def unwrap_loop_body(node):
     return node.body if isinstance(node, (ir.ForLoop, ir.WhileLoop)) else node
 
 
-def contained_writes(entry):
-    """
-    return (writes_normal, writes_subscript)
-
-    This way we can determine if it's legal to optimize to identity
-
-    This is useful for a lot of things. For example, we might have a uniform assignment
-    in a varying branch, which as a result still requires some kind of predication
-
-    """
-    # check separately writes on true branch, writes on false branch
-    written_vars = set()
-    written_exprs = set()
-    for stmt in unwrap_loop_body(entry):
-        if isinstance(stmt, ir.Assign):
-            if isinstance(stmt.target, ir.NameRef):
-                written_vars.add(stmt.target)
-            else:
-                written_exprs.add(stmt.target)
-    return written_vars, written_exprs
-
-
 def constraint_variables(node: ir.ForLoop):
     iterable_constraints = set()
     range_constraints = set()
@@ -54,37 +32,6 @@ def constraint_variables(node: ir.ForLoop):
         else:
             iterable_constraints.add(iterable)
     return iterable_constraints, range_constraints
-
-
-def final_header_assignments(header):
-    assigns = {}
-    for target, iterable in header.walk_assignments():
-        assigns[target] = iterable
-    return assigns
-
-
-def post_ordering(header):
-    """
-    returns post ordering of a loop nest
-    consecutive loops at the same nesting level appear as nested sequences
-    """
-    nested = contained_loops(header.body)
-    nested_count = len(nested)
-    if nested_count == 0:
-        nested = [header]
-    elif nested_count == 1:
-        nested.append(header)
-    else:
-        nested = [nested, header]
-    return nested
-
-
-def loop_body_exits(body):
-    exits = []
-    for stmt in walk_branches(body):
-        if isinstance(stmt, (ir.Break, ir.Return)):
-            exits.append(stmt)
-    return exits
 
 
 class name_generator:
