@@ -174,8 +174,8 @@ class scope_entry(ContextDecorator):
 
 class LoweringBuilder(VisitorBase):
 
-    def __call__(self, entry, ctx):
-        self.ctx = ctx
+    def __call__(self, entry, ctx_):
+        self.context = ctx_
 
     @singledispatchmethod
     def visit(self, node):
@@ -193,7 +193,7 @@ class LoweringBuilder(VisitorBase):
             if isinstance(stmt, ir.ForLoop):
                 pass
                 # bounds = lower_for_loop_header_bounds(node, self.ctx.symbols)
-                loop_index = self.ctx.make_unique_name()
+                loop_index = self.context.make_unique_name()
                 # These are all affine statements, thus simple
                 # entry_prologue = lower_iterator_access_funcs(stmt, loop_index)
                 # body = self.visit(stmt.body)

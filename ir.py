@@ -608,6 +608,14 @@ class WhileLoop(StmtBase, Walkable):
 
 # utility nodes
 
+@dataclass(frozen=True)
+class Max(Expression):
+    exprs: typing.Tuple[typing.Union[NameRef, Expression], ...]
+
+    def subexprs(self):
+        for subexpr in self.exprs:
+            yield subexpr
+
 
 @dataclass(frozen=True)
 class Min(Expression):

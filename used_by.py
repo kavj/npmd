@@ -31,7 +31,7 @@ def _(node: ir.Assign):
     return reads, writes
 
 
-@reads_writes
+@reads_writes.register
 def _(node: ir.Expression):
     return {subexpr for subexpr in node.post_order_walk() if not subexpr.constant}, ()
 

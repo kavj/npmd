@@ -1,3 +1,4 @@
+import ctypes.wintypes
 import itertools
 import operator
 
@@ -14,6 +15,7 @@ from visitor import VisitorBase, walk_all, walk_branches
 
 def extract_name(name):
     return name.name if isinstance(name, ir.NameRef) else name
+
 
 def is_innermost(header):
     return not any(stmt.is_loop_entry for stmt in walk_branches(header))
@@ -148,7 +150,7 @@ class DeclBuilder(VisitorBase):
         self.cumulative = self.cumulative.copy()
         for_id = id(node)
         body_id = id(node.body)
-        if(len(node.assigns) != 1):
+        if (len(node.assigns) != 1):
             # more trouble than it's worth
             raise ValueError("unable to build loop declarations for a multi-variate header")
         target, _ = next(node.walk_assignments())
@@ -197,8 +199,8 @@ def flatten_if_branch_tests(header: ir.IfElse):
     body = header.if_branch
     tests = [header.test]
     while ((len(current) == 1)
-            and isinstance(body[0], ir.IfElse)
-            and not body[0].else_branch):
+           and isinstance(body[0], ir.IfElse)
+           and not body[0].else_branch):
         tests.append(body[0]).test
         body = body[0].if_branch
     if len(tests) > 1:
@@ -310,7 +312,7 @@ def can_convert_break_to_noop(entry):
 
 def expand_inplace_op(expr):
     assert isinstance(expr, ir.BinOp)
-    op_conversion = {"*=": "*", "-=": "-", "/=" : "/", "//=": "//", "**=": "**", "|=": "|", "&=" : "&",
+    op_conversion = {"*=": "*", "-=": "-", "/=": "/", "//=": "//", "**=": "**", "|=": "|", "&=": "&",
                      "^=": "^", "~=": "~"}
     op = op_conversion[expr.op]
     return ir.BinOp(expr.left, expr.right, op)
@@ -434,9 +436,9 @@ def numeric_max_iter_count(bound):
     Find max iteration count for an ir.Counter object with purely numeric parameters
 
     """
-    assert(isinstance(bound.start, ir.IntNode))
-    assert(isinstance(bound.stop, ir.IntNode))
-    assert(isinstance(bound.step, ir.IntNode))
+    assert (isinstance(bound.start, ir.IntNode))
+    assert (isinstance(bound.stop, ir.IntNode))
+    assert (isinstance(bound.step, ir.IntNode))
     start = bound.start.value
     stop = bound.stop.value
     step = bound.step.value
@@ -710,19 +712,9 @@ def simplify_for_loop(header, symbols, types, arrays, offsets):
     return loop_header
 
 
-# refactoring of branch invariant assigned expressions
-
-def find_subscripted_clobber_seqs():
-    pass
-
-
-def find_common_prefix():
-    pass
-
-
 def partition_branches(node):
     if isinstance(node, ir.IfElse):
-        partitions =  (block_partition(node.if_branch), block_partition(node.else_branch))
+        partitions = (block_partition(node.if_branch), block_partition(node.else_branch))
     elif isinstance(node, ir.CascadeIf):
         partitions = [block_partition(branch) for branch in node.if_branches]
         partitions.append(block_partition(node.else_branch))
@@ -755,14 +747,221 @@ def find_branch_assign_stats(node):
     return (tracking, name_assigns, subscript_assigns, common_name_targets,
             common_subscripts, partial_targets, partial_subscripts)
 
-def refactor_branch(node, ctx):
+
+def group_assigns(stmts):
+    for stmt in stmts:
+        if isinstance(stmt, ir.Assign):
+            target = stmt.target
+            grouped[target].add(stmt.value)
+    return grouped
 
 
-    (tracking, name_assigns, subscript_assigns, common_name_targets,
-     common_subscripts, partial_targets, partial_subscripts) = find_branch_assign_stats(node)
-    # F
+def is_safely_optimizable_branch(stmts):
+    kills = set()
+    for stmt in stmts:
+        if not isinstance(stmt, ir.Assign):
+            # no support for calls or control flow
+            return False
+        else:
+            target = stmt.target
+            # memory clobbers
+            if isinstance(target, ir.Subscript):
+                return False
+            elif isinstance(target, ir.NameRef):
+                if target in kills:
+                    # multiple writes
+                    return False
+                kills.add(target)
 
-    # Here we're tracking value numbering from a common branch point
-    # to check for either assigned values or target access functions, which share
-    # the same registered value number across 2 or more branches. As long as these
-    # do not
+
+def extract_min_max_from_simple_branch(node: ir.IfElse):
+    if not isinstance(test, ir.BinOp):
+        return
+    elif not (is_safely_optimizable_branch(node.if_branch) and is_safely_optimizable_branch(node.else_branch)):
+        return
+
+    def get_assignment_by_target(stmts):
+        assigns = {}
+        for stmt in stmts:
+            assigns[stmt.target] = stmt.value
+
+    test = node.test
+    op = test.op
+    # negated only works as expected if we don't have casts or unordered operands
+    if op in (">", ">="):
+        expr_builder = ir.Max
+        negated_builder = ir.Min
+    elif op in ("<", "<="):
+        expr_builder = ir.Min
+        negated_builder = ir.Max
+    if builder is None:
+        return
+    if_assigns = get_assignment_by_target(node.if_branch)
+    else_assigns = get_assignment_by_target(node.else_branch)
+    shared_targets = set(if_assigns.keys()).intersection(else_assigns.keys())
+    single_targets = set(if_assigns.keys()).union(else_assigns.keys()).difference(shared_targets)
+    unoptimizable = set()  # anything that lacks an optimizable pattern
+    optimizable = {}
+    true_term = test.left
+    false_term = test.right
+    is_integer_comparison = (not isinstance(true_term, ir.Cast)
+                             and not isinstance(false_term, ir.Cast)
+                             and types.is_integral_type(true_term)
+                             and types.is_integral_type(false_term))
+
+    for target in shared_targets:
+        defns = (if_assigns[target], else_assigns[target])
+        if defns == (true_term, false_term):
+            optimizable[target] = expr_builder((on_true, on_false))
+        elif defns == (false_term, true_term):
+            if is_integer_comparison:
+                optimizable[target] = negated_builder((on_false, on_true))
+            else:
+                unoptimizable.add(target)
+        elif defns[0] == defns[1]:
+            optimizable[target] = on_true
+        else:
+            unoptimizable.add(target)
+
+    standard_form = (true_term, false_term)
+    swapped = (false_term, true_term)
+    noops_true = ((true_term, None), (None, true_term))
+    noops_false = ((false_term, None), (None, false_term))
+    single_standard_true_target = (true_term, None)
+    single_standard_false_target = (None, false_term)
+    single_swap_true_target = (false_term, None)
+    single_swap_false_target = (None, true_term)
+
+    if is_integer_comparison:
+        # no unordered operands
+        for target in shared_targets:
+            defns = (if_assigns[target], else_assigns[target])
+            if defns == standard_form:
+                optimizable[target] = expr_builder(defns)
+            elif defns == swapped:
+                optimizable[target] = negated_builder(defns)
+            elif defns[0] == defns[1]:
+                # either a noop or an invariant assignment
+                optimizable[target] = defns[0]
+            else:
+                unoptimizable.add(target)
+        for target in single_targets:
+            defns = (if_assigns.get[target], else_assigns.get(target))
+            if target == true_term:
+                if defns in noops_true:
+                    optimizable[target] = target
+                elif defns == single_standard_true_target:
+                    optimizable[target] = expr_builder(standard_form)
+                elif defns == single_swap_true_target:
+                    optimizable[target] = negated_builder((standard_form))
+                else:
+                    unoptimizable.add(target)
+            elif target == false_term:
+                if defns in noops_false:
+                    optimizable[target] = target
+                elif defns == single_standard_false_target:
+                    optimizable[target] = expr_builder(standard_form)
+                elif defns == single_swap_false_target:
+                    optimizable[target] = negated_builder((standard_form))
+                else:
+                    unoptimizable.add(target)
+            else:
+                unoptimizable.add(target)
+    else:
+        # more conservative due to casts or floating point values in expression
+        for target in shared_targets:
+            defns = (if_assigns[target], else_assigns[target])
+            if defns == standard_form:
+                optimizable[target] = expr_builder(defns)
+            elif defns[0] == defns[1]:
+                # either a noop or an invariant assignment
+                optimizable[target] = defns[0]
+            else:
+                unoptimizable.add(target)
+        for target in single_targets:
+            defns = (if_assigns.get[target], else_assigns.get(target))
+            if target == true_term:
+                if defns in noops_true:
+                    optimizable[target] = target
+                elif defns == single_standard_true_target:
+                    optimizable[target] = expr_builder(standard_form)
+                else:
+                    unoptimizable.add(target)
+            elif target == false_term:
+                if defns in noops_false:
+                    optimizable[target] = target
+                elif defns == single_standard_false_target:
+                    optimizable[target] = expr_builder(standard_form)
+                else:
+                    unoptimizable.add(target)
+            else:
+                unoptimizable.add(target)
+
+    # Now schedule remainder in 2 passes, leading with extracted ops
+    if optimizable:
+        extracted = []
+        for assign in itertools.chain(node.if_branch, node.else_branch):
+            target = assign.target
+            if target in unoptimizable:
+                continue
+            expr = optimizable[target]
+            if target == expr:
+                continue
+            extracted.append(ir.Assign(target, expr, assign.pos))
+    else:
+        extracted = None
+
+    if unoptimizable:
+        # Note: if we made it this far, it is a simple branch,
+        # containing only assignments, without supported patterns
+        repl_if = []
+        repl_else = []
+        for assign in node.if_branch:
+            if assign.target in unoptimizable:
+                repl_if.append(assign)
+        for assign in node.else_branch:
+            if assign.target in unoptimizable:
+                repl_else.append(assign)
+        repl_branch = ir.IfElse(node.test, repl_if, repl_else)
+    else:
+        repl_branch = None
+
+    return extracted, repl_branch
+
+
+def extract_conditional_adds(node: ir.IfElse, types):
+    pass
+
+
+def branch_refactor_info(node, partial_targets):
+    # Todo: return to this later
+    # (tracking, name_assigns, subscript_assigns, common_name_targets,
+    # common_subscripts, partial_targets, partial_subscripts) = find_branch_assign_stats(node)
+
+    # group assignments by partial targets.
+    grouped = defaultdict(set)
+    if isinstance(node, ir.IfElse):
+        grouped = group_assigns(itertools.chain(node.if_branch, node.else_branch))
+    else:
+        # assume cascaded
+        grouped = group_assigns(itertools.chain(*(branch for branch in node.if_branches), (node.else_branch,)))
+    can_make_noop_logical = set()
+    # we assume that varying subscripted writes do not overlap on varying branches
+    # since these will be expanded later. It's just important that we don't reorder
+    # reads and writes within the same branch.
+
+    # assume it's safe to compute anything not involving division or modulo ops, {/, //, %, /=, //=, %=}
+
+    for target, values in grouped.items():
+        can_convert_to_noop = True
+        for value in values:
+            if value == target:
+                continue
+            elif (isinstance(value, ir.BinOp)
+                  and ((value.left == target or value.right == target)
+                       or (value.op in ("+", "-", "<", ">", "&", "|", "^")))):
+                continue
+            can_convert_to_noop = False
+            break
+        if can_convert_to_noop:
+            can_make_noop_logical.add(target)

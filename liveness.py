@@ -1,5 +1,5 @@
 from contextlib import ContextDecorator
-from functools import cached_property, singledispatch, singledispatchmethod
+from functools import singledispatchmethod
 
 import ir
 
