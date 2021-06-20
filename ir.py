@@ -431,24 +431,6 @@ class MinConstraint(Expression):
 
 @dataclass(frozen=True)
 class Counter(Expression):
-    """
-    This is used to distinguish either an unpacked counter of an enumerate
-    expression or a range operation. For our purposes, the difference is that
-    range may have a non-unit step and must have a stop parameter.
-
-
-    This is used to distinguish an unpacked counter of an enumerate expression.
-    It's primarily used to assist in unpacking. Otherwise the common pattern
-
-    for index, value in enumerate(iterable):
-        ...
-
-    has the serialized header representation
-
-    [(index, Counter(IntNode(0), None, IntNode(1))), (value, iterable)]
-
-    """
-
     start: ValueRef
     stop: typing.Optional[ValueRef]
     step: ValueRef
@@ -679,6 +661,15 @@ class CascadeIf(StmtBase):
     tests: typing.List[typing.Union[Constant, NameRef, Expression], ...]
     if_branches: typing.List[list, ...]
     else_branch: list
+
+    def __post_init__(self):
+        assert(len(self.tests) == len(self.if_branches))
+
+    def walk(self):
+        for branch in self.if_branches:
+            for stmt in branch:
+                yield stmt
+        yield self.else_branch
 
 
 @dataclass(frozen=True)

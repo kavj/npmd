@@ -21,20 +21,6 @@ At this point, statements are serialized to the level expected by C code.
 """
 
 
-class ctx:
-
-    def __init__(self, uniform, decl_map, type_mapping, lltype_mapping):
-        self.uniform = uniform
-        self.decl_map = decl_map
-        self.unique_call_names = set()
-        self.type_mapping = type_mapping
-        self.lltype_mapping = lltype_mapping
-
-
-def get_req_headers(types, imports):
-    pass
-
-
 def build_lltypes():
     # bool is malleable, we may cast it implicitly
     lltypes = {bool: "bool"}
@@ -55,48 +41,44 @@ def build_lltypes():
     return lltypes
 
 
+class ctx:
+
+    def __init__(self, uniform, decl_map, type_mapping, lltype_mapping):
+        self.uniform_vars = uniform           # call invariant
+        self.decl_map = decl_map              # indicates where variable names must be declared
+        self.unique_call_names = set()        # qualified call names
+        self.type_mapping = type_mapping      # type -> {vars of this type}
+        self.lltype_mapping = lltype_mapping  # type -> {back end type}
+
+    def get_req_headers(self):
+        pass
+
+    def get_raw_array_pointer_name(self, basetype):
+        # move inside a class
+        t = basetype.dtype if isinstance(basetype, (ir.ArrayRef, ir.ViewRef)) else basetype
+        return self.lltype_mapping.get(t)
+
+    def get_raw_scalar_name(self, basetype):
+        return self.lltype_mapping.get(basetype)
+
+
 class mangler:
     """
     sets up function names by argument specialization
     """
     pass
 
-
-def requires_cast(expr, type_info):
-    pass
-
-
-def make_loop_exprs(header):
-    """
-    Makes simple bounds
-    For each array, push either stride expression or subscript
-
-    """
-    pass
-
-
-def mangle_name(func):
-    return
+    def mangle_name(self, func):
+        return
 
 
 class FuncWrapperGen:
     func: ir.Function
+    mangler_: mangler
 
     @property
     def mangled(self):
-        return mangle_name(self.func.name)
-
-
-def get_raw_array_pointer_name(basetype):
-    # move inside a class
-    lltypes = build_lltypes()
-    t = basetype.dtype if isinstance(basetype, (ir.ArrayRef, ir.ViewRef)) else basetype
-    return lltypes.get(t)
-
-
-def get_raw_scalar_name(basetype):
-    lltypes = build_lltypes()
-    return lltypes.get(basetype)
+        return self.mangler_.mangle_name(self.func.name)
 
 
 def enter_func(func, lltypes, return_type):

@@ -3,10 +3,12 @@ import operator
 
 from collections import deque, defaultdict
 from contextlib import ContextDecorator
-from functools import singledispatchmethod
+from functools import singledispatch, singledispatchmethod
 
 import ir
 
+from used_by import reads_writes
+from value_numbering import branch_value_numbering
 from visitor import VisitorBase, walk_all, walk_branches
 
 
@@ -19,6 +21,20 @@ def is_innermost(header):
 
 def unwrap_loop_body(node):
     return node.body if isinstance(node, (ir.ForLoop, ir.WhileLoop)) else node
+
+
+def block_partition(stmts):
+    partitions = []
+    curr = []
+    for stmt in stmts:
+        if isinstance(stmt, (ir.IfElse, ir.CascadeIf, ir.ForLoop, ir.WhileLoop)):
+            if curr:
+                partitions.append(curr)
+                curr = []
+            partitions.append(stmt)
+    if curr:
+        partitions.append(curr)
+    return tuple(partitions)
 
 
 def constraint_variables(node: ir.ForLoop):
@@ -159,7 +175,7 @@ class DeclBuilder(VisitorBase):
                 return (target,) if isinstance(target, ir.NameRef) else ()
 
 
-def flatten_nested_branches(header: ir.IfElse):
+def extract_elifs(header: ir.IfElse):
     branches = [(header.test, header.if_branch)]
     stmt = header.else_branch
     while len(stmt) == 1 and isinstance(stmt[0], ir.IfElse):
@@ -172,12 +188,47 @@ def flatten_nested_branches(header: ir.IfElse):
     return branches
 
 
+def flatten_if_branch_tests(header: ir.IfElse):
+    """
+    This flattens perfectly checks into a long single conditional without reordering.
+
+    """
+
+    body = header.if_branch
+    tests = [header.test]
+    while ((len(current) == 1)
+            and isinstance(body[0], ir.IfElse)
+            and not body[0].else_branch):
+        tests.append(body[0]).test
+        body = body[0].if_branch
+    if len(tests) > 1:
+        header = ir.IfElse(ir.BoolOp(tuple(tests), "and"), body, header.else_branch, header.pos)
+    return header
+
+
+def cascade_flatten_branch_tests(header: ir.IfElse):
+    header = flatten_if_branch_tests(header)
+    repl_if_body = []
+    for stmt in header.if_branch:
+        if isinstance(stmt, ir.IfElse):
+            stmt = flatten_if_branch_tests(stmt)
+        repl_if_body.append(stmt)
+    repl_else_body = []
+    for stmt in header.else_branch:
+        if isinstance(stmt, ir.IfElse):
+            stmt = flatten_if_branch_tests(stmt)
+        repl_else_body.append(stmt)
+    header.if_branch = repl_if_body
+    header.else_branch = repl_else_body
+    return header
+
+
 def renest_branches(header: ir.IfElse, varying):
     """
     group cascaded branches, based on whether they are uniformly taken
 
     """
-    branches = flatten_nested_branches(header)
+    branches = extract_elifs(header)
     if len(branches) < 3:
         return header
     else_branch = branches.pop()
@@ -657,3 +708,61 @@ def simplify_for_loop(header, symbols, types, arrays, offsets):
     stmts.extend(header.body)
     loop_header = ir.ForLoop([(loop_index, bound)], stmts, header.pos)
     return loop_header
+
+
+# refactoring of branch invariant assigned expressions
+
+def find_subscripted_clobber_seqs():
+    pass
+
+
+def find_common_prefix():
+    pass
+
+
+def partition_branches(node):
+    if isinstance(node, ir.IfElse):
+        partitions =  (block_partition(node.if_branch), block_partition(node.else_branch))
+    elif isinstance(node, ir.CascadeIf):
+        partitions = [block_partition(branch) for branch in node.if_branches]
+        partitions.append(block_partition(node.else_branch))
+        partitions = tuple(partitions)
+    else:
+        raise TypeError("not a valid branch node")
+    return partitions
+
+
+def find_branch_assign_stats(node):
+    tracking, name_assigns, subscript_assigns = branch_value_numbering(node)
+    partitioned = partition_branches(node)
+    if not assigned[-1] and not subscript_assigns[-1]:
+        # no assignments in else branch
+        # This may need to expand later in case of subsequent calls
+        assigned.pop()
+        subscript_assigns.pop()
+    common_name_targets = set(assigned[0].keys())
+    common_subscripts = set(subscript_assigns.keys())
+    partial_targets = common_name_targets.copy()
+    partial_subscripts = common_subscripts.copy()
+    for assign, sassign in zip(assigned[1:], subscript_assigns[1:]):
+        keys = assign.keys()
+        skeys = sassign.keys()
+        common_name_targets.intersection_update(keys)
+        common_subscripts.intersection_update(skeys)
+        partial_targets.update(keys)
+        partial_subscripts.update(skeys)
+
+    return (tracking, name_assigns, subscript_assigns, common_name_targets,
+            common_subscripts, partial_targets, partial_subscripts)
+
+def refactor_branch(node, ctx):
+
+
+    (tracking, name_assigns, subscript_assigns, common_name_targets,
+     common_subscripts, partial_targets, partial_subscripts) = find_branch_assign_stats(node)
+    # F
+
+    # Here we're tracking value numbering from a common branch point
+    # to check for either assigned values or target access functions, which share
+    # the same registered value number across 2 or more branches. As long as these
+    # do not

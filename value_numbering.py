@@ -1,6 +1,6 @@
 import itertools
 
-from functools import singledispatchmethod
+from functools import singledispatch, singledispatchmethod
 
 import ir
 
@@ -12,14 +12,16 @@ class ValueTracking:
         self.exprs = {}
         self.parameters = {}
         self.current = {}
+        self.subscripted_writes = {}
         self.number_gen = itertools.count()
 
     def reset_assignments(self):
         self.current = {}
+        self.subscripted_writes = {}
 
     @singledispatchmethod
-    def get_value_number(self):
-        raise TypeError
+    def get_value_number(self, expr):
+        raise TypeError(f"No method to get value number for type {type(expr)}")
 
     @get_value_number.register
     def _(self, expr: ir.Expression):
@@ -73,10 +75,23 @@ class ValueTracking:
         if expr not in self.parameters:
             self.parameters[expr] = next(self.number_gen)
 
-    def bind_value_to_name(self, target, value):
+    def bind_value(self, target, value):
         if isinstance(target, ir.NameRef):
             value_num = self.get_value_number(value)
             self.current[target] = value_num
+        elif isinstance(target, ir.Subscript):
+            # memory write
+            target_value_num = self.get_value_number(target)
+            value_num = self.get_value_number(value)
+            # indicates the last thing assigned to an expression
+            # there may be expression aliasing, but we can always group by
+            # view or base array reference
+            if target_value_num not in self.subscripted_writes:
+                self.subscripted_writes[target_value_num] = {value_num}
+            else:
+                self.subscripted_writes[target_value_num].add(value_num)
+        else:
+            raise TypeError
 
 
 def contains_loops(node):
@@ -120,7 +135,13 @@ def local_value_numbering(stmts, tracking=None):
     return tracking
 
 
-def branch_value_numbering(node: ir.IfElse):
+@singledispatch
+def branch_value_numbering(node):
+    raise NotImplementedError
+
+
+@branch_value_numbering.register
+def _(node: ir.IfElse):
     if contains_control_flow(node.if_branch) or contains_control_flow(node.else_branch):
         # haven't decided yet
         raise ValueError
@@ -131,18 +152,27 @@ def branch_value_numbering(node: ir.IfElse):
     tracking.reset_assignments()
     local_value_numbering(node.else_branch, tracking)
     assigned_in_else = tracking.current
-    return tracking, assigned_in_if, assigned_in_else
+    tracking.reset_assignments()
+    return tracking, (assigned_in_if, assigned_in_else)
 
 
-def block_partition(stmts):
-    partitions = []
-    curr = []
-    for stmt in stmts:
-        if isinstance(stmt, (ir.IfElse, ir.CascadeIf, ir.ForLoop, ir.WhileLoop)):
-            if curr:
-                partitions.append(curr)
-                curr = []
-            partitions.append(stmt)
-    if curr:
-        partitions.append(curr)
-    return tuple(partitions)
+@branch_value_numbering.register
+def _(node: ir.CascadeIf):
+    if any(contains_control_flow(branch) for branch in node.if_branches) or contains_control_flow(node.else_branch):
+        raise ValueError
+    tracking = ValueTracking()
+    for branch in node.if_branches:
+        tracking.register_parameters(branch, tracking)
+    tracking.register_parameters(node.else_branch, tracking)
+    assigns = []
+    subscript_writes = []
+    for branch in node.if_branches:
+        local_value_numbering(branch, tracking)
+        assigns.append(tracking.current)
+        subscript_writes.append(tracking.subscripted_writes)
+        tracking.reset_assignments()
+    if node.else_branch:
+        local_value_numbering(node.else_branch, tracking)
+        subscript_writes.append(tracking.subscripted_writes)
+        tracking.reset_assignments()
+    return tracking, tuple(assigns), tuple(subscript_writes)
