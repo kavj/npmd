@@ -91,7 +91,7 @@ def make_numpy_array(node: ir.Call, line):
     if func_name == "numpy.ones":
         fill_value = 1
     elif func_name == "numpy.zeros":
-        fill_value = 2
+        fill_value = 0
     elif func_name == "numpy.empty":
         fill_value = None
     else:
