@@ -200,4 +200,3 @@ class LoweringBuilder(VisitorBase):
                 # header = ir.ForLoop([(loop_index, bounds)], body, stmt.pos)
                 # repl.append(header)
             # elif isinstance()
-

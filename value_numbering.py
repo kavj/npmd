@@ -1,97 +1,93 @@
 import itertools
 
-from functools import singledispatch, singledispatchmethod
-
 import ir
 
 from visitor import walk_branches
 
 
 class ValueTracking:
+    """
+    Rethinking...
+    We should be able to annotate each assignment with value numbers
+    for parameters that have been set.
+
+    This way we can check
+
+    """
+
     def __init__(self):
+        self.initial_values = {}
         self.exprs = {}
-        self.parameters = {}
-        self.current = {}
-        self.subscripted_writes = {}
+        self.subscript_writes = set()  # helps track write refs
+        # Distinguish between last written and
+        self.final_values = {}
         self.number_gen = itertools.count()
 
     def reset_assignments(self):
-        self.current = {}
-        self.subscripted_writes = {}
+        # retain anything we have already numbered, just not the state of assignments
+        self.final_values = {}
+        self.subscript_writes = set()
 
-    @singledispatchmethod
-    def get_value_number(self, expr):
-        raise TypeError(f"No method to get value number for type {type(expr)}")
+    def lookup_name(self, name):
+        value_id = self.final_values.get(name)
+        if value_id is None:
+            value_id = self.initial_values[name]
+        return value_id
 
-    @get_value_number.register
-    def _(self, expr: ir.Expression):
-        key = tuple(self.get_value_number(subexpr) for subexpr in expr.subexprs)
-        value_num = self.exprs.get(key)
-        if value_num is None:
-            value_num = next(self.number_gen)
-            self.exprs[key] = value_num
-        return value_num
-
-    @get_value_number.register
-    def _(self, expr: ir.NameRef):
-        value_num = self.current.get(expr)
-        if value_num is None:
-            value_num = self.parameters.get(expr)
-            if value_num is None:
-                raise ValueError
-        return value_num
-
-    @get_value_number.register
-    def _(self, expr: ir.Constant):
-        return self.parameters.get(expr)
-
-    @singledispatchmethod
-    def register_parameters(self, expr):
-        raise NotImplementedError
-
-    @register_parameters.register
-    def _(self, expr: ir.Assign):
-        self.register_parameters(expr.target)
-        self.register_parameters(expr.value)
-
-    @register_parameters.register
-    def _(self, expr: ir.SingleExpr):
-        self.register_parameters(expr.expr)
-
-    @register_parameters.register
-    def _(self, expr: ir.Expression):
-        for subexpr in expr.post_order_walk():
-            if isinstance(subexpr, ir.NameRef):
-                if subexpr not in self.parameters:
-                    self.parameters[subexpr] = next(self.number_gen)
-
-    @register_parameters.register
-    def _(self, expr: ir.NameRef):
-        if expr not in self.parameters:
-            self.parameters[expr] = next(self.number_gen)
-
-    @register_parameters.register
-    def _(self, expr: ir.Constant):
-        if expr not in self.parameters:
-            self.parameters[expr] = next(self.number_gen)
-
-    def bind_value(self, target, value):
-        if isinstance(target, ir.NameRef):
-            value_num = self.get_value_number(value)
-            self.current[target] = value_num
-        elif isinstance(target, ir.Subscript):
-            # memory write
-            target_value_num = self.get_value_number(target)
-            value_num = self.get_value_number(value)
-            # indicates the last thing assigned to an expression
-            # there may be expression aliasing, but we can always group by
-            # view or base array reference
-            if target_value_num not in self.subscripted_writes:
-                self.subscripted_writes[target_value_num] = {value_num}
-            else:
-                self.subscripted_writes[target_value_num].add(value_num)
+    def build_expr_id(self, expr):
+        if isinstance(expr, ir.NameRef):
+            key = self.lookup_name(expr)
+        elif isinstance(expr, ir.Constant):
+            key = expr
+        elif isinstance(expr, ir.Expression):
+            subexpr_nums = []
+            for subexpr in expr.post_order_walk():
+                if isinstance(subexpr, ir.Constant):
+                    subexpr_nums.append(subexpr)
+                elif isinstance(subexpr, ir.NameRef):
+                    num = self.lookup_name(subexpr)
+                    subexpr_nums.append(num)
+            subexpr_nums = tuple(subexpr_nums)
+            # Expressions are hashable, so pairing the expression itself
+            # with the post ordered value numbers should be sufficient
+            key = (expr, subexpr_nums)
+            if key not in self.exprs:
+                # record each unique construction once
+                self.exprs[key] = next(self.number_gen)
         else:
             raise TypeError
+        return key
+
+    def lookup_value(self, ref):
+        if isinstance(ref, ir.NameRef):
+            value_id = self.lookup_name(ref)
+        elif isinstance(ref, ir.Expression):
+            value_id = self.build_expr_id(ref)
+        elif isinstance(ref, ir.Constant):
+            value_id = ref
+        else:
+            raise TypeError
+        return value_id
+
+    def register_references(self, node):
+        if isinstance(node, ir.NameRef):
+            if node not in self.initial_values:
+                self.initial_values[node] = next(self.number_gen)
+        elif isinstance(node, ir.Expression):
+            for subexpr in node.post_order_walk():
+                if isinstance(subexpr, ir.NameRef):
+                    if subexpr not in self.initial_values:
+                        self.initial_values = next(self.number_gen)
+
+    def register_assignment(self, node: ir.Assign):
+        target = node.target
+        value = node.value
+        value_id = self.lookup_value(value)
+        if isinstance(target, ir.Subscript):
+            target_id = self.lookup_value(node.target)
+            self.subscript_writes.add(target_id)
+        elif isinstance(target, ir.NameRef):
+            self.final_values[target] = value_id
 
 
 def contains_loops(node):
@@ -106,73 +102,53 @@ def contains_control_flow(stmts):
     return any(isinstance(stmt, (ir.IfElse, ir.CascadeIf, ir.ForLoop, ir.WhileLoop)) for stmt in stmts)
 
 
-def local_value_numbering(stmts, tracking=None):
-    """
-    stmts: statement sequence
-    on_entry: definitions at entry
-    components: variable names that parameterize a given expression, based on what is locally variant
-    exprs: value numbering by expressions parameterization
-    num_gen: number generator
-
-    This is mostly used to factor common operations out of branch conditions for cases where they are
-
-    """
-
-    if tracking is None:
-        tracking = ValueTracking()
-
-    # register parameters appearing here
-    for stmt in stmts:
-        if not isinstance(stmt, (ir.Assign, ir.SingleExpr)):
-            # should be partitioned block only
-            raise TypeError
-        tracking.register_parameters(stmt)
-
+def register_parameters(stmts, tracking):
     for stmt in stmts:
         if isinstance(stmt, ir.Assign):
-            tracking.bind_value_to_name(stmt.target, stmt.value)
-
-    return tracking
-
-
-@singledispatch
-def branch_value_numbering(node):
-    raise NotImplementedError
+            tracking.register_references(stmt.target)
+            tracking.register_references(stmt.value)
+        elif isinstance(stmt, ir.SingleExpr):
+            tracking.register_references(stmt.expr)
+        else:
+            raise TypeError
 
 
-@branch_value_numbering.register
-def _(node: ir.IfElse):
-    if contains_control_flow(node.if_branch) or contains_control_flow(node.else_branch):
-        # haven't decided yet
-        raise ValueError
-    tracking = ValueTracking()
-    tracking.register_parameters(node.test)
-    local_value_numbering(node.if_branch, tracking)
-    assigned_in_if = tracking.current
-    tracking.reset_assignments()
-    local_value_numbering(node.else_branch, tracking)
-    assigned_in_else = tracking.current
-    tracking.reset_assignments()
-    return tracking, (assigned_in_if, assigned_in_else)
+def get_required_tests(node: ir.IfElse):
+    queued = [node.test]
+    tests = set()
+    while queued:
+        test = queued.pop()
+        if isinstance(test, ir.BinOp):
+            tests.add(test)
+        elif isinstance(test, ir.BoolOp):
+            if test.op == "and":
+                queued.extend(test.subexprs)
+            else:
+                # or isn't as easily optimizable
+                return
+    return tests
 
 
-@branch_value_numbering.register
-def _(node: ir.CascadeIf):
-    if any(contains_control_flow(branch) for branch in node.if_branches) or contains_control_flow(node.else_branch):
-        raise ValueError
-    tracking = ValueTracking()
-    for branch in node.if_branches:
-        tracking.register_parameters(branch, tracking)
-    tracking.register_parameters(node.else_branch, tracking)
-    assigns = []
-    subscript_writes = []
-    for branch in node.if_branches:
-        local_value_numbering(branch, tracking)
-        assigns.append(tracking.current)
-        subscript_writes.append(tracking.subscripted_writes)
-        tracking.reset_assignments()
-    if node.else_branch:
-        local_value_numbering(node.else_branch, tracking)
-        subscript_writes.append(tracking.subscripted_writes)
-        tracking.reset_assignments()
-    return tracking, tuple(assigns), tuple(subscript_writes)
+def get_expr_parameters(expr):
+    if isinstance(expr, ir.Expression):
+        return {name for name in expr.post_order_walk() if isinstance(name, ir.NameRef)}
+    elif isinstance(expr, ir.NameRef):
+        return {expr}
+    else:
+        return set()
+
+
+def is_straightline_code(stmts):
+    return all(isinstance(stmt, (ir.Assign, ir.SingleExpr)) for stmt in stmts)
+
+
+def linearize_possible_max(left, right, if_br, else_br):
+    pass
+
+
+def linearize_possible_min(left, right, if_br, else_br):
+    pass
+
+
+def linearize_branch(node: ir.IfElse):
+    pass

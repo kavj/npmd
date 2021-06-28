@@ -832,70 +832,39 @@ def extract_min_max_from_simple_branch(node: ir.IfElse):
     single_swap_true_target = (false_term, None)
     single_swap_false_target = (None, true_term)
 
-    if is_integer_comparison:
-        # no unordered operands
-        for target in shared_targets:
-            defns = (if_assigns[target], else_assigns[target])
-            if defns == standard_form:
-                optimizable[target] = expr_builder(defns)
-            elif defns == swapped:
-                optimizable[target] = negated_builder(defns)
-            elif defns[0] == defns[1]:
-                # either a noop or an invariant assignment
-                optimizable[target] = defns[0]
+    for target in shared_targets:
+        defns = (if_assigns[target], else_assigns[target])
+        if defns == standard_form:
+            optimizable[target] = expr_builder(defns)
+        elif defns == swapped:
+            optimizable[target] = negated_builder(defns)
+        elif defns[0] == defns[1]:
+            # either a noop or an invariant assignment
+            optimizable[target] = defns[0]
+        else:
+            unoptimizable.add(target)
+    for target in single_targets:
+        defns = (if_assigns.get[target], else_assigns.get(target))
+        if target == true_term:
+            if defns in noops_true:
+                optimizable[target] = target
+            elif defns == single_standard_true_target:
+                optimizable[target] = expr_builder(standard_form)
+            elif defns == single_swap_true_target:
+                optimizable[target] = negated_builder((standard_form))
             else:
                 unoptimizable.add(target)
-        for target in single_targets:
-            defns = (if_assigns.get[target], else_assigns.get(target))
-            if target == true_term:
-                if defns in noops_true:
-                    optimizable[target] = target
-                elif defns == single_standard_true_target:
-                    optimizable[target] = expr_builder(standard_form)
-                elif defns == single_swap_true_target:
-                    optimizable[target] = negated_builder((standard_form))
-                else:
-                    unoptimizable.add(target)
-            elif target == false_term:
-                if defns in noops_false:
-                    optimizable[target] = target
-                elif defns == single_standard_false_target:
-                    optimizable[target] = expr_builder(standard_form)
-                elif defns == single_swap_false_target:
-                    optimizable[target] = negated_builder((standard_form))
-                else:
-                    unoptimizable.add(target)
+        elif target == false_term:
+            if defns in noops_false:
+                optimizable[target] = target
+            elif defns == single_standard_false_target:
+                optimizable[target] = expr_builder(standard_form)
+            elif defns == single_swap_false_target:
+                optimizable[target] = negated_builder((standard_form))
             else:
                 unoptimizable.add(target)
-    else:
-        # more conservative due to casts or floating point values in expression
-        for target in shared_targets:
-            defns = (if_assigns[target], else_assigns[target])
-            if defns == standard_form:
-                optimizable[target] = expr_builder(defns)
-            elif defns[0] == defns[1]:
-                # either a noop or an invariant assignment
-                optimizable[target] = defns[0]
-            else:
-                unoptimizable.add(target)
-        for target in single_targets:
-            defns = (if_assigns.get[target], else_assigns.get(target))
-            if target == true_term:
-                if defns in noops_true:
-                    optimizable[target] = target
-                elif defns == single_standard_true_target:
-                    optimizable[target] = expr_builder(standard_form)
-                else:
-                    unoptimizable.add(target)
-            elif target == false_term:
-                if defns in noops_false:
-                    optimizable[target] = target
-                elif defns == single_standard_false_target:
-                    optimizable[target] = expr_builder(standard_form)
-                else:
-                    unoptimizable.add(target)
-            else:
-                unoptimizable.add(target)
+        else:
+            unoptimizable.add(target)
 
     # Now schedule remainder in 2 passes, leading with extracted ops
     if optimizable:
@@ -927,10 +896,6 @@ def extract_min_max_from_simple_branch(node: ir.IfElse):
         repl_branch = None
 
     return extracted, repl_branch
-
-
-def extract_conditional_adds(node: ir.IfElse, types):
-    pass
 
 
 def branch_refactor_info(node, partial_targets):

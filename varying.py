@@ -1,13 +1,74 @@
 from collections import defaultdict
+from functools import singledispatchmethod
 
 import ir
-from visitor import walk_all
+from visitor import VisitorBase, walk_all
 
 """
 Very conservative varying checks. These determine uniformity at a variable name level, ignoring local dataflow
 information. 
 
 """
+
+
+class MapDependentExprs(VisitorBase):
+
+    def __init__(self):
+        self.deps = None
+
+    def __call__(self, entry):
+        self.deps = {}
+        self.visit(entry)
+        deps = self.deps
+        self.deps = None
+        return deps
+
+    @singledispatchmethod
+    def visit(self, node):
+        return super().visit(node)
+
+    @visit.register
+    def _(self, node: ir.Expression):
+        expr_deps = set()
+        for subexpr in node.subexprs:
+            self.visit(subexpr)
+            expr_deps.add(subexpr)
+        self.deps[node] = expr_deps
+
+
+class AssignmentRef:
+
+    def __init__(self, target, value, iterated=False):
+        self.target = target
+        self.value = value
+        self.iterated = iterated
+
+
+class MapTargets(VisitorBase):
+
+    def __init__(self):
+        self.targets = None
+
+    def __call__(self, entry):
+        self.targets = defaultdict(set)
+        self.visit(entry)
+        targets = self.targets
+        self.targets = None
+        return targets
+
+    @singledispatchmethod
+    def visit(self, node):
+        super().visit(node)
+
+    @visit.register
+    def _(self, node: ir.Assign):
+        target = node.target
+        self.targets[target].add(AssignmentRef(target, node.value))
+
+    @visit.register
+    def _(self, node: ir.ForLoop):
+        for target, value in node.walk_assignments():
+            self.targets[target].add(AssignmentRef(target, value, iterated=True))
 
 
 def collect_assigned(entry):
