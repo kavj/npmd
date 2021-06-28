@@ -159,14 +159,17 @@ class ScalarType:
 
 @dataclass(frozen=True)
 class ArrayRef:
-    ndims: int
-    dtype: type
     dims: typing.Tuple[typing.Union[int, str], ...]
+    dtype: type
     constant: clscond = False
 
     @property
     def base(self):
         return self
+
+    @property
+    def ndims(self):
+        return len(self.dims)
 
 
 @dataclass(frozen=True)

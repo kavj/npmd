@@ -1,106 +1,102 @@
-import typing
 import numpy as np
 
-from dataclasses import dataclass
 from enum import Enum, auto
 
 import ir
 
 
-class array_creation_errors(Enum):
+class arg_error(Enum):
     bad_arg_count = auto()
-    invalid_param = auto()
+    bad_keyword = auto()
 
 
-@dataclass(frozen=True)
-class ArrayType:
-    ndims: int
-    dtype: typing.Union[type, ir.ScalarType]
-    uniform: bool
-    fixed_shape: typing.Optional[typing.Tuple[int, ...]]
-
-    def __post_init__(self):
-        assert self.ndims > 0
-        assert self.dtype in supported_scalar_types
-        assert self.fixed_shape is None or len(self.fixed_shape) == self.ndims
+class ArrayCreationInitializer:
+    def __init__(self, dims, dtype, fill_value):
+        self.dims = dims
+        self.dtype = dtype
+        self.fill_value = fill_value
 
 
-@dataclass
-class ArrayCreationRoutine:
-    shape: typing.Tuple[typing.Union[ir.NameRef, ir.IntNode], ...]
-    dtype: ir.ScalarType
-    fill_value: typing.Optional[typing.Union[ir.NameRef, ir.Constant]]
+class ArrayInputInitializer:
+    def __init__(self, dims, dtype, stride):
+        self.dims = dims
+        self.dtype = dtype
+        self.stride = stride
 
     @property
-    def ndims(self):
-        return len(self.shape)
+    def is_uniform(self):
+        return self.stride == 0
 
 
-# This will need some work for OS specific components..
-# will expand later, bool is "special", it's usually broadcast to a larger type but assumed to be 1 bit
-# as that's all that is needed to describe it and some lower level intrinsics and ir forms leverage this
-supported_scalar_types = {np.int32: ir.ScalarType(signed=True, boolean=False, integral=True, bitwidth=32),
-                          np.int64: ir.ScalarType(signed=True, boolean=False, integral=True, bitwidth=64),
-                          np.float32: ir.ScalarType(signed=True, boolean=False, integral=False, bitwidth=32),
-                          np.float64: ir.ScalarType(signed=True, boolean=False, integral=False, bitwidth=64),
-                          bool: ir.ScalarType(signed=True, boolean=True, integral=True, bitwidth=1)}
+class SparseArrayInputInitializer:
+    """
+    non-uniform stride by pointer begin
+    """
+    pass
 
 
-def parse_ones(*args):
-    argct = len(args)
-    if not 0 < argct < 2:
-        # order and like are not supported yet
-        return
-    shape = args[0]
-    dtype = supported_scalar_types[np.float64] if len(args) != 2 else supported_scalar_types.get(args[1])
-    fill_value = ir.IntNode(1) if dtype.integral else ir.FloatNode(1)
-    return ArrayCreationRoutine(shape, dtype, fill_value)
+class RefBuilder:
+
+    def __init__(self, default_int64=True):
+        int32_type = ir.ScalarType(signed=True, boolean=False, integral=True, bitwidth=32)
+        int64_type = ir.ScalarType(signed=True, boolean=False, integral=True, bitwidth=64)
+        float32_type = ir.ScalarType(signed=True, boolean=False, integral=False, bitwidth=32)
+        float64_type = ir.ScalarType(signed=True, boolean=False, integral=False, bitwidth=64)
+        bool_type = ir.ScalarType(signed=True, boolean=True, integral=True, bitwidth=1)
+        types = {np.int32: int32_type, np.int64: int64_type, float32_type: np.float32, float64_type: np.float64,
+                 bool: bool_type}
+        if default_int64:
+            types[int] = int64_type
+        else:
+            types[int] = int32_type
+        # Python floats are always double precision
+        types[float] = float64_type
+        self.types = types
+        self.builders = {}
+
+    @property
+    def default_float(self):
+        return self.types[float]
+
+    @property
+    def default_int(self):
+        return self.types[int]
+
+    def build_func(self, func: ir.Call):
+        builder = self.builders.get(func.funcname)
+        if builder is None:
+            raise ValueError
+        return builder(func.args, func.keywords)
 
 
-def parse_zeros(*args):
-    argct = len(args)
-    if not 0 < argct < 2:
-        # order and like are not supported yet
-        return
-    shape = args[0]
-    dtype = supported_scalar_types[np.float64] if len(args) != 2 else supported_scalar_types.get(args[1])
-    fill_value = ir.IntNode(0) if dtype.integral else ir.FloatNode(0)
-    return ArrayCreationRoutine(shape, dtype, fill_value)
-
-
-def parse_empty(*args):
-    argct = len(args)
-    if not 0 < argct < 2:
-        # order and like are not supported yet
-        return
-    shape = args[0]
-    dtype = supported_scalar_types[np.float64] if len(args) != 2 else supported_scalar_types.get(args[1])
-    return ArrayCreationRoutine(shape, dtype, None)
-
-
-array_creation_routines = {"zeros": parse_zeros,
-                           "ones": parse_ones,
-                           "empty": parse_empty}
-
-
-def validate_typing(types):
-    early_validation_types = {}
-    missing = set()
-    for name, type_ in types.items():
-        if isinstance(type_, type):
-            t = supported_scalar_types.get(type_)
-            if t is None:
-                missing.add((name, type_))
-            else:
-                early_validation_types[name] = t
-        elif isinstance(type_, ArrayType):
-            early_validation_types[name] = ir.ArrayRef(type_.ndims, type_.dtype)
-    return early_validation_types, missing
-
-
-def parse_array_create(call_node: ir.Call, prefix="numpy"):
-    call_name = call_node.funcname
-    if call_name.startswith(prefix):
-        call_name = call_name[len(prefix):]
-        setup = array_creation_routines.get(call_name)
-        return setup(call_node.args) if setup is not None else None
+def make_numpy_array(node: ir.Call, line):
+    api_args = ("shape", "dtype", "order", "like")
+    # only first 2 arguments supported
+    args = node.args
+    kws = node.keywords
+    lookup = {}
+    for name, arg in zip(api_args, args):
+        lookup[name] = arg
+    for name, arg in kws:
+        if name in lookup:
+            raise ValueError(f"Duplicate value for argument {name} in call to numpy.zeros, line: {line}")
+        lookup[name] = arg
+    if "dtype" not in lookup:
+        lookup["dtype"] = np.float64
+    if len(lookup) != 2:
+        raise ValueError(f"Argument mismatch for call to numpy.zeros. Only shape and dtype parameters are supported.")
+    if "shape" not in lookup:
+        raise ValueError(f"Shape argument missing in call to numpy.zeros, line: {line}")
+    func_name = node.funcname
+    if func_name == "numpy.ones":
+        fill_value = 1
+    elif func_name == "numpy.zeros":
+        fill_value = 2
+    elif func_name == "numpy.empty":
+        fill_value = None
+    else:
+        raise ValueError(f"No supported implementation for call to {node.funcname}")
+    shape = lookup.get("shape")
+    dtype = lookup.get("dtype")
+    array = ArrayCreationInitializer(shape, dtype, fill_value)
+    return array
