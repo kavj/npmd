@@ -66,17 +66,19 @@ class scoped:
 
     def leave_scope(self):
         if self.key is not None:
+            # may have a double entry if
             self.uevs[self.key] = self.upward_exposed
             self.gen[self.key] = self.gen
             self.upward_exposed = None
             self.written = None
 
     def change_scope(self, key):
-        self.leave_scope()
-        self.register_scope(key)
-        self.key = key
-        self.upward_exposed = set()
-        self.written = set()
+        if self.key != key:
+            self.leave_scope()
+            self.register_scope(key)
+            self.key = key
+            self.upward_exposed = set()
+            self.written = set()
 
     def register_read(self, target):
         if isinstance(target, ir.NameRef):
@@ -93,14 +95,6 @@ class scoped:
             self.written.add(target)
         else:
             self.register_read(target)
-
-
-def make_leading_block_key(node):
-    if isinstance(node, list):
-        key = id(node[0]) if len(node) > 0 else id(node)
-    else:
-        key = id(node)
-    return key
 
 
 class UpwardExposed(VisitorBase):
@@ -128,23 +122,20 @@ class UpwardExposed(VisitorBase):
 
     @visit.register
     def _(self, node: ir.ForLoop):
-        # target and iterable list must not intersect
-        targets = set()
-        iterables = set()
-        for t, i in node.walk_assignments():
-            targets.add(t)
-            iterables.add(i)
-            self.observer.register_read(i)
-        assert not targets.intersection(iterables)
+        # header must have its own scope due to back edges
+        self.observer.enter_scope(id(node))
+        # This pass assumes we have already written out all simplifications
+        # and are now dealing with a single loop index. Otherwise we have a bunch
+        # of iterator assignments here that are only applied if entering the loop body.
+        assert len(node.assigns) == 1
+        target, iterable = node.assigns[0]
+        self.observer.register_read(iterable)
+        self.observer.register_write(target)
         self.visit(node.body)
 
     @visit.register
     def _(self, node: ir.WhileLoop):
-        key = id(node)
-        if key != self.observer.key:
-            # if this is the first statement in some scope
-            # then this is already set up
-            self.observer.enter_scope(key)
+        self.observer.enter_scope(id(node))
         self.observer.register_read(node.test)
         self.visit(node.body)
 
@@ -155,15 +146,10 @@ class UpwardExposed(VisitorBase):
 
     @visit.register
     def _(self, node: list):
-        key = make_leading_block_key(node)
+        key = id(node[0]) if len(node) > 0 else id(node)
         self.observer.enter_scope(key)
         for stmt in node:
-            if self.observer.key != key:
-                # If visiting the previous statement
-                # resulted in a scope change, this statement
-                # must mark a new scope.
-                key = make_leading_block_key(stmt)
-                self.observer.enter_scope(key)
+            self.visit(stmt)
         self.observer.leave_scope()
 
 

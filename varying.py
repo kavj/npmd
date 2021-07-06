@@ -11,6 +11,52 @@ information.
 """
 
 
+def if_convert_branch(node: ir.IfElse):
+    """
+    Convert branch to a sequence of ternary ops where possible
+    """
+    pass
+
+
+class MarkVaryingVisitor(VisitorBase):
+
+    def __init__(self):
+        self.varying = None
+
+    def __call__(self, entry, varying):
+        self.varying = varying
+        self.visit(entry)
+
+    @singledispatchmethod
+    def visit(self, node):
+        pass
+
+
+class VaryingApproximate(VisitorBase):
+
+    def __init__(self):
+        self.varying = None
+
+    def __call__(self, entry, varying_args):
+        self.varying = varying_args.copy()
+
+    @singledispatchmethod
+    def is_varying(self, node):
+        raise NotImplementedError
+
+    @is_varying.register
+    def _(self, node: ir.Assign):
+        pass
+
+    @singledispatchmethod
+    def visit(self, node):
+        super().visit(node)
+
+    @visit.register
+    def _(self, node: ir.Assign):
+        pass
+
+
 class MapDependentExprs(VisitorBase):
 
     def __init__(self):
