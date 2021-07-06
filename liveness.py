@@ -1,4 +1,3 @@
-from contextlib import ContextDecorator, contextmanager
 from functools import singledispatchmethod
 
 import ir
@@ -6,45 +5,11 @@ import ir
 from visitor import VisitorBase
 
 """
-Need a map from id --> object
-
-Need 
-
--------------------------------
-
-This is easiest if we can avoid generating additional IR forms, which means attempting this with 
-a tree based IR.
-
-
-With that being noted, there are 3 things that might actually help here, noting that reaching checks precede this.
-
-1. finding variables that may live across a loop latch (reaching check)
-2. finding variables that may escape a given loop
-3. finding variables that may escape a loop nest
-
-
-This is a may reach problem.. so that doesn't work as well..
-
-
+This is an extremely simple pass, to determine whether an initial definition for some variable precedes
+its scope. It could merge with value numbering. The purpose is to determine what variables retrieve an initial
+value from some enclosing or preceding scope. 
 
 """
-
-
-class LoopClosure(ContextDecorator):
-
-    def __enter__(self, visitor, header):
-        self.visitor = visitor
-        self.stashed = visitor.enclosing_loop
-        visitor.enclosing_loop = header
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.visitor.enclosing_loop = self.stashed
-
-
-class liveness_info:
-    # branch points need an entry and exit
-    def __init__(self, uevs):
-        self.uevs = uevs
 
 
 def is_control_flow_entry_exit(node):
@@ -71,6 +36,7 @@ class scoped:
             self.gen[self.key] = self.gen
             self.upward_exposed = None
             self.written = None
+            self.key = None
 
     def change_scope(self, key):
         if self.key != key:
@@ -107,7 +73,7 @@ class UpwardExposed(VisitorBase):
         self.visit(entry)
         uevs = self.observer.uevs
         gen = self.observer.gen
-        self.handler = None
+        self.observer = None
         return uevs, gen
 
     @singledispatchmethod
@@ -119,6 +85,7 @@ class UpwardExposed(VisitorBase):
         self.observer.register_read(node.test)
         self.visit(node.if_branch)
         self.visit(node.else_branch)
+        self.observer.leave_scope()
 
     @visit.register
     def _(self, node: ir.ForLoop):
@@ -132,12 +99,14 @@ class UpwardExposed(VisitorBase):
         self.observer.register_read(iterable)
         self.observer.register_write(target)
         self.visit(node.body)
+        self.observer.leave_scope()
 
     @visit.register
     def _(self, node: ir.WhileLoop):
         self.observer.enter_scope(id(node))
         self.observer.register_read(node.test)
         self.visit(node.body)
+        self.observer.leave_scope()
 
     @visit.register
     def _(self, node: ir.Assign):
@@ -151,48 +120,3 @@ class UpwardExposed(VisitorBase):
         for stmt in node:
             self.visit(stmt)
         self.observer.leave_scope()
-
-
-class LivenessSolver(VisitorBase):
-
-    def __call__(self, entry, uevs, kills):
-        self.uevs = uevs
-        self.kills = kills
-        self.uevs_local = None
-        self.kills_local = None
-        self.liveout = {}
-        self.changed = True
-        while self.changed:
-            self.changed = False
-            self.visit(entry)
-        liveout = self.liveout
-        self.uevs = self.read = self.written = self.kills = self.changed = None
-        self.liveout = self.kills_local = self.uevs_local = self.liveout_local = None
-        return liveout
-
-    @singledispatchmethod
-    def visit(self, node):
-        super().visit(node)
-
-    @visit.register
-    def _(self, node: ir.ForLoop):
-        while self.changed:
-            self.changed = False
-            self.visit(node.body)
-        # visit header at end
-
-    @visit.register
-    def _(self, node: ir.IfElse):
-        self.visit(node.if_branch)
-        self.visit(node.else_branch)
-        self.visit(node.test)
-
-    @visit.register
-    def _(self, node: list):
-        # recompute liveness
-        self.current_block = id(node)
-        for index, stmt in enumerate(reversed(node)):
-            self.visit(stmt)
-            if is_control_flow_entry_exit(stmt):
-                if index != len(node) - 1:
-                    self.current_block = id(stmt)
