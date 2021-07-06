@@ -1,8 +1,19 @@
 import itertools
 
+from functools import singledispatchmethod
+
 import ir
 
 from visitor import walk_branches
+
+
+def number_subexpressions(node, labeled, gen):
+    assert isinstance(node, ir.Expression)
+    queued = [node]
+    while queued:
+        expr = queued.pop()
+        if expr in labeled:
+            continue
 
 
 class ValueTracking:
@@ -142,13 +153,52 @@ def is_straightline_code(stmts):
     return all(isinstance(stmt, (ir.Assign, ir.SingleExpr)) for stmt in stmts)
 
 
-def linearize_possible_max(left, right, if_br, else_br):
+def gather_referenced(stmts):
+    refs = set()
+
+    def add_subexprs(expr):
+        for subexpr in expr.post_order_walk():
+            if isinstance(subexpr, ir.NameRef):
+                refs.add(subexpr)
+
+    for stmt in stmts:
+        if isinstance(stmt, ir.Assign):
+            target = stmt.target
+            if isinstance(target, ir.Expression):
+                add_subexprs(target)
+            value = stmt.value
+            if isinstance(value, ir.Expression):
+                add_subexprs(value)
+            elif isinstance(value, ir.NameRef):
+                refs.add(value)
+        else:  # single expression
+            expr = stmt.expr
+            if isinstance(expr, ir.Expression):
+                add_subexprs(expr)
+
+
+def number_branched_values(if_branch, else_branch):
     pass
 
 
-def linearize_possible_min(left, right, if_br, else_br):
+def if_convert_branch(node: ir.IfElse, name_gen):
+    """
+    Branches that have varying conditions need to be if-converted in a way that
+    """
+    if not is_straightline_code(node.if_branch) or not is_straightline_code(node.else_branch):
+        # not implemented here
+        return
+    # Check whether we may be able to convert to min/max
+    test = node.test
+    min_params = None
+    max_params = None
+    if isinstance(test, ir.BinOp):
+        op = test.op
+        if op in ("<", "<="):
+            min_params = (test.left, test.right)
+            max_params = (test.right, test.left)
+        elif op in (">", ">="):
+            min_params = (test.right, test.left)
+            max_params = (test.left, test.right)
     pass
 
-
-def linearize_branch(node: ir.IfElse):
-    pass

@@ -1,4 +1,4 @@
-from contextlib import ContextDecorator
+from contextlib import ContextDecorator, contextmanager
 from functools import singledispatchmethod
 
 import ir
@@ -51,51 +51,42 @@ def is_control_flow_entry_exit(node):
     return isinstance(node, (ir.IfElse, ir.ForLoop, ir.WhileLoop))
 
 
-class UpwardExposed(VisitorBase):
-    """
-
-    """
+class scoped:
 
     def __init__(self):
-        self.read_first = None
-        self.written = None
-
-    def __call__(self, entry):
         self.uevs = {}
-        self.kills = {}
-        self.exit_kills = {}
-        self.exit_uevs = {}
-        self.visit(entry)
-        uevs = self.uevs
-        kills = self.kills
-        exit_uevs = self.exit_uevs
-        exit_kills = self.exit_kills
-        self.uevs = self.read = self.written = self.kills = None
-        return uevs, kills, exit_uevs, exit_kills
+        self.gen = {}
+        self.upward_exposed = None
+        self.written = None
+        self.key = None
 
-    def enter_scope(self, node):
-        key = id(node)
-        self.read_first = set()
+    def register_scope(self, key):
+        self.uevs[key] = set()
+        self.gen[key] = set()
+
+    def leave_scope(self):
+        if self.key is not None:
+            self.uevs[self.key] = self.upward_exposed
+            self.gen[self.key] = self.gen
+            self.upward_exposed = None
+            self.written = None
+
+    def change_scope(self, key):
+        self.leave_scope()
+        self.register_scope(key)
+        self.key = key
+        self.upward_exposed = set()
         self.written = set()
-        entry = self.uevs.get(key)
-        # slightly weird, but this handles nodes that mark control flow points
-        # embedded in a statement list
-        if entry is None:
-            self.uevs[key] = self.read_first
-            self.kills[key] = self.written
-        else:
-            self.uevs[key] = (entry, self.read_first)
-            self.kills[key] = (entry, self.written)
 
     def register_read(self, target):
         if isinstance(target, ir.NameRef):
             if target not in self.written:
-                self.read_first.add(target)
+                self.upward_exposed.add(target)
         elif isinstance(target, ir.Expression):
             for subexpr in target.post_order_walk():
                 if isinstance(subexpr, ir.NameRef):
                     if subexpr not in self.written:
-                        self.read_first.add(subexpr)
+                        self.upward_exposed.add(subexpr)
 
     def register_write(self, target):
         if isinstance(target, ir.NameRef):
@@ -103,57 +94,77 @@ class UpwardExposed(VisitorBase):
         else:
             self.register_read(target)
 
+
+def make_leading_block_key(node):
+    if isinstance(node, list):
+        key = id(node[0]) if len(node) > 0 else id(node)
+    else:
+        key = id(node)
+    return key
+
+
+class UpwardExposed(VisitorBase):
+
+    def __init__(self):
+        self.observer = None
+
+    def __call__(self, entry):
+        self.observer = scoped()
+        self.visit(entry)
+        uevs = self.observer.uevs
+        gen = self.observer.gen
+        self.handler = None
+        return uevs, gen
+
     @singledispatchmethod
     def visit(self, node):
         super().visit(node)
 
     @visit.register
     def _(self, node: ir.IfElse):
-        self.enter_scope(node)
-        self.register_read(node.test)
+        self.observer.register_read(node.test)
         self.visit(node.if_branch)
         self.visit(node.else_branch)
-        # push an exit
-        self.enter_scope(node)
 
     @visit.register
     def _(self, node: ir.ForLoop):
         # target and iterable list must not intersect
-        self.enter_scope(node)
         targets = set()
         iterables = set()
         for t, i in node.walk_assignments():
             targets.add(t)
             iterables.add(i)
-            self.register_read(i)
+            self.observer.register_read(i)
         assert not targets.intersection(iterables)
         self.visit(node.body)
-        self.enter_scope(node)
 
     @visit.register
     def _(self, node: ir.WhileLoop):
-        self.enter_scope(node)
-        self.register_read(node.test)
+        key = id(node)
+        if key != self.observer.key:
+            # if this is the first statement in some scope
+            # then this is already set up
+            self.observer.enter_scope(key)
+        self.observer.register_read(node.test)
         self.visit(node.body)
-        self.enter_scope(node)
 
     @visit.register
     def _(self, node: ir.Assign):
-        self.register_read(node.value)
-        self.register_write(node.target)
+        self.observer.register_read(node.value)
+        self.observer.register_write(node.target)
 
     @visit.register
     def _(self, node: list):
-        self.enter_scope(node)
-        self.uevs[id(node)] = self.read_first
+        key = make_leading_block_key(node)
+        self.observer.enter_scope(key)
         for stmt in node:
-            self.visit(stmt)
-            if is_control_flow_entry_exit(stmt):
-                self.enter_scope(stmt)
-
-
-def get_block_ordering(entry):
-    ordering = []
+            if self.observer.key != key:
+                # If visiting the previous statement
+                # resulted in a scope change, this statement
+                # must mark a new scope.
+                key = make_leading_block_key(stmt)
+                self.observer.enter_scope(key)
+        self.observer.leave_scope()
 
 
 class LivenessSolver(VisitorBase):
