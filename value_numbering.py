@@ -1,19 +1,11 @@
 import itertools
 
+from collections import defaultdict
 from functools import singledispatchmethod
 
 import ir
 
 from visitor import walk_branches, VisitorBase
-
-
-def number_subexpressions(node, labeled, gen):
-    assert isinstance(node, ir.Expression)
-    queued = [node]
-    while queued:
-        expr = queued.pop()
-        if expr in labeled:
-            continue
 
 
 def is_control_flow_entry_exit(node):
@@ -22,47 +14,32 @@ def is_control_flow_entry_exit(node):
 
 class scoped:
 
-    def __init__(self, uevs, gen):
-        self.uevs = uevs
-        self.gen = gen
-        self.upward_exposed = None
-        self.written = None
+    def __init__(self):
+        self.uevs = defaultdict(set)
+        self.gen = defaultdict(set)
+        self.constants = set()
         self.key = None
 
-    def register_scope(self, key):
-        self.uevs[key] = set()
-        self.gen[key] = set()
+    def enter_scope(self, key):
+        self.key = key
 
     def leave_scope(self):
-        if self.key is not None:
-            # may have a double entry if
-            self.uevs[self.key] = self.upward_exposed
-            self.gen[self.key] = self.gen
-            self.upward_exposed = None
-            self.written = None
-            self.key = None
-
-    def change_scope(self, key):
-        if self.key != key:
-            self.leave_scope()
-            self.register_scope(key)
-            self.key = key
-            self.upward_exposed = set()
-            self.written = set()
+        self.key = None
 
     def register_read(self, target):
         if isinstance(target, ir.NameRef):
-            if target not in self.written:
-                self.upward_exposed.add(target)
+            if target not in self.gen[self.key]:
+                self.uevs[self.key].add(target)
+        elif isinstance(target, ir.Constant):
+            self.constants.add(target)
         elif isinstance(target, ir.Expression):
             for subexpr in target.post_order_walk():
-                if isinstance(subexpr, ir.NameRef):
-                    if subexpr not in self.written:
-                        self.upward_exposed.add(subexpr)
+                if not isinstance(subexpr, ir.Expression):
+                    self.register_read(subexpr)
 
     def register_write(self, target):
         if isinstance(target, ir.NameRef):
-            self.written.add(target)
+            self.uevs[self.key].add(target)
         else:
             self.register_read(target)
 
@@ -77,18 +54,21 @@ class UpwardExposed(VisitorBase):
     def __init__(self):
         self.observer = None
 
-    def __call__(self, entry):
-        uevs = {}
-        gen = {}
-        self.observer = scoped(uevs, gen)
+    def find_upward_exposed(self, entry):
+        self.observer = scoped()
         self.visit(entry)
-        self.scope = None
+        uevs = self.observer.uevs
+        constants = self.observer.constants
         self.observer = None
-        return uevs, gen
+        return uevs, constants
 
     @singledispatchmethod
     def visit(self, node):
         super().visit(node)
+
+    @visit.register
+    def _(self, node: ir.Constant):
+        self.observer.register_read(node)
 
     @visit.register
     def _(self, node: ir.IfElse):
@@ -153,67 +133,39 @@ class ValueTracking:
     It helps determine whether we require ternary or predicated ops across any
     particular boundary.
 
+    Constants are explicitly tracked to avoid clashes between their hashes and the value
+    numbering used.
+
+    It's expected that upward exposed variables (uev) and constants are both mapped prior to this.
+    In addition, number_gen must have a valid starting count so as to avoid conflicts.
+
     """
 
-    def __init__(self, uev):
-        self.initial_values = uev
-        self.exprs = {}
-        self.subscript_writes = set()  # helps track write refs
-        # Distinguish between last written and
-        self.assigned_values = {}
-        self.number_gen = itertools.count()
+    def __init__(self, inputs, numbered, number_gen):
+        # numbered tracks everything by value number
+        self.numbered = numbered.copy()
+        self.mem_ops = []  # track write ordering
+        # record initial assignments as final
+        # assignments on entry
+        self.last_value = inputs.copy()
+        self.number_gen = number_gen
 
-    def reset_assignments(self):
-        # retain anything we have already numbered, just not the state of assignments
-        self.assigned_values = {}
-        self.subscript_writes = set()
+    # returns true if this matches any upward exposed value
 
-    def _is_initial_value(self, tag):
-        """
-        Check whether a name or expression is generated prior to any binding operation
-        that affects it.
-
-        This treats any reaching of the initial value as True
-        For example
-
-        c = a
-        a = b
-        a = c
-
-        would return True for "a" after the last assignment, since we are dealing with trivial
-        copy assignments, and non-aliasing named variables.
-
-        """
-
-        if isinstance(tag, ir.Expression):
-            for subexpr in tag.post_order_walk():
-                if not isinstance(subexpr, ir.Expression):
-                    if subexpr in self.assigned_values:
-                        return False
-        elif isinstance(tag, ir.Constant):
-            return True
-        else:
-            return tag not in self.assigned_values
-
-    def _get_or_create_value_num(self, key):
-        value_num = self.assigned_values.get(key)
-        if value_num is None:
-            value_num = self.initial_values.get(key)
-            if value_num is None:
-                value_num = next(self.number_gen)
-                if self._is_initial_value(key):
-                    self.initial_values[key] = value_num
-        return value_num
+    def get_or_create_value_num(self, key):
+        vn = self.last_value.get(key)
+        if vn is None:
+            vn = next(self.number_gen)
+            # Bind an expression, based on value numbered
+            # names and/or expressions with its own
+            # unique value number.
+            self.numbered[key] = vn
+        return vn
 
     @singledispatchmethod
     def get_or_create_ref(self, tag):
-        value_num = self.assigned_values.get(tag)
-        if value_num is None:
-            value_num = self.initial_values.get(tag)
-            if value_num is None:
-                value_num = next(self.number_gen)
-                if self._is_initial_value(tag):
-                    self.initial_values[tag] = value_num
+        value_num = self.last_value.get(tag)
+        assert value_num is not None
         return value_num
 
     @get_or_create_ref.register
@@ -222,7 +174,7 @@ class ValueTracking:
         right = self.get_or_create_ref(tag.right)
         op = tag.op
         key = ir.BinOp(left, right, op)
-        value_num = self._get_or_create_value_num(key)
+        value_num = self.get_or_create_value_num(key)
         return value_num
 
     @get_or_create_ref.register
@@ -230,7 +182,14 @@ class ValueTracking:
         operand = self.get_or_create_ref(tag.operand)
         op = tag.op
         key = ir.UnaryOp(operand, op)
-        value_num = self._get_or_create_value_num(key)
+        value_num = self.get_or_create_value_num(key)
+        return value_num
+
+    @get_or_create_ref.register
+    def _(self, tag: ir.Subscript):
+        value = self.get_or_create_value_num(tag.value)
+        sl = self.get_or_create_value_num(tag.slice)
+        value_num = ir.Subscript(value, sl)
         return value_num
 
     @get_or_create_ref.register
@@ -239,26 +198,30 @@ class ValueTracking:
         stop = self.get_or_create_ref(tag.stop)
         step = self.get_or_create_ref(tag.step)
         key = ir.Slice(start, stop, step)
-        value_num = self._get_or_create_value_num(key)
+        value_num = self.get_or_create_value_num(key)
         return value_num
 
     def register_assignment(self, node: ir.Assign):
         target = node.target
         value = node.value
         value_id = self.get_or_create_ref(value)
+        if isinstance(value, ir.Subscript):
+            self.mem_ops.append((value_id, "read"))
         if isinstance(target, ir.Subscript):
             target_id = self.get_or_create_ref(node.target)
-            self.subscript_writes.add(target_id)
+            self.mem_ops.append((target_id, "write"))
         elif isinstance(target, ir.NameRef):
-            self.assigned_values[target] = value_id
+            # mark assignment to this variable name
+            # with this value number
+            self.last_value[target] = value_id
+        else:
+            # not particularly informative, since this uses an IR type.
+            # it shouldn't come up outside of debugging contexts though.
+            raise TypeError(f"Cannot register assign to type {type(target)}")
 
 
 def contains_loops(node):
     return any(isinstance(stmt, (ir.ForLoop, ir.WhileLoop)) for stmt in walk_branches(node))
-
-
-def contains_control_flow(stmts):
-    return any(isinstance(stmt, (ir.IfElse, ir.CascadeIf, ir.ForLoop, ir.WhileLoop)) for stmt in stmts)
 
 
 def get_required_tests(node: ir.IfElse):
@@ -286,42 +249,52 @@ def get_expr_parameters(expr):
         return set()
 
 
-def gather_referenced(stmts):
-    refs = set()
+def number_local_values(node: list, inputs, numbered, labeler):
+    """
+    node: statement list
+    inputs:  {name: initial value number, ...}
+    numbered: {key: value number}
+    labeler: value number generator
 
-    def add_subexprs(expr):
-        for subexpr in expr.post_order_walk():
-            if isinstance(subexpr, ir.NameRef):
-                refs.add(subexpr)
-
-    for stmt in stmts:
+    """
+    for stmt in node:
+        if is_control_flow_entry_exit(stmt):
+            raise TypeError
+    local_numbering = ValueTracking(inputs, numbered, labeler)
+    for stmt in node:
         if isinstance(stmt, ir.Assign):
-            target = stmt.target
-            if isinstance(target, ir.Expression):
-                add_subexprs(target)
-            value = stmt.value
-            if isinstance(value, ir.Expression):
-                add_subexprs(value)
-            elif isinstance(value, ir.NameRef):
-                refs.add(value)
-        else:  # single expression
-            if isinstance(stmt.expr, ir.Expression):
-                add_subexprs(stmt.expr)
+            pass
+        elif isinstance(stmt, ir.SingleExpr):
+            pass
+        else:
+            raise TypeError
 
 
-def number_branched_values(if_branch, else_branch):
-    pass
+def get_memory_writes(node: list):
+    writes = []
+    for stmt in node:
+        if isinstance(stmt, ir.Assign):
+            if isinstance(stmt.target, ir.Subscript):
+                pass
+                # writes.append()
 
 
-def if_convert_branch(node: ir.IfElse, name_gen):
-    """
-    Branches that have varying conditions need to be if-converted in a way that
-    """
-
-    # Check whether we may be able to convert to min/max
-    test = node.test
+def if_conversion(node: ir.IfElse):
+    if any(is_control_flow_entry_exit(stmt) for stmt in itertools.chain(node.if_branch, node.else_branch)):
+        raise ValueError
+    uevs, constants = UpwardExposed().find_upward_exposed(node)
+    labeler = itertools.count()
+    # number uevs
+    numbered_uevs = {}
+    for v, i in zip(itertools.chain(uevs, constants), labeler):
+        numbered_uevs[v] = i
+    local_if = number_local_values(node.if_branch, numbered_uevs, numbered_uevs, labeler)
+    # Retain existing expression numbers. Without this,
+    # value numbering will alias across acyclic branch bounds.
+    local_else = number_local_values(node.else_branch, numbered_uevs, local_if.numbered, labeler)
     min_params = None
     max_params = None
+    test = node.test
     if isinstance(test, ir.BinOp):
         op = test.op
         if op in ("<", "<="):
