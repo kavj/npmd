@@ -275,15 +275,6 @@ def number_local_values(node: list, inputs, numbered, labeler):
     return local_numbering
 
 
-def get_memory_writes(node: list):
-    writes = []
-    for stmt in node:
-        if isinstance(stmt, ir.Assign):
-            if isinstance(stmt.target, ir.Subscript):
-                pass
-                # writes.append()
-
-
 def partition_by_mem_write(stmts):
     partitions = []
     current = []
@@ -291,8 +282,26 @@ def partition_by_mem_write(stmts):
         current.append(stmt)
         if isinstance(stmt, ir.Assign):
             if isinstance(stmt.target, ir.Subscript):
+                if current:
+                    partitions.append(current)
+                    current = []
+    if current:
+        partitions.append(current)
+    return partitions
+
+
+def partition_by_control_flow(stmts):
+    partitions = []
+    current = []
+    for stmt in stmts:
+        current.append(stmt)
+        if isinstance(stmt, (ir.IfElse, ir.ForLoop, ir.WhileLoop)):
+            if current:
                 partitions.append(current)
+                partitions.append([stmt])
                 current = []
+        else:
+            current.append(stmt)
     if current:
         partitions.append(current)
     return partitions
