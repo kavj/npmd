@@ -12,6 +12,23 @@ def is_control_flow_entry_exit(node):
     return isinstance(node, (ir.IfElse, ir.ForLoop, ir.WhileLoop))
 
 
+def walk_assigns(stmts, reverse=False):
+    if reverse:
+        for stmt in reversed(stmts):
+            if isinstance(stmt, ir.Assign):
+                yield stmt.target, stmt.value
+    else:
+        for stmt in stmts:
+            if isinstance(stmt, ir.Assign):
+                yield stmt.target, stmt.value
+
+
+def walk_expr_parameters(node: ir.Expression):
+    for subexpr in node.post_order_walk():
+        if not isinstance(subexpr, ir.Expression):
+            yield subexpr
+
+
 class scoped:
 
     def __init__(self):
@@ -26,16 +43,23 @@ class scoped:
     def leave_scope(self):
         self.key = None
 
+    @singledispatchmethod
     def register_read(self, target):
-        if isinstance(target, ir.NameRef):
-            if target not in self.gen[self.key]:
-                self.uevs[self.key].add(target)
-        elif isinstance(target, ir.Constant):
-            self.constants.add(target)
-        elif isinstance(target, ir.Expression):
-            for subexpr in target.post_order_walk():
-                if not isinstance(subexpr, ir.Expression):
-                    self.register_read(subexpr)
+        raise NotImplementedError
+
+    @register_read.register
+    def _(self, target: ir.NameRef):
+        if target not in self.gen[self.key]:
+            self.uevs[self.key].add(target)
+
+    @register_read.register
+    def _(self, target: ir.Constant):
+        self.constants.add(target)
+
+    @register_read.register
+    def _(self, target: ir.Expression):
+        for subexpr in walk_expr_parameters(target):
+            self.register_read(subexpr)
 
     def register_write(self, target):
         if isinstance(target, ir.NameRef):
@@ -144,7 +168,10 @@ class ValueTracking:
     def __init__(self, inputs, numbered, number_gen):
         # numbered tracks everything by value number
         self.numbered = numbered.copy()
-        self.mem_ops = []  # track write ordering
+        self.mem_writes = []  # track write ordering
+        self.targets = set()
+        # record value numbers that are bound to anything here
+        self.values = set()
         # record initial assignments as final
         # assignments on entry
         self.last_value = inputs.copy()
@@ -201,43 +228,25 @@ class ValueTracking:
         value_num = self.get_or_create_value_num(key)
         return value_num
 
-    def register_assignment(self, node: ir.Assign):
-        target = node.target
-        value = node.value
+    @singledispatchmethod
+    def register_assignment(self, target, value):
+        raise NotImplementedError
+
+    @register_assignment.register
+    def _(self, target: ir.NameRef, value):
         value_id = self.get_or_create_ref(value)
-        if isinstance(value, ir.Subscript):
-            self.mem_ops.append((value_id, "read"))
-        if isinstance(target, ir.Subscript):
-            target_id = self.get_or_create_ref(node.target)
-            self.mem_ops.append((target_id, "write"))
-        elif isinstance(target, ir.NameRef):
-            # mark assignment to this variable name
-            # with this value number
-            self.last_value[target] = value_id
-        else:
-            # not particularly informative, since this uses an IR type.
-            # it shouldn't come up outside of debugging contexts though.
-            raise TypeError(f"Cannot register assign to type {type(target)}")
+        self.targets.add(target)
+        self.last_value[target] = value_id
+
+    @register_assignment.register
+    def _(self, target: ir.Subscript, value):
+        self.get_or_create_ref(value)
+        target_id = self.get_or_create_ref(target)
+        self.mem_writes.append(target_id)
 
 
 def contains_loops(node):
     return any(isinstance(stmt, (ir.ForLoop, ir.WhileLoop)) for stmt in walk_branches(node))
-
-
-def get_required_tests(node: ir.IfElse):
-    queued = [node.test]
-    tests = set()
-    while queued:
-        test = queued.pop()
-        if isinstance(test, ir.BinOp):
-            tests.add(test)
-        elif isinstance(test, ir.BoolOp):
-            if test.op == "and":
-                queued.extend(test.subexprs)
-            else:
-                # or isn't as easily optimizable
-                return
-    return tests
 
 
 def get_expr_parameters(expr):
@@ -261,13 +270,9 @@ def number_local_values(node: list, inputs, numbered, labeler):
         if is_control_flow_entry_exit(stmt):
             raise TypeError
     local_numbering = ValueTracking(inputs, numbered, labeler)
-    for stmt in node:
-        if isinstance(stmt, ir.Assign):
-            pass
-        elif isinstance(stmt, ir.SingleExpr):
-            pass
-        else:
-            raise TypeError
+    for target, value in walk_assigns(node):
+        local_numbering.register_assignment(target, value)
+    return local_numbering
 
 
 def get_memory_writes(node: list):
@@ -279,27 +284,74 @@ def get_memory_writes(node: list):
                 # writes.append()
 
 
-def if_conversion(node: ir.IfElse):
+def partition_by_mem_write(stmts):
+    partitions = []
+    current = []
+    for stmt in stmts:
+        current.append(stmt)
+        if isinstance(stmt, ir.Assign):
+            if isinstance(stmt.target, ir.Subscript):
+                partitions.append(current)
+                current = []
+    if current:
+        partitions.append(current)
+    return partitions
+
+
+def get_shared_target_names(node: ir.IfElse):
+    """
+    Find targets that may require ternary ops and/or renaming.
+
+    """
+    if any(is_control_flow_entry_exit(stmt) for stmt in itertools.chain(node.if_branch, node.else_branch)):
+        raise ValueError
+    if_targets = set()
+    else_targets = set()
+    for target, value in walk_assigns(node.if_branch):
+        if isinstance(target, ir.NameRef):
+            if_targets.add(target)
+    for target, value in walk_assigns(node.else_branch):
+        if isinstance(target, ir.NameRef):
+            else_targets.add(target)
+    shared = if_targets.intersection(else_targets)
+    return shared
+
+
+def get_final_assignments(stmts):
+    assigns = {}
+    for target, value in walk_assigns(stmts, reverse=True):
+        if isinstance(target, ir.NameRef) and target not in assigns:
+            assigns[target] = value
+    return assigns
+
+
+def predicate_branch(branch, local_if, local_else, combine_writes=False):
+    # obvious stub
+    return ()
+
+
+def if_conversion(node: ir.IfElse, local_name_gen):
+
     if any(is_control_flow_entry_exit(stmt) for stmt in itertools.chain(node.if_branch, node.else_branch)):
         raise ValueError
     uevs, constants = UpwardExposed().find_upward_exposed(node)
     labeler = itertools.count()
-    # number uevs
     numbered_uevs = {}
     for v, i in zip(itertools.chain(uevs, constants), labeler):
         numbered_uevs[v] = i
     local_if = number_local_values(node.if_branch, numbered_uevs, numbered_uevs, labeler)
-    # Retain existing expression numbers. Without this,
-    # value numbering will alias across acyclic branch bounds.
     local_else = number_local_values(node.else_branch, numbered_uevs, local_if.numbered, labeler)
-    min_params = None
-    max_params = None
-    test = node.test
-    if isinstance(test, ir.BinOp):
-        op = test.op
-        if op in ("<", "<="):
-            min_params = (test.left, test.right)
-            max_params = (test.right, test.left)
-        elif op in (">", ">="):
-            min_params = (test.right, test.left)
-            max_params = (test.left, test.right)
+    shared, reassigned = get_shared_target_names(node)
+    repl = []
+    test = ir.Assign(local_name_gen.make_name(), node.test, node.pos)
+    repl.append(test)
+    # Combine writes if write sequences match.
+    # Otherwise we should order blocks and predicate writes.
+    # Any values that appear on both sides can fall through to their uses
+    # based on their first appearance.
+    #
+    # Subscripted writes should look like:
+    #     original_array_name[value_numbered_index]
+    combine_writes = local_if.mem_writes == local_else.mem_writes
+    stmts = predicate_branch(node, local_if, local_else, combine_writes)
+    return stmts

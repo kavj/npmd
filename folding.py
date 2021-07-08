@@ -60,7 +60,7 @@ foldable_cast_types = {bool, int, float, np.bool_, np.int32, np.int64, np.float3
 def wrap_constant(c):
     if isinstance(c, bool):
         return ir.BoolNode(c)
-    if isinstance(c, numbers.Integral):
+    elif isinstance(c, numbers.Integral):
         return ir.IntNode(c)
     elif isinstance(c, numbers.Real):
         return ir.FloatNode(c)
