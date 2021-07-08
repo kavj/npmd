@@ -5,28 +5,14 @@ from functools import singledispatchmethod
 
 import ir
 
-from visitor import walk_branches, VisitorBase
+from visitor import walk_branches, walk_expr_params, walk_expr, walk_assigns, VisitorBase
+
+# These yield everything including the original expression
+# This way we can remove a lot of type checks from common paths.
 
 
 def is_control_flow_entry_exit(node):
     return isinstance(node, (ir.IfElse, ir.ForLoop, ir.WhileLoop))
-
-
-def walk_assigns(stmts, reverse=False):
-    if reverse:
-        for stmt in reversed(stmts):
-            if isinstance(stmt, ir.Assign):
-                yield stmt.target, stmt.value
-    else:
-        for stmt in stmts:
-            if isinstance(stmt, ir.Assign):
-                yield stmt.target, stmt.value
-
-
-def walk_expr_parameters(node: ir.Expression):
-    for subexpr in node.post_order_walk():
-        if not isinstance(subexpr, ir.Expression):
-            yield subexpr
 
 
 class scoped:
@@ -58,7 +44,7 @@ class scoped:
 
     @register_read.register
     def _(self, target: ir.Expression):
-        for subexpr in walk_expr_parameters(target):
+        for subexpr in walk_expr_params(target):
             self.register_read(subexpr)
 
     def register_write(self, target):
@@ -69,6 +55,7 @@ class scoped:
 
 
 class UpwardExposed(VisitorBase):
+    # Todo: This needs to be rethought somewhat, since it's only used for local analyses.
     """
     Simple tracking of upward exposed variables. This is less than what would be needed for full liveness
     analysis. It's intended to help with value numbering over acyclic control flow regions.
@@ -101,12 +88,12 @@ class UpwardExposed(VisitorBase):
 
     @visit.register
     def _(self, node: ir.ForLoop):
-        # Normal python semantics dictate that variables are bound
-        # according to iterators if the loop body will be entered.
-        # To preserve this behavior, assignments are treated as being performed
-        # upon entering the loop body. Later on, we replace any header assignments
-        # with a single induction variable that is scoped to the corresponding for loop
-        # and therefore not allowed to escape.
+        # We follow regular Python semantics as much as possible here, which means
+        # that variables are only guaranteed to be bound on a particular iteration if
+        # no iteration interface raises StopIteration. As such, when this analysis runs,
+        # it registers any variable bindings to the loop body and later replaces the header
+        # stuff with a single unique induction variable name. This kills perfect loop nesting,
+        # but we don't depend on loop interchange, so it's basically fine.
         key = id(node.body)
         self.observer.enter_scope(key)
         for target, iterable in node.walk_assignments():
@@ -163,12 +150,14 @@ class ValueTracking:
     It's expected that upward exposed variables (uev) and constants are both mapped prior to this.
     In addition, number_gen must have a valid starting count so as to avoid conflicts.
 
+
     """
 
     def __init__(self, inputs, numbered, number_gen):
         # numbered tracks everything by value number
         self.numbered = numbered.copy()
         self.mem_writes = []  # track write ordering
+        self.by_value_num = []
         self.targets = set()
         # record value numbers that are bound to anything here
         self.values = set()
@@ -247,15 +236,6 @@ class ValueTracking:
 
 def contains_loops(node):
     return any(isinstance(stmt, (ir.ForLoop, ir.WhileLoop)) for stmt in walk_branches(node))
-
-
-def get_expr_parameters(expr):
-    if isinstance(expr, ir.Expression):
-        return {name for name in expr.post_order_walk() if isinstance(name, ir.NameRef)}
-    elif isinstance(expr, ir.NameRef):
-        return {expr}
-    else:
-        return set()
 
 
 def number_local_values(node: list, inputs, numbered, labeler):

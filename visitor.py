@@ -5,6 +5,69 @@ import ir
 
 # Walkers are named by what they can walk.
 
+
+def walk_assigns(stmts, reverse=False):
+    if reverse:
+        for stmt in reversed(stmts):
+            if isinstance(stmt, ir.Assign):
+                yield stmt.target, stmt.value
+    else:
+        for stmt in stmts:
+            if isinstance(stmt, ir.Assign):
+                yield stmt.target, stmt.value
+
+
+def walk_expr_params(node):
+    """
+    Walk an expression, yielding only sub-expressions that are not expressions themselves.
+
+    """
+    if not isinstance(node, ir.Expression):
+        assert not isinstance(node, ir.StmtBase)
+        yield node
+    else:
+        queued = [node]
+        seen = set()
+        while queued:
+            expr = queued.pop()
+            if expr in seen:
+                continue
+            else:
+                seen.add(expr)
+                if isinstance(expr, ir.Expression):
+                    queued.extend(expr.subexprs)
+                else:
+                    yield expr
+
+
+def walk_expr(node):
+    """
+    This walks an expression in post order, yielding everything including the original.
+    This helps limit the number of explicit type checks required elsewhere.
+    """
+
+    if not isinstance(node, ir.Expression):
+        assert not isinstance(node, ir.StmtBase)
+        yield node
+    else:
+        queued = [node]
+        seen = set()
+        sent = set()
+        while queued:
+            expr = queued.pop()
+            if expr in seen:
+                if expr not in sent:
+                    sent.add(expr)
+                    yield expr
+            else:
+                seen.add(expr)
+                if isinstance(expr, ir.Expression):
+                    queued.append(expr)
+                    queued.extend(expr.subexprs)
+                else:
+                    yield expr
+
+
 def walk(node):
     """
     extending walk interface to include lists

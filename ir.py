@@ -64,31 +64,6 @@ class Expression:
     def constant(self):
         return all(se.constant for se in self.subexprs)
 
-    def post_order_walk(self):
-        """
-        Walk sub-expressions of node in post order, ignoring duplicates.
-
-        """
-
-        seen = set()
-        queued: typing.List[typing.Tuple[typing.Optional[Expression], typing.Generator]] = [(None, self.subexprs)]
-
-        while queued:
-            try:
-                e = next(queued[-1][1])
-                if e in seen:
-                    continue
-                seen.add(e)
-                if isinstance(e, Expression):
-                    queued.append((e, e.subexprs))
-                else:
-                    yield e
-            except StopIteration:
-                e, _ = queued.pop()
-                # ignore the original node we're walking
-                if queued:
-                    yield e
-
 
 class Constant:
     """
