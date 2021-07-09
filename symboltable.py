@@ -1,4 +1,6 @@
 import builtins
+import inspect
+import importlib
 import itertools
 import keyword
 
@@ -191,14 +193,21 @@ def bind_types_to_names(types):
             by_name[name] = type_
 
 
-def create_symbol_tables(src, filename, types):
+def create_symbol_tables(src, filename, types_by_func):
     tables = {}
     mod = symtable(src, filename, "exec")
+    # extract names that correspond to functions
     for func in mod.get_children():
-        if func.get_type() == "class":
-            raise TypeError(f"Classes are not supported.")
+        func_name = func.get_name()
+        if func.is_nested():
+            raise ValueError(f"{func_name} in file {filename} appears as a nested scope, which is unsupported.")
         elif func.has_children():
-            raise ValueError(f"Nested scopes are not supported")
+            raise ValueError(f"{func_name} in file {filename} contains nested scopes, which are unsupported.")
+        elif func.get_type() != "function":
+            raise TypeError(f"{func_name} in file {filename} refers to a class rather than a function. This is "
+                            f"unsupported.")
+        if func_name not in types_by_func:
+            raise ValueError(f"No type information provided for function {func_name}")
         var_names = set()
         args = set()
         # we'll eventually need back end reserved names
@@ -213,7 +222,6 @@ def create_symbol_tables(src, filename, types):
                 var_names.add(name)
                 if sym.is_parameter():
                     args.add(name)
-        funcname = func.get_name()
         table = symbol_gen(var_names)
-        tables[funcname] = table
+        tables[func_name] = table
     return tables
