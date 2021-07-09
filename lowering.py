@@ -12,10 +12,6 @@ from value_numbering import branch_value_numbering
 from visitor import VisitorBase, walk_all, walk_branches
 
 
-def extract_name(name):
-    return name.name if isinstance(name, ir.NameRef) else name
-
-
 def is_innermost(header):
     return not any(stmt.is_loop_entry for stmt in walk_branches(header))
 
@@ -36,44 +32,6 @@ def block_partition(stmts):
     if curr:
         partitions.append(curr)
     return tuple(partitions)
-
-
-def constraint_variables(node: ir.ForLoop):
-    iterable_constraints = set()
-    range_constraints = set()
-    for _, iterable in node.walk_assignments():
-        if isinstance(iterable, ir.Counter):
-            if iterable.stop is not None:
-                #  keep step since we may not know sign
-                range_constraints.add(iterable)
-        else:
-            iterable_constraints.add(iterable)
-    return iterable_constraints, range_constraints
-
-
-class name_generator:
-    def __init__(self, prefix):
-        self.prefix = prefix
-        self.gen = itertools.count()
-
-    def make_name(self):
-        return f"{self.prefix}_{next(self.gen)}"
-
-
-def build_symbols(entry):
-    # grabs all names that can be declared at outmermost scope
-    names = set()
-    if isinstance(entry, ir.Function):
-        for arg in entry.args:
-            names.add(extract_name(arg))
-    for stmt in walk_all(entry):
-        if isinstance(stmt, ir.Assign):
-            if isinstance(stmt.target, ir.NameRef):
-                names.add(extract_name(stmt.target))
-        elif isinstance(stmt, ir.ForLoop):
-            for target, _ in stmt.walk_assignments():
-                names.add(extract_name(target))
-    return names
 
 
 class DeclBuilder(VisitorBase):

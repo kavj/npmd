@@ -1,12 +1,25 @@
+import builtins
 import itertools
+import keyword
+
+from symtable import symtable
 
 import ir
 
-from visitor import walk_all, walk_assigns
+reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
 
 
 def extract_name(name):
     return name.name if isinstance(name, ir.NameRef) else name
+
+
+class name_generator:
+    def __init__(self, prefix):
+        self.prefix = prefix
+        self.gen = itertools.count()
+
+    def make_name(self):
+        return f"{self.prefix}_{next(self.gen)}"
 
 
 class symbol_gen:
@@ -28,17 +41,25 @@ class symbol_gen:
         return name
 
 
-def build_symbols(entry):
-    # grabs all names that can be declared at outmermost scope
-    names = set()
-    if isinstance(entry, ir.Function):
-        for arg in entry.args:
-            names.add(extract_name(arg))
-    for stmt in walk_all(entry):
-        if isinstance(stmt, ir.Assign):
-            if isinstance(stmt.target, ir.NameRef):
-                names.add(extract_name(stmt.target))
-        elif isinstance(stmt, ir.ForLoop):
-            for target, _ in walk_assigns(stmt):
-                names.add(extract_name(target))
-    return names
+def create_symbol_tables(src, filename):
+    tables = {}
+    mod = symtable(src, filename, "exec")
+    for func in mod.get_children():
+        if func.get_type() == "class":
+            raise TypeError(f"Classes are not supported.")
+        elif func.has_children():
+            raise ValueError(f"Nested scopes are not supported")
+        var_names = set()
+        # we'll eventually need back end reserved names
+        # but probably not here
+        for identifier in func.get_symbols():
+            name = identifier.get_name()
+            if name in reserved_names:
+                if identifier.is_assigned():
+                    raise NotImplementedError(f"Reassigning names used by the language itself is unsupported. "
+                                              "{name} marked as assignment target")
+            else:
+                var_names.add(name)
+        funcname = func.get_name()
+        tables[funcname] = var_names
+    return tables

@@ -4,9 +4,9 @@ import sys
 import typing
 
 from contextlib import ContextDecorator
-from symtable import symtable
 
 import ir
+from symboltable import create_symbol_tables
 from Canonicalize import replace_builtin_call
 from visitor import VisitorBase
 
@@ -63,6 +63,7 @@ supported_builtins = {"iter", "range", "enumerate", "zip", "all", "any", "max", 
 
 # Prior version maintained a more native assignment structure.
 # this is nice for determining what bounds are preserved, but it complicates lowering.
+
 
 def serialize_iterated_assignments(target, iterable):
     """
@@ -135,18 +136,18 @@ def extract_positional_info(node):
                        col_end=node.end_col_offset)
 
 
-def create_symbol_tables(src, filename):
-    tables = {}
-    mod = symtable(src, filename, "exec")
-    for func in mod.get_children():
-        if func.get_type() == "class":
-            raise TypeError(f"Classes are not supported.")
-        elif func.has_children():
-            raise ValueError(f"Nested scopes are not supported")
-        # Now we need to check identifiers against builtins and language keywords.
-        # Since some of these have specialized internal handling, reassigning these
-        # is an error here. If no such errors appear, they should be excluded from the
-        # internal symbol table.
+def collect_constraint_variables(iters):
+    iterable_constraints = set()
+    range_constraints = set()
+
+    for iterable in iters:
+        if isinstance(iterable, ir.Counter):
+            if iterable.stop is not None:
+                #  keep step since we may not know sign
+                range_constraints.add(iterable)
+        else:
+            iterable_constraints.add(iterable)
+    return iterable_constraints, range_constraints
 
 
 class FlowContext(ContextDecorator):
@@ -155,7 +156,7 @@ class FlowContext(ContextDecorator):
     """
 
     def __init__(self, builder, header):
-        assert isinstance(header, (ast.For, ast.If, ast.While))
+        assert isinstance(header, (ast.For, ast.If, ast.While, ast.FunctionDef))
         self.builder = builder
         self.header = header
         self.enters_loop = isinstance(header, (ast.For, ast.While))
@@ -164,12 +165,12 @@ class FlowContext(ContextDecorator):
     def __enter__(self):
         self.builder.body, self.body = self.body, self.builder.body
         if self.enters_loop:
-            self.builder.builder.enclosing_loop, self.header = self.header, self.builder.enclosing_loop
+            self.builder.enclosing_loop, self.header = self.header, self.builder.enclosing_loop
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.builder.body, self.body = self.body, self.builder.body
         if self.enters_loop:
-            self.builder.builder.enclosing_loop, self.header = self.header, self.builder.enclosing_loop
+            self.builder.enclosing_loop, self.header = self.header, self.builder.enclosing_loop
 
 
 class AnnotationCollector(VisitorBase):
@@ -230,16 +231,17 @@ class AnnotationCollector(VisitorBase):
 
 class TreeBuilder(ast.NodeVisitor):
 
-    def __call__(self, entry: ast.FunctionDef):
+    def __call__(self, entry: ast.FunctionDef, syms):
         self.enclosing_loop = None
         self.entry = entry
+        self.syms = syms
         self.body = []
         func = self.visit(entry)
         assert self.enclosing_loop is None
         return func
 
     def flow_region(self, header):
-        assert isinstance(header, (ast.For, ast.While))
+        assert isinstance(header, (ast.For, ast.While, ast.If))
         return FlowContext(self, header)
 
     def visit_Attribute(self, node: ast.Attribute) -> ir.AttributeRef:
@@ -324,6 +326,7 @@ class TreeBuilder(ast.NodeVisitor):
         keywords = tuple((kw.arg, self.visit(kw.value)) for kw in node.keywords)
         # replace call should handle folding of casts
         call_ = ir.Call(funcname, args, keywords)
+        # Todo: need a way to identify array creation
         func = replace_builtin_call(call_)
         return func
 
@@ -348,13 +351,13 @@ class TreeBuilder(ast.NodeVisitor):
         step = self.visit(node.step) if node.step is not None else None
         return ir.Slice(lower, upper, step)
 
-    def visit_ExtSlice(self, node: ast.ExtSlice) -> ir.Unsupported:
+    def visit_ExtSlice(self, node: ast.ExtSlice):
         # This is probably never going to be supported, because it requires inlining
         # a large number of calculations in ways that may sometimes hamper performance.
-        return ir.Unsupported("ast.ExtSlice", msg="Extended slices are currently unsupported. This supports single"
-                                                  "slices per dimension")
+        raise TypeError("Extended slices are currently unsupported. This supports single"
+                        "slices per dimension")
 
-    def visit_AugAssign(self, node: ast.AugAssign) -> ir.Assign:
+    def visit_AugAssign(self, node: ast.AugAssign):
         target = self.visit(node.target)
         operand = self.visit(node.value)
         op = binary_inplace_ops.get(type(node.op))
@@ -385,11 +388,12 @@ class TreeBuilder(ast.NodeVisitor):
         assign = ir.Assign(target, value, pos)
         self.body.append(assign)
 
-    def visit_Pass(self, node: ast.Pass) -> ir.Pass:
+    def visit_Pass(self, node: ast.Pass):
         pos = extract_positional_info(node)
-        return ir.Pass(pos)
+        stmt = ir.Pass(pos)
+        return stmt
 
-    def visit_If(self, node: ast.If) -> ir.IfElse:
+    def visit_If(self, node: ast.If):
         pos = extract_positional_info(node)
         compare = self.visit(node.test)
         with self.flow_region(node):
@@ -403,7 +407,7 @@ class TreeBuilder(ast.NodeVisitor):
         ifstat = ir.IfElse(compare, on_true, on_false, pos)
         self.body.append(ifstat)
 
-    def visit_For(self, node: ast.For) -> ir.ForLoop:
+    def visit_For(self, node: ast.For):
         if node.orelse:
             raise ValueError("or else clause not supported for for statements")
         it = self.visit(node.iter)
@@ -411,19 +415,39 @@ class TreeBuilder(ast.NodeVisitor):
         pos = extract_positional_info(node)
         # we need to make an appropriate loop index here for cases that require
         # subscripting.
-        loop_index = ()
-        loop_counter = ()
-        # Now initialize the loop body with header assignments
+        loop_index = self.syms.make_unique_name()
+        loop_counter = None
 
+        # track conflicts between target an iterable names, so we can fail
+        # early if necessary
+        target_set = set()
+        iter_set = set()
         # Construct the actual loop header, using a single induction variable.
         with self.flow_region(node):
             assigns = []
             for target, iterable in serialize_iterated_assignments(it, target):
                 if isinstance(target, ir.Tuple) or isinstance(iterable, ir.Zip):
                     raise ValueError(f"Unable to fully unpack loop, line: {node.lineno}")
+                target_set.add(target)
+                iter_set.add(iterable)
                 assigns.append((target, iterable))
                 # We should optimize interval analysis at this point. The corresponding counter
                 # limit is then appended to the enclosing body prior to the loop node.
+            if target_set.intersection(iter_set):
+                raise ValueError
+            # Make single loop index and construct subscripts with respect to it.
+            # Doing this properly should rely on the infrastructure from lowering.
+            # This means we need to know array parameters here. Since we have strict rules
+            # that their definition must reach along all paths, we either have a definition at this point
+            # for each array used or we have an error, noting that an inconsistent definition encountered
+            # later is also an error.
+
+
+
+            # It's possible that we already have a viable non-escaping loop index via some enumerate
+            # statement, but it's not always easily provable at this stage, and retaining the full
+            # for loop structure creates too many splits in the IR. It worked previously when some of the
+            # other supporting work was under-engineered.
             for stmt in node.body:
                 self.visit(stmt)
             # need loop index creation
@@ -431,7 +455,7 @@ class TreeBuilder(ast.NodeVisitor):
         # append counter limit def first
         self.body.append(loop)
 
-    def visit_While(self, node: ast.While) -> ir.WhileLoop:
+    def visit_While(self, node: ast.While):
         if node.orelse:
             raise ValueError("or else clause not supported for for statements")
         test = self.visit(node.test)
@@ -456,7 +480,7 @@ class TreeBuilder(ast.NodeVisitor):
         stmt = ir.Continue(pos)
         self.body.append(stmt)
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> ir.Function:
+    def visit_FunctionDef(self, node: ast.FunctionDef):
         # can't check just self.blocks, since we automatically 
         # instantiate entry and exit
         if node is not self.entry:
@@ -466,12 +490,14 @@ class TreeBuilder(ast.NodeVisitor):
         params = [ir.NameRef(arg.arg) for arg in node.args.args]
         for stmt in node.body:
             self.visit(stmt)
-        return ir.Function(name, params, self.body)
+        func = ir.Function(name, params, self.body)
+        return func
 
-    def visit_Return(self, node: ast.Return) -> ir.Return:
+    def visit_Return(self, node: ast.Return):
         pos = extract_positional_info(node)
         value = self.visit(node.value) if node.value is not None else None
-        return ir.Return(value, pos)
+        stmt = ir.Return(value, pos)
+        self.body.append(stmt)
 
     def generic_visit(self, node):
         raise NotImplementedError(f"{type(node)} is unsupported")
@@ -492,6 +518,7 @@ def build_module_ir(src):
     # are not reasonable to type via annotations
     # It's not optimal, but this isn't necessarily
     # meant to be user facing.
+    symbols = create_symbol_tables(src)
     tree = ast.parse(src)
     tree = ast.fix_missing_locations(tree)
 
@@ -503,7 +530,8 @@ def build_module_ir(src):
     build_func_ir = TreeBuilder()
     for stmt in tree.body:
         if isinstance(stmt, ast.FunctionDef):
-            func, nested = build_func_ir(stmt)
+            syms = symbols[stmt.name]
+            func = build_func_ir(stmt, syms)
             funcs.append(func)
         elif isinstance(stmt, ast.Import):
             pos = extract_positional_info(stmt)
@@ -515,12 +543,7 @@ def build_module_ir(src):
             for name in stmt.names:
                 imports.append(ir.NameImport(mod, name.name, name.asname, pos))
         else:
-            unsupported.append(stmt)
+            raise ValueError("Unsupported")
 
-    if unsupported:
-        # This is either a class, control flow, 
-        # or data flow at module scope.
-        # It should output formatted errors.
-        raise ValueError("Unsupported")
 
     return ir.Module(funcs, imports)
