@@ -458,7 +458,7 @@ class TreeBuilder(ast.NodeVisitor):
             raise ValueError("or else clause not supported for for statements")
         test = self.visit(node.test)
         pos = extract_positional_info(node)
-        with self.make_loop_context(node):
+        with self.flow_region(node):
             for stmt in node.body:
                 self.visit(stmt)
             loop = ir.WhileLoop(test, self.body, pos)
@@ -524,7 +524,6 @@ def build_module_ir(src, filename):
 
     funcs = []
     imports = []
-    unsupported = []
     build_func_ir = TreeBuilder()
     for stmt in tree.body:
         if isinstance(stmt, ast.FunctionDef):

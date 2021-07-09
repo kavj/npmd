@@ -1,13 +1,6 @@
 import numpy as np
 
-from enum import Enum, auto
-
 import ir
-
-
-class arg_error(Enum):
-    bad_arg_count = auto()
-    bad_keyword = auto()
 
 
 class ArrayCreationInitializer:
@@ -28,14 +21,7 @@ class ArrayInputInitializer:
         return self.stride == 0
 
 
-class SparseArrayInputInitializer:
-    """
-    non-uniform stride by pointer begin
-    """
-    pass
-
-
-class RefBuilder:
+class TypeBuilder:
 
     def __init__(self, default_int64=True):
         int32_type = ir.ScalarType(signed=True, boolean=False, integral=True, bitwidth=32)

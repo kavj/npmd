@@ -2,6 +2,7 @@ import builtins
 import itertools
 import keyword
 
+from collections import defaultdict
 from symtable import symtable
 
 import ir
@@ -72,7 +73,43 @@ class symbol_gen:
         return name
 
 
-def create_symbol_tables(src, filename):
+def canonicalize_type_map(by_type, canonical_types):
+    """
+    Map type parameterized name sets to use canonical types.
+    This is intended to resolve type conflicts where two types
+    map to the same low level canonical type.
+
+    """
+    repl = defaultdict(set)
+    for t, names in by_type.items():
+        ct = canonical_types.get(t)
+        if ct is None:
+            msg = f"Cannot map unsupported type {t}"
+            raise TypeError(msg)
+        repl[ct].update(names)
+    return repl
+
+
+def bind_type_by_name(types):
+    """
+    in:
+        types: dict[type: set(all variable names of this type...)]
+
+    out:
+        by_name: dict[name: type]
+
+    """
+    by_name = {}
+    for type_, names in types.items():
+        for name in names:
+            if name in by_name:
+                first = by_name[name]
+                msg = f"Duplicate type entry {first} and {type_} for name {name}"
+                raise ValueError(msg)
+            by_name[name] = type_
+
+
+def create_symbol_tables(src, filename, types):
     tables = {}
     mod = symtable(src, filename, "exec")
     for func in mod.get_children():
@@ -81,16 +118,19 @@ def create_symbol_tables(src, filename):
         elif func.has_children():
             raise ValueError(f"Nested scopes are not supported")
         var_names = set()
+        args = set()
         # we'll eventually need back end reserved names
         # but probably not here
-        for identifier in func.get_symbols():
-            name = identifier.get_name()
+        for sym in func.get_symbols():
+            name = sym.get_name()
             if name in reserved_names:
-                if identifier.is_assigned():
+                if sym.is_assigned():
                     raise NotImplementedError(f"Reassigning names used by the language itself is unsupported. "
                                               "{name} marked as assignment target")
             else:
                 var_names.add(name)
+                if sym.is_parameter():
+                    args.add(name)
         funcname = func.get_name()
         table = symbol_gen(var_names)
         tables[funcname] = table

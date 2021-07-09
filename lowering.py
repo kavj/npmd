@@ -312,7 +312,7 @@ def make_loop_counters(iterables, arrays):
 
     """
     # Make counters for access functions
-    bounds = defaultdict(set)
+    bounds = set()
     for iterable in iterables:
         if isinstance(iterable, ir.Counter):
             if iterable.stop is not None:
@@ -327,12 +327,12 @@ def make_loop_counters(iterables, arrays):
                 bounds.add(ir.Counter(sl.start, leading_dim, sl.step))
             else:
                 # Expand all bounds, since we don't always know which is tighter.
-                bounds[ir.Counter(sl.start, sl.stop, sl.step)].add(iterable)
-                bounds[ir.Counter(sl.start, leading_dim, sl.step)].add(iterable)
+                bounds.add(ir.Counter(sl.start, sl.stop, sl.step))
+                bounds.add(ir.Counter(sl.start, leading_dim, sl.step))
         else:
             arr = arrays[iterable]
             leading_dim = arr.dims.elements[0]
-            bounds[ir.Counter(ir.IntNode(0), leading_dim, ir.IntNode(1))] = set(*iterables)
+            bounds.add(ir.Counter(ir.IntNode(0), leading_dim, ir.IntNode(1)))
     return bounds
 
 
@@ -395,7 +395,7 @@ def make_min_sliced_len_expr(slices, leading_dim_expr):
     return bound
 
 
-def make_min_expr(exprs):
+def make_min_integer_expr(exprs):
     if not exprs:
         raise ValueError
     params = set()
@@ -416,7 +416,7 @@ def make_min_expr(exprs):
     return min_expr
 
 
-def make_max_expr(exprs):
+def make_max_integer_expr(exprs):
     if not exprs:
         raise ValueError
     params = set()
@@ -595,7 +595,10 @@ def _(base: ir.Subscript, syms):
     return counter
 
 
-def make_loop_interval(iters, syms, loop_index):
+def make_loop_interval(targets, iters, syms, loop_index):
+    assert(len(targets) == len(iters))
     counters = [make_counter(it, syms) for it in iters]
     interval = make_loop_interval(counters, syms, loop_index)
+    # Now, map each iterable based on
+
     return interval

@@ -154,18 +154,20 @@ class EarlyTypeVerifier(VisitorBase):
 
     @visit.register
     def _(self, node: ir.ForLoop):
-        for target, iterable in node.walk_assignments():
-            iterable_type = self.visit(iterable)
-            if not isinstance(iterable_type, ir.ArrayRef):
-                self.type_errors.register_bad_array_reference(iterable_type)
-            if iterable_type.ndims == 1:
-                predicted_target_type = iterable_type.dtype
-            else:
-                predicted_target_type = ir.ArrayRef(iterable_type.ndims - 1, iterable_type.dtype)
-            target_type = self.visit(target)
-            if target_type is not None:
-                if target_type != predicted_target_type:
-                    self.required_casts[predicted_target_type].add(target_type)
+        target = node.target
+        iterable = node.iterable
+        iterable_type = self.visit(iterable)
+
+        if not isinstance(iterable_type, ir.ArrayRef):
+            self.type_errors.register_bad_array_reference(iterable_type)
+        if iterable_type.ndims == 1:
+            predicted_target_type = iterable_type.dtype
+        else:
+            predicted_target_type = ir.ArrayRef(iterable_type.ndims - 1, iterable_type.dtype)
+        target_type = self.visit(target)
+        if target_type is not None:
+            if target_type != predicted_target_type:
+                self.required_casts[predicted_target_type].add(target_type)
 
     @visit.register
     def _(self, node: ir.WhileLoop):
