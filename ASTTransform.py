@@ -3,6 +3,9 @@ import numbers
 import sys
 import typing
 
+from contextlib import ContextDecorator
+from symtable import symtable
+
 import ir
 from Canonicalize import replace_builtin_call
 from visitor import VisitorBase
@@ -58,7 +61,10 @@ supported_builtins = {"iter", "range", "enumerate", "zip", "all", "any", "max", 
                       "round", "reversed"}
 
 
-def serialize_iterated_assignments(target, iterable) -> typing.List[typing.Tuple[ir.Targetable, ir.ValueRef]]:
+# Prior version maintained a more native assignment structure.
+# this is nice for determining what bounds are preserved, but it complicates lowering.
+
+def serialize_iterated_assignments(target, iterable):
     """
     Serializes (target, iterable) pairs by unpacking order
     """
@@ -67,7 +73,6 @@ def serialize_iterated_assignments(target, iterable) -> typing.List[typing.Tuple
             and len(target.elements) == len(iterable.elements)):
 
         queued = [zip(target.elements, iterable.elements)]
-        assigns = []
 
         while queued:
             try:
@@ -77,13 +82,11 @@ def serialize_iterated_assignments(target, iterable) -> typing.List[typing.Tuple
                         and len(t.elements) == len(v.elements)):
                     queued.append(zip(t.elements, v.elements))
                 else:
-                    assigns.append((t, v))
+                    yield t, v
             except StopIteration:
                 queued.pop()
     else:
-        assigns = [(target, iterable)]
-
-    return assigns
+        yield target, iterable
 
 
 def serialize_assignments(node: ir.Assign):
@@ -101,7 +104,6 @@ def serialize_assignments(node: ir.Assign):
         return [node]
 
     queued = [zip(node.target.elements, node.value.elements)]
-    assigns = []
     while queued:
         try:
             t, v = next(queued[-1])
@@ -110,7 +112,7 @@ def serialize_assignments(node: ir.Assign):
                     and len(node.target.elements) == len(node.value.elements)):
                 queued.append(zip(t.elements, v.elements))
             else:
-                assigns.append(ir.Assign(t, v, node.pos))
+                yield t, v, node.pos
         except StopIteration:
             queued.pop()
 
@@ -133,9 +135,43 @@ def extract_positional_info(node):
                        col_end=node.end_col_offset)
 
 
+def create_symbol_tables(src, filename):
+    tables = {}
+    mod = symtable(src, filename, "exec")
+    for func in mod.get_children():
+        if func.get_type() == "class":
+            raise TypeError(f"Classes are not supported.")
+        elif func.has_children():
+            raise ValueError(f"Nested scopes are not supported")
+        # Now we need to check identifiers against builtins and language keywords.
+        # Since some of these have specialized internal handling, reassigning these
+        # is an error here. If no such errors appear, they should be excluded from the
+        # internal symbol table.
+
+
+class LoopCtx(ContextDecorator):
+    """
+    Start of a loop context manager
+    """
+
+    def __init__(self, builder, loop_header):
+        self.builder = builder
+        self.header = loop_header
+        self.body = []
+
+    def __enter__(self):
+        self.builder.body, self.body = self.body, self.builder.body
+        self.builder.builder.enclosing_loop, self.header = self.header, self.builder.enclosing_loop
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.builder.body, self.body = self.body, self.builder.body
+        self.builder.builder.enclosing_loop, self.header = self.header, self.builder.enclosing_loop
+
+
 class AnnotationCollector(VisitorBase):
     """
     This tries to parse anything the grammar can handle.
+    Note: Annotations are no longer used, since they make templating awkward.
 
     """
 
@@ -191,22 +227,12 @@ class AnnotationCollector(VisitorBase):
 class TreeBuilder(ast.NodeVisitor):
 
     def __call__(self, entry: ast.FunctionDef):
-        self.loops = []
-        self.nested_scopes = []
+        self.enclosing_loop = None
         self.entry = entry
+        self.body = []
         func = self.visit(entry)
-        assert (not self.loops)
-        return func, self.nested_scopes
-
-    def visit_body(self, stmts: list):
-        body = []
-        for stmt in stmts:
-            ir_stmt = self.visit(stmt)
-            if isinstance(ir_stmt, list):
-                body.extend(ir_stmt)
-            else:
-                body.append(ir_stmt)
-        return body
+        assert self.enclosing_loop is None
+        return func
 
     def visit_Attribute(self, node: ast.Attribute) -> ir.AttributeRef:
         value = self.visit(node.value)
@@ -243,10 +269,11 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_Name(self, node: ast.Name):
         return ir.NameRef(node.id)
 
-    def visit_Expr(self, node: ast.Expr) -> ir.SingleExpr:
+    def visit_Expr(self, node: ast.Expr):
+        # single expression statement
         expr = self.visit(node.value)
         pos = extract_positional_info(node)
-        return ir.SingleExpr(expr, pos)
+        self.body.append(ir.SingleExpr(expr, pos))
 
     def visit_UnaryOp(self, node: ast.UnaryOp) -> ir.UnaryOp:
         op = unaryops.get(type(node.op))
@@ -324,26 +351,31 @@ class TreeBuilder(ast.NodeVisitor):
         operand = self.visit(node.value)
         op = binary_inplace_ops.get(type(node.op))
         pos = extract_positional_info(node)
-        return ir.Assign(target, ir.BinOp(target, operand, op), pos)
+        assign = ir.Assign(target, ir.BinOp(target, operand, op), pos)
+        self.body.append(assign)
 
-    def visit_Assign(self, node: ast.Assign) -> typing.List[ir.Assign]:
+    def visit_Assign(self, node: ast.Assign):
+        # first convert locally to internal IR
         value = self.visit(node.value)
-        targets = [self.visit(t) for t in node.targets]
         pos = extract_positional_info(node)
-        # lower a = b = c into a = c; b = c
-        # (Notice Python uses cascading rules that differ from C, which would serialize
-        #  a = b = c into b = c; a = b;)
-        assigns = [ir.Assign(target, value, pos) for target in targets]
-        # Serialize the case of (a,b,c,d) = (e,f,g,h)
-        return assigns
+        for target in node.targets:
+            # break cascaded assignments into multiple assignments
+            target = self.visit(target)
+            initial = ir.Assign(target, value, pos)
+            for subtarget, subvalue, pos in serialize_assignments(initial):
+                if isinstance(subtarget, ir.Tuple) or isinstance(subvalue, ir.Tuple):
+                    raise TypeError(f"unable to determine that assignment at line {pos.line_begin} is fully unpackable.")
+                subassign = ir.Assign(subtarget, subvalue, pos)
+                self.body.append(subassign)
 
-    def visit_AnnAssign(self, node: ast.AnnAssign) -> ir.Assign:
+    def visit_AnnAssign(self, node: ast.AnnAssign):
         target = self.visit(node.target)
         value = self.visit(node.value)
         pos = extract_positional_info(node)
         # We ignore these, because they don't scale well
         # based on parametric constraints
-        return ir.Assign(target, value, pos)
+        assign = ir.Assign(target, value, pos)
+        self.body.append(assign)
 
     def visit_Pass(self, node: ast.Pass) -> ir.Pass:
         pos = extract_positional_info(node)
@@ -363,11 +395,24 @@ class TreeBuilder(ast.NodeVisitor):
         it = self.visit(node.iter)
         target = self.visit(node.target)
         pos = extract_positional_info(node)
+        # we need to make an appropriate loop index here for cases that require
+        # subscripting.
+        loop_index = ()
+
+        # Now initialize the loop body with header assignments
+
+
+        # Construct the actual loop header, using a single induction variable.
+
+
         assigns = serialize_iterated_assignments(target, it)
         self.loops.append(node)
+        # best to use a context manager
+        for stmt in node.body:
+            body.append()
         body = self.visit_body(node.body)
         self.loops.pop()
-        return ir.ForLoop(assigns, body, pos)
+        loop = ir.ForLoop(assigns, body, pos)
 
     def visit_While(self, node: ast.While) -> ir.WhileLoop:
         if node.orelse:
@@ -398,14 +443,14 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ir.Function:
         # can't check just self.blocks, since we automatically 
         # instantiate entry and exit
-        if node is self.entry:
-            name = node.name
-            # Todo: warn about unsupported argument features
-            params = [ir.NameRef(arg.arg) for arg in node.args.args]
-            body = self.visit_body(node.body)
-            return ir.Function(name, params, body)
-        else:
-            self.nested_scopes.append(node)
+        if node is not self.entry:
+            raise RuntimeError(f"Nested scopes are unsupported. line: {node.lineno}")
+        name = node.name
+        # Todo: warn about unsupported argument features
+        params = [ir.NameRef(arg.arg) for arg in node.args.args]
+        for stmt in node.body:
+            self.visit(stmt)
+        return ir.Function(name, params, self.body)
 
     def visit_Return(self, node: ast.Return) -> ir.Return:
         pos = extract_positional_info(node)

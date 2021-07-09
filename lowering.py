@@ -60,25 +60,6 @@ class name_generator:
         return f"{self.prefix}_{next(self.gen)}"
 
 
-class symbol_gen:
-    def __init__(self, existing):
-        self.names = existing
-        self.added = set()
-        self.gen = itertools.count()
-
-    def __contains__(self, item):
-        if isinstance(item, ir.NameRef):
-            item = item.name
-        return item in self.names
-
-    def make_unique_name(self, prefix):
-        name = f"{prefix}_{next(self.gen)}"
-        while name in self.names:
-            name = f"{prefix}_{next(self.gen)}"
-        self.names.add(name)
-        return name
-
-
 def build_symbols(entry):
     # grabs all names that can be declared at outmermost scope
     names = set()
@@ -344,59 +325,24 @@ def make_constant_like(expr, types, value):
     else:
         raise TypeError
 
+# Todo: These stubs will replace varying to noop, based on other work.from
+#       We have to distinguish ternary assign for cases where the op is not nested
+#       and one of the resulting assignments is equivalent to an identity operation.
 
-def try_convert_varying_to_noop(stmts, symbols, predicate, types):
-    repl = []
-    # Todo: This is partly redundant now. Instead, if we end up with a ternary op
-    #  of the form 'target = value op other if condition else value', where the op
-    #  is nullable for the corresponding types, we can simplify.
 
-    for stmt in stmts:
-        if isinstance(stmt, ir.Assign):
-            # convertible if inplace arithmetic or unary op
-            # or if not explicitly in place but the target is both read and written by the assignment
-            lhs = stmt.target
-            if lhs == stmt.value:
-                # noop
-                continue
-            if stmt.in_place:
-                # look up conversion, overwrite statement
-                expr = expand_inplace_op(stmt.value)
-            else:
-                expr = stmt.value
-            if isinstance(expr, ir.UnaryOp):
-                expr = try_replace_unary_binary(expr)
-            if isinstance(expr, ir.BinOp):
-                # primary practical case of interest
-                # If we support non-commutative operands later,
-                # this must be revisited
-                if expr.left == lhs:
-                    rhs = expr.right
-                elif expr.right == lhs:
-                    rhs = expr.left
-                else:
-                    # can't simplify
-                    repl.append(stmt)
-                    continue
-                # These typically lower to bitwise operations, but those aren't defined for floating
-                # point arithmetic. They're typically just an extension of simd ops. This still communicates
-                # an unambiguous intent to later stages.
-                zero = make_constant_like(expr.right, types, 0)
-                one = make_constant_like(expr.right, types, 1)
-                if op == "+":
-                    expr = ir.BinOp(expr.left, ir.IfExpr(predicate, expr.right, zero), "+")
-                elif op == "*":
-                    expr = ir.BinOp(expr.left, ir.IfExpr(predicate, expr.right, one), "*")
-                elif op == "/":
-                    expr = ir.BinOp(expr.left, ir.IfExpr(predicate, expr.right, one), "/")
-                elif op == "//":
-                    expr = ir.BinOp(expr.left, ir.IfExpr(predicate, expr.right, one), "//")
-                # ignore other cases
-                if stmt.in_place:
-                    expr = ir.BinOp(expr.lhs, expr.rhs, f"{expr.op}=")
-                stmt = ir.Assign(stmt.target, expr, stmt.pos)
-                repl.append(stmt)
-    return repl
+def simplify_ternary_assign(assign, symbols, predicate, types):
+    """
+    Simplify an assignment statement where the right hand side is a ternary operation.
+
+    """
+    pass
+
+
+def simplify_ternary_op(expr, symbols, predicate, types):
+    """
+    Simplify a ternary op that may not be directly assigned.
+    """
+    pass
 
 
 def make_loop_counters(iterables, arrays):

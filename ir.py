@@ -29,13 +29,6 @@ class Position:
 clscond = typing.ClassVar[bool]
 
 
-class Walkable(ABC):
-
-    @abstractmethod
-    def walk(self):
-        raise NotImplementedError
-
-
 class StmtBase:
     pos = None
 
@@ -70,8 +63,9 @@ class Constant:
     Base class for anything that can be the target of an assignment. 
 
     """
+    value: clscond = None
     constant: clscond = True
-    value: typing.ClassVar = None
+    is_expr: clscond = False
 
     def __bool__(self):
         return operator.truth(self.value)
@@ -91,7 +85,6 @@ class AttributeRef:
 @dataclass(frozen=True)
 class BoolNode(Constant):
     value: bool
-    constant: clscond = True
 
 
 @dataclass(frozen=True)
@@ -114,8 +107,8 @@ class IntNode(Constant):
 class StringNode(Constant):
     value: str
 
-
 # Top Level
+
 
 @dataclass(frozen=True)
 class NameRef:
@@ -152,6 +145,7 @@ class ViewRef:
     derived_from: typing.Union[ArrayRef, ViewRef]
     subscript: typing.Optional[typing.Union[IntNode, Slice, NameRef, BinOp, UnaryOp]]
     transposed: bool = False
+    constant: clscond = False
 
     @cached_property
     def base(self):
@@ -222,18 +216,14 @@ class ShapeRef(Expression):
 
     # not quite constant since it can refer to single definitions
     # which appear in loops
-    constant: typing.ClassVar[bool] = False
+    constant: clscond = False
 
 
 @dataclass
-class Function(Walkable):
+class Function:
     name: str
     args: typing.List[NameRef]
     body: typing.List[Statement]
-
-    def walk(self):
-        for n in self.body:
-            yield n
 
 
 @dataclass
@@ -521,30 +511,19 @@ class Continue(StmtBase):
 
 
 @dataclass
-class ForLoop(StmtBase, Walkable):
-    assigns: typing.List[typing.Tuple[Targetable, ValueRef]]
+class ForLoop(StmtBase):
+    target: typing.Any
+    iterable: Counter
     body: typing.List[Statement]
     pos: Position
 
-    def walk(self):
-        for stmt in self.body:
-            yield stmt
-
-    def walk_assignments(self):
-        for target, value in self.assigns:
-            yield target, value
-
 
 @dataclass
-class IfElse(StmtBase, Walkable):
+class IfElse(StmtBase):
     test: ValueRef
     if_branch: typing.List[Statement]
     else_branch: typing.List[Statement]
     pos: Position
-
-    def walk(self):
-        for stmt in itertools.chain(self.if_branch, self.else_branch):
-            yield stmt
 
 
 @dataclass
@@ -574,14 +553,10 @@ class Return(StmtBase):
 
 
 @dataclass
-class WhileLoop(StmtBase, Walkable):
+class WhileLoop(StmtBase):
     test: ValueRef
     body: typing.List[Statement]
     pos: Position
-
-    def walk(self):
-        for n in self.body:
-            yield n
 
 
 # utility nodes

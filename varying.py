@@ -123,7 +123,7 @@ def collect_assigned(entry):
         if isinstance(stmt, ir.Assign):
             # only record expressions recorded as top level expressions
             if isinstance(stmt.target, ir.NameRef):
-                if not isinstance(stmt.value, ir.Constant):
+                if not stmt.value.constant:
                     exprs[stmt.value].add(stmt.target)
         elif isinstance(stmt, ir.ForLoop):
             for target, iterable in stmt.walk_assignments():

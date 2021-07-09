@@ -7,7 +7,7 @@ from functools import singledispatchmethod
 import numpy as np
 
 import ir
-from visitor import walk_all, TransformBase
+from visitor import walk_all, walk_assigns, TransformBase
 
 unaryops = {"+": operator.pos,
             "-": operator.neg,
@@ -70,7 +70,7 @@ def wrap_constant(c):
 
 
 def simplify_pow(base, coeff, in_place=False):
-    if isinstance(coeff, ir.Constant):
+    if coeff.constant:
         if not isinstance(coeff, (ir.IntNode, ir.FloatNode)):
             msg = f"Cannot evaluate pow operation with power of type {type(coeff)}"
             raise RuntimeError(msg)
@@ -81,7 +81,7 @@ def simplify_pow(base, coeff, in_place=False):
             elif coeff == 1:
                 return base
             elif coeff == 2:
-                if isinstance(base, ir.Constant):
+                if base.constant:
                     repl = wrap_constant(operator.pow(base.value, 2))
                 else:
                     op = "*=" if in_place else "*"
@@ -89,7 +89,7 @@ def simplify_pow(base, coeff, in_place=False):
                 return repl
         elif isinstance(coeff, ir.FloatNode):
             if coeff.value == 0.5:
-                if isinstance(base, ir.Constant):
+                if base.constant:
                     left = base.value
                     try:
                         left = math.sqrt(left)
@@ -171,7 +171,7 @@ class FoldExpressions(TransformBase):
         for operand in node.operands:
             operand = self.visit(operand)
             operand = self.as_constant(operand)
-            if isinstance(operand, ir.Constant):
+            if operand.constant:
                 if operator.truth(operand) == early_return_on:
                     return ir.BoolNode(early_return_on)
             else:
@@ -210,9 +210,7 @@ class FoldExpressions(TransformBase):
             repl = []
             for key, s in (node.start, node.stop, node.step):
                 s = self.visit(s)
-                const_s = self.as_constant(s)
-                if not isinstance(s, ir.NameRef):
-                    s = const_s
+                s = self.as_constant(s)
                 repl.append(s)
             # swap start and stop
             stop, start, step = repl
@@ -238,9 +236,8 @@ class FoldExpressions(TransformBase):
         as_const = self.as_constant(operand)
         if as_const is not operand:
             if node.op == "~":
-                if isinstance(as_const, ir.Constant) and not isinstance(as_const, ir.IntNode):
-                    msg = f"Cannot apply unary inversion to a non-integer operand, received {type(as_const)}"
-                    raise RuntimeError(msg)
+                if as_const.constant:
+                    assert isinstance(as_const, ir.IntNode)
             dispatcher = unaryops.get(node.op)
             try:
                 result = dispatcher(operand.value)
@@ -257,7 +254,7 @@ class FoldExpressions(TransformBase):
         expr = self.visit(node.expr)
         as_const = self.as_constant(expr)
         repl = ir.Cast(self.visit(node.expr), node.as_type)
-        if isinstance(as_const, ir.Constant):
+        if as_const.constant:
             if node.as_type in foldable_cast_types:
                 method = getattr(node.as_type, "__call__")
                 value = method(as_const.value)
@@ -272,6 +269,7 @@ class FoldExpressions(TransformBase):
 
 def collect_assignments(node):
     by_target = defaultdict(list)
+
     if isinstance(node, ir.Assign):
         by_target[node.target].append(node)
     elif isinstance(node, ir.Walkable):
