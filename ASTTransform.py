@@ -149,23 +149,27 @@ def create_symbol_tables(src, filename):
         # internal symbol table.
 
 
-class LoopCtx(ContextDecorator):
+class FlowContext(ContextDecorator):
     """
     Start of a loop context manager
     """
 
-    def __init__(self, builder, loop_header):
+    def __init__(self, builder, header):
+        assert isinstance(header, (ast.For, ast.If, ast.While))
         self.builder = builder
-        self.header = loop_header
+        self.header = header
+        self.enters_loop = isinstance(header, (ast.For, ast.While))
         self.body = []
 
     def __enter__(self):
         self.builder.body, self.body = self.body, self.builder.body
-        self.builder.builder.enclosing_loop, self.header = self.header, self.builder.enclosing_loop
+        if self.enters_loop:
+            self.builder.builder.enclosing_loop, self.header = self.header, self.builder.enclosing_loop
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.builder.body, self.body = self.body, self.builder.body
-        self.builder.builder.enclosing_loop, self.header = self.header, self.builder.enclosing_loop
+        if self.enters_loop:
+            self.builder.builder.enclosing_loop, self.header = self.header, self.builder.enclosing_loop
 
 
 class AnnotationCollector(VisitorBase):
@@ -233,6 +237,10 @@ class TreeBuilder(ast.NodeVisitor):
         func = self.visit(entry)
         assert self.enclosing_loop is None
         return func
+
+    def flow_region(self, header):
+        assert isinstance(header, (ast.For, ast.While))
+        return FlowContext(self, header)
 
     def visit_Attribute(self, node: ast.Attribute) -> ir.AttributeRef:
         value = self.visit(node.value)
@@ -384,10 +392,16 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_If(self, node: ast.If) -> ir.IfElse:
         pos = extract_positional_info(node)
         compare = self.visit(node.test)
-        on_true = self.visit_body(node.body)
-        on_false = self.visit_body(node.orelse)
+        with self.flow_region(node):
+            for stmt in node.body:
+                self.visit(stmt)
+            on_true = self.body
+        with self.flow_region(node.test):
+            for stmt in node.orelse:
+                self.visit(stmt)
+            on_false = self.body
         ifstat = ir.IfElse(compare, on_true, on_false, pos)
-        return ifstat
+        self.body.append(ifstat)
 
     def visit_For(self, node: ast.For) -> ir.ForLoop:
         if node.orelse:
@@ -398,47 +412,49 @@ class TreeBuilder(ast.NodeVisitor):
         # we need to make an appropriate loop index here for cases that require
         # subscripting.
         loop_index = ()
-
+        loop_counter = ()
         # Now initialize the loop body with header assignments
 
-
         # Construct the actual loop header, using a single induction variable.
-
-
-        assigns = serialize_iterated_assignments(target, it)
-        self.loops.append(node)
-        # best to use a context manager
-        for stmt in node.body:
-            body.append()
-        body = self.visit_body(node.body)
-        self.loops.pop()
-        loop = ir.ForLoop(assigns, body, pos)
+        with self.flow_region(node):
+            assigns = []
+            for target, iterable in serialize_iterated_assignments(it, target):
+                if isinstance(target, ir.Tuple) or isinstance(iterable, ir.Zip):
+                    raise ValueError(f"Unable to fully unpack loop, line: {node.lineno}")
+                assigns.append((target, iterable))
+                # We should optimize interval analysis at this point. The corresponding counter
+                # limit is then appended to the enclosing body prior to the loop node.
+            for stmt in node.body:
+                self.visit(stmt)
+            # need loop index creation
+            loop = ir.ForLoop(loop_index, loop_counter, self.body, pos)
+        # append counter limit def first
+        self.body.append(loop)
 
     def visit_While(self, node: ast.While) -> ir.WhileLoop:
         if node.orelse:
             raise ValueError("or else clause not supported for for statements")
-        compare = self.visit(node.test)
+        test = self.visit(node.test)
         pos = extract_positional_info(node)
-        self.loops.append(node)
-        body = self.visit_body(node.body)
-        self.loops.pop()
-        return ir.WhileLoop(compare, body, pos)
+        with self.make_loop_context(node):
+            for stmt in node.body:
+                self.visit(stmt)
+            loop = ir.WhileLoop(test, self.body, pos)
+        self.body.append(loop)
 
     def visit_Break(self, node: ast.Break):
-        if self.loops:
-            pos = extract_positional_info(node)
-            stmt = ir.Break(pos)
-            return stmt
-        else:
+        if self.enclosing_loop is None:
             raise ValueError("Break encountered outside of loop.")
+        pos = extract_positional_info(node)
+        stmt = ir.Break(pos)
+        self.body.append(stmt)
 
-    def visit_Continue(self, node: ast.Continue) -> ir.Continue:
-        if self.loops:
-            # Add an edge without explicitly terminating the block.
-            pos = extract_positional_info(node)
-            return ir.Continue(pos)
-        else:
+    def visit_Continue(self, node: ast.Continue):
+        if self.enclosing_loop is None:
             raise ValueError("Continue encountered outside of loop.")
+        pos = extract_positional_info(node)
+        stmt = ir.Continue(pos)
+        self.body.append(stmt)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ir.Function:
         # can't check just self.blocks, since we automatically 
