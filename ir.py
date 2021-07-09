@@ -417,6 +417,10 @@ class Counter(Expression):
     is_counter: clscond = True
 
     @property
+    def reversed(self):
+        raise NotImplementedError
+
+    @property
     def subexprs(self):
         yield self.start
         if self.stop is not None:

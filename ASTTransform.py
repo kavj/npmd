@@ -189,7 +189,7 @@ class AnnotationCollector(VisitorBase):
         if isinstance(value, ir.AttributeRef):
             value = ir.AttributeRef(value.value, value.attr + node.attr)
         else:
-            value = ir.AttributeRef(value, (node.attr,))
+            value = ir.AttributeRef(value, node.attr)
         return value
 
     def visit_Constant(self, node: ast.Constant):

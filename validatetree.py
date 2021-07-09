@@ -15,25 +15,6 @@ def shadows_builtin_name(name):
     return name in keywords or name in builtin_names
 
 
-def target_iterable_conflicts(header):
-    """
-    Python permits a target to clobber an iterable name, since the value obtained for an iterable
-    is based on whatever the name or expression evaluates to at the time the loop is first encountered.
-    This violates static typing though, thus it must be checked.
-    """
-
-    targets = set()
-    iterables = set()
-    duplicate_targets = set()
-    for target, iterable in header.walk_assignments():
-        if target in targets:
-            duplicate_targets.add(target)
-        targets.add(target)
-        iterables.add(iterable)
-    conflicts = targets.intersection(iterables)
-    return conflicts, duplicate_targets
-
-
 class TreeValidator(VisitorBase):
     """
     A visitor to perform early checks for common errors
@@ -72,17 +53,7 @@ class TreeValidator(VisitorBase):
 
     @visit.register
     def _(self, node: ir.ForLoop):
-        conflicts, duplicate_targets = target_iterable_conflicts(node)
-        for conflict in conflicts:
-            self.errors.append(f"Variable {conflict} appears as both an iterable and target in for loop on line "
-                               f"{node.pos.line_begin}.")
-        for dupe in duplicate_targets:
-            self.errors.append(f"duplicate target variable '{dupe}' in for loop on line {node.pos.line_begin}")
-        for target, _ in node.walk_assignments():
-            if isinstance(target, ir.Expression):
-                self.errors.append(f"Only simple name assignment is supported in for loop targets: "
-                                   f"line {node.pos.line_begin}")
-        self.visit(node.body)
+        raise NotImplementedError
 
     @visit.register
     def _(self, node: ir.Assign):

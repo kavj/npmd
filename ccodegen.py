@@ -94,7 +94,8 @@ def extract_leading_dim(array):
 
 
 def enter_for_loop(header: ir.ForLoop, lltypes):
-    loop_index, counter = next(header.walk_assignments())
+    loop_index = header.target
+    counter = header.iterable
     # we'll need to add the exception code for illegal (here) step
     if counter.reversed:
         end_expr = ">"

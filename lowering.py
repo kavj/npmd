@@ -87,10 +87,7 @@ class DeclBuilder(VisitorBase):
         self.cumulative = self.cumulative.copy()
         for_id = id(node)
         body_id = id(node.body)
-        if (len(node.assigns) != 1):
-            # more trouble than it's worth
-            raise ValueError("unable to build loop declarations for a multi-variate header")
-        target, _ = next(node.walk_assignments())
+        target = node.target
         # this should be scoped to a single loop
         assert target not in self.cumulative
         self.decls[for_id].update(target)

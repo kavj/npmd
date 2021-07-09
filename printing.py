@@ -316,17 +316,10 @@ class printtree:
 
     @visit.register
     def _(self, node: ir.ForLoop):
-        assigns = node.assigns
-        if len(assigns) == 1:
-            tar, it = assigns[0]
-            tar = self.format(tar)
-            it = self.format(it)
-        else:
-            # These are typically generated as flat assignments to whatever degree is possible,
-            # but we still have to rebuild enumerate constructs
-            tar, it = rebuild_enumerate_nesting(assigns)
-            tar = self.format(tar)
-            it = self.format(it)
+        tar = node.target
+        it = node.iterable
+        tar = self.format(tar)
+        it = self.format(it)
         print(f"{self.leading}for {tar} in {it}:")
         self.indent()
         if node.body:

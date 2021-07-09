@@ -213,7 +213,7 @@ class RemoveContinues(TransformBase):
         for index, stmt in enumerate(repl):
             if isinstance(stmt, ir.IfElse):
                 repl[index] = simplify_branch(stmt)
-        return ir.ForLoop(node.assigns, repl, node.pos)
+        return ir.ForLoop(node.target, node.iterable, repl, node.pos)
 
     @visit.register
     def _(self, node: ir.WhileLoop):
@@ -252,12 +252,13 @@ class MergePaths(TransformBase):
     @visit.register
     def _(self, node: ir.ForLoop):
         self.loops.append(node)
-        assigns = node.assigns
+        target = node.target
+        iterable = node.iterable
         body = self.visit(node.body)
         pos = node.pos
         header = self.loops.pop()
         assert (header is node)
-        return ir.ForLoop(assigns, body, pos)
+        return ir.ForLoop(target, iterable, body, pos)
 
     @visit.register
     def _(self, node: ir.WhileLoop):

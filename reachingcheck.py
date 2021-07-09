@@ -109,10 +109,10 @@ class ReachingCheck(VisitorBase):
         self.enclosing.append(seen)
         self.seen = set()
         # mark iterables first
-        for _, value in node.assigns:
-            self.mark_reference(value)
-        for target, _ in node.assigns:
-            self.mark_assignment(target, node)
+        target = node.target
+        iterable = node.iterable
+        self.mark_reference(iterable)
+        self.mark_assignment(target, node)
         self.visit(node.body)
         self.seen = self.enclosing.pop()
         assert (seen is self.seen)
@@ -193,9 +193,9 @@ class VarScopeCheck(VisitorBase):
         if node is not self.entry:
             self.enclosing.update(self.bound)
             self.bound = set()
-        for target, _ in node.walk_assignments():
-            if not isinstance(target, ir.Expression) and self.unseen(target):
-                self.bound.add(target)
+        target = node.target
+        if not isinstance(target, ir.Expression) and self.unseen(target):
+            self.bound.add(target)
         self.visit(node.body)
         if node is not self.entry:
             self.closed.append((node, self.bound))
@@ -243,7 +243,8 @@ class UsedCheck(VisitorBase):
 
     @visit.register
     def _(self, node: ir.ForLoop):
-        for target, value in node.walk_assignments():
-            if isinstance(target, ir.Expression):
-                self.used.add(target)
-            self.used.add(value)
+        target = node.target
+        value = node.iterable
+        if isinstance(target, ir.Expression):
+            self.used.add(target)
+        self.used.add(value)

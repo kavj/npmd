@@ -322,7 +322,6 @@ class TypeChecker(VisitorBase):
     def _(self, node: ir.ForLoop):
         target = node.target
         iterable = node.iterable
-        # for target, iterable in node.walk_assignments():
         self.visit(target)
         self.visit(iterable)
         t = self.lookup_type(iterable)
