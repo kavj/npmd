@@ -7,7 +7,7 @@ from functools import singledispatchmethod
 import numpy as np
 
 import ir
-from visitor import walk_all, TransformBase
+from visitor import walk, TransformBase
 
 unaryops = {"+": operator.pos,
             "-": operator.neg,
@@ -272,8 +272,8 @@ def collect_assignments(node):
 
     if isinstance(node, ir.Assign):
         by_target[node.target].append(node)
-    elif isinstance(node, ir.Walkable):
-        for stmt in walk_all(node):
+    elif isinstance(node, (ir.ForLoop, ir.WhileLoop, ir.IfElse)):
+        for stmt in walk(node):
             if isinstance(stmt, ir.Assign):
                 by_target[stmt.target].append(stmt)
     return by_target

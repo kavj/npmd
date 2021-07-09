@@ -36,7 +36,6 @@ class TypeBuilder:
         # Python floats are always double precision
         types[float] = float64_type
         self.types = types
-        self.builders = {}
 
     @property
     def default_float(self):
@@ -46,20 +45,22 @@ class TypeBuilder:
     def default_int(self):
         return self.types[int]
 
-    def build_func(self, func: ir.Call):
-        builder = self.builders.get(func.funcname)
-        if builder is None:
-            raise ValueError
-        return builder(func.args, func.keywords)
 
+def map_alias_to_qualified_names(import_nodes):
+    """
+    Internally, we refer to qualified names for uniqueness reasons.
+    This maps any any aliases of modules or names from modules to
+    qualified names.
 
-def map_to_qualified_names(import_nodes):
-    canonical_names = {}
+    alias: module_name or alias: module_name.imported_name
+
+    """
+    qual_names = {}
     for node in import_nodes:
         if isinstance(node, ir.NameImport):
-            canonical_names[node.asname] = f"{node.mod}.{node.name}"
+            qual_names[node.asname] = f"{node.mod}.{node.name}"
         elif isinstance(node, ir.ModImport):
-            canonical_names[node.asname] = node.mod
+            qual_names[node.asname] = node.mod
         else:
             raise ValueError
 
@@ -156,11 +157,10 @@ class symbol_gen:
         return name
 
 
-def canonicalize_type_map(by_type, canonical_types):
+def unify_types(by_type, canonical_types):
     """
     Map type parameterized name sets to use canonical types.
-    This is intended to resolve type conflicts where two types
-    map to the same low level canonical type.
+    This may merge type aliases that otherwise appear incompatible.
 
     """
     repl = defaultdict(set)
@@ -173,13 +173,12 @@ def canonicalize_type_map(by_type, canonical_types):
     return repl
 
 
-def bind_type_by_name(types):
+def bind_types_to_names(types):
     """
-    in:
-        types: dict[type: set(all variable names of this type...)]
+    Convert from a dictionary mapping types to sets of variable names
+    to a dictionary mapping each distinct variable name to a single type.
 
-    out:
-        by_name: dict[name: type]
+    This should run after type unification to avoid false conflicts.
 
     """
     by_name = {}

@@ -5,6 +5,9 @@ import ir
 
 # Walkers are named by what they can walk.
 
+def is_control_flow_entry(node):
+    return isinstance(node, (ir.IfElse, ir.ForLoop, ir.WhileLoop))
+
 
 def walk_assigns(stmts, reverse=False):
     if reverse:
@@ -43,7 +46,9 @@ def walk_expr_params(node):
 def walk_expr(node):
     """
     This walks an expression in post order, yielding everything including the original.
-    This helps limit the number of explicit type checks required elsewhere.
+    This avoids having to check whether something is an expression as opposed to a name or constant.
+    Declaring a name as an implicit expression produces inconsistent behavior, as we can explicitly
+    bind to names.
     """
 
     if not isinstance(node, ir.Expression):
@@ -72,11 +77,19 @@ def walk(node):
     """
     extending walk interface to include lists
     """
+
     if isinstance(node, list):
         for stmt in node:
             yield stmt
+            if is_control_flow_entry(stmt):
+                yield from walk(stmt)
+    elif isinstance(node, (ir.ForLoop, ir.WhileLoop)):
+        yield from walk(node.body)
+    elif isinstance(node, ir.IfElse):
+        yield from walk(node.if_branch)
+        yield from walk(node.else_branch)
     else:
-        yield from node.walk()
+        raise TypeError(f"Cannot walk type of {type(node)}.")
 
 
 def walk_branches(node):
@@ -93,56 +106,6 @@ def walk_branches(node):
             if isinstance(stmt, ir.IfElse):
                 yield from walk_branches(stmt.if_branch)
                 yield from walk_branches(stmt.else_branch)
-
-
-def walk_all(node):
-    """
-    Walk everything, expanding branches and loop constructs
-    Ignore nested scopes
-
-    """
-
-    # don't yield entry node
-    if isinstance(node, ir.ForLoop):
-        for assign in node.assigns:
-            yield assign
-    if isinstance(node, ir.Walkable):
-        for stmt in node.walk():
-            yield stmt
-            if isinstance(stmt, ir.Walkable):
-                yield from walk_all(stmt)
-
-
-def walk_expressions(exprs):
-    """
-    This walks an iterable of expression nodes, each in post order, ignoring duplicates.
-    It's assumed that iter(exprs) yields a safe ordering.
-
-    """
-
-    queued = []
-    seen = set()
-    for expr in exprs:
-        if expr in seen:
-            continue
-        seen.add(expr)
-        if isinstance(expr, ir.Expression):
-            queued.append((expr, expr.subexprs))
-        else:
-            yield expr
-        while queued:
-            try:
-                e = next(queued[-1][1])
-                if e in seen:
-                    continue
-                seen.add(e)
-                if isinstance(e, ir.Expression):
-                    queued.append(e)
-                else:
-                    yield e
-            except StopIteration:
-                e, _ = queued.pop()
-                yield e
 
 
 class VisitorBase:
@@ -174,7 +137,7 @@ class VisitorBase:
     def _(self, node: ir.Function):
         for arg in node.args:
             self.visit(arg)
-        for stmt in node.walk():
+        for stmt in walk(node.body):
             self.visit(stmt)
 
     @visit.register
@@ -185,10 +148,8 @@ class VisitorBase:
 
     @visit.register
     def _(self, node: ir.ForLoop):
-        for _, iterable in node.assigns:
-            self.visit(iterable)
-        for target, _ in node.assigns:
-            self.visit(target)
+        self.visit(node.iterable)
+        self.visit(node.target)
         self.visit(node.body)
 
     @visit.register
@@ -258,12 +219,11 @@ class TransformBase:
 
     @visit.register
     def _(self, node: ir.ForLoop):
-        assigns = []
-        for target, value in node.assigns:
-            assigns.append((self.visit(target), self.visit(value)))
+        iterable = self.visit(node.iterable)
+        target = self.visit(node.target)
         repl_body = self.visit(node.body)
         pos = node.pos
-        return ir.ForLoop(assigns, repl_body, pos)
+        return ir.ForLoop(target, iterable, repl_body, pos)
 
     @visit.register
     def _(self, node: ir.WhileLoop):

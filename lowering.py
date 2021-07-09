@@ -8,7 +8,7 @@ from functools import singledispatch, singledispatchmethod
 
 import ir
 
-from visitor import VisitorBase, walk_all, walk_branches
+from visitor import VisitorBase, walk, walk_branches
 
 
 def is_innermost(header):
@@ -224,7 +224,7 @@ def contains_varying_break(entry, uniform):
 def loop_body_may_exit_func(entry):
     if isinstance(entry, (ir.ForLoop, ir.WhileLoop)):
         entry = entry.body
-    for stmt in walk_all(entry):
+    for stmt in walk(entry):
         if isinstance(stmt, ir.Return):
             return True
     return False

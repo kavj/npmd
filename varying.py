@@ -2,7 +2,7 @@ from collections import defaultdict
 from functools import singledispatchmethod
 
 import ir
-from visitor import VisitorBase, walk_all
+from visitor import VisitorBase, walk
 
 """
 Very conservative varying checks. These determine uniformity at a variable name level, ignoring local dataflow
@@ -113,21 +113,20 @@ class MapTargets(VisitorBase):
 
     @visit.register
     def _(self, node: ir.ForLoop):
-        for target, value in node.walk_assignments():
-            self.targets[target].add(AssignmentRef(target, value, iterated=True))
+        raise NotImplementedError("UNDER RECONSTRUCTION")
 
 
 def collect_assigned(entry):
     exprs = defaultdict(set)
-    for stmt in walk_all(entry):
+    for stmt in walk(entry):
         if isinstance(stmt, ir.Assign):
             # only record expressions recorded as top level expressions
             if isinstance(stmt.target, ir.NameRef):
                 if not stmt.value.constant:
                     exprs[stmt.value].add(stmt.target)
         elif isinstance(stmt, ir.ForLoop):
-            for target, iterable in stmt.walk_assignments():
-                exprs[iterable].add(target)
+            raise NotImplementedError("UNDER RECONSTRCTION")
+
     return exprs
 
 
