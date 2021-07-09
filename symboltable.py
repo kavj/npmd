@@ -2,12 +2,95 @@ import builtins
 import itertools
 import keyword
 
+import numpy as np
+
 from collections import defaultdict
 from symtable import symtable
 
 import ir
 
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
+
+
+class ArrayCreationInitializer:
+    def __init__(self, dims, dtype, fill_value):
+        self.dims = dims
+        self.dtype = dtype
+        self.fill_value = fill_value
+
+
+class TypeBuilder:
+
+    def __init__(self, default_int64=True):
+        int32_type = ir.ScalarType(signed=True, boolean=False, integral=True, bitwidth=32)
+        int64_type = ir.ScalarType(signed=True, boolean=False, integral=True, bitwidth=64)
+        float32_type = ir.ScalarType(signed=True, boolean=False, integral=False, bitwidth=32)
+        float64_type = ir.ScalarType(signed=True, boolean=False, integral=False, bitwidth=64)
+        bool_type = ir.ScalarType(signed=True, boolean=True, integral=True, bitwidth=1)
+        types = {np.int32: int32_type, np.int64: int64_type, float32_type: np.float32, float64_type: np.float64,
+                 bool: bool_type}
+        if default_int64:
+            types[int] = int64_type
+        else:
+            types[int] = int32_type
+        # Python floats are always double precision
+        types[float] = float64_type
+        self.types = types
+        self.builders = {}
+
+    @property
+    def default_float(self):
+        return self.types[float]
+
+    @property
+    def default_int(self):
+        return self.types[int]
+
+    def build_func(self, func: ir.Call):
+        builder = self.builders.get(func.funcname)
+        if builder is None:
+            raise ValueError
+        return builder(func.args, func.keywords)
+
+
+def map_to_qualified_names(import_nodes):
+    canonical_names = {}
+    for node in import_nodes:
+        if isinstance(node, ir.NameImport):
+            canonical_names[node.asname] = f"{node.mod}.{node.name}"
+        elif isinstance(node, ir.ModImport):
+            canonical_names[node.asname] = node.mod
+        else:
+            raise ValueError
+
+# array creation nodes
+
+
+def make_numpy_call(node: ir.Call):
+    name = node.funcname
+    if name == "numpy.ones":
+        fill_value = ir.IntNode(1)
+    elif name == "numpy.zeros":
+        fill_value = ir.IntNode(0)
+    else:
+        if name != "numpy.empty":
+            raise NotImplementedError
+        fill_value = None
+    args = node.args
+    kwargs = node.keywords
+    if not (1 <= len(args) + len(kwargs) <= 2):
+        raise ValueError
+    params = {}
+    for name, value in zip(("shape", "dtype"), args):
+        params[name] = value
+    for key, value in kwargs:
+        if key in params:
+            raise KeyError
+        params[key] = value
+    shape = params["shape"]
+    dtype = params.get("dtype", np.float64)
+    array_init = ArrayCreationInitializer(shape, dtype, fill_value)
+    return array_init
 
 
 def extract_name(name):

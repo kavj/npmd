@@ -5,7 +5,6 @@ from collections import defaultdict
 from functools import singledispatchmethod
 
 import ir
-from type_parsing import parse_array_create
 from visitor import VisitorBase
 
 # Todo: At the tree layer, this should be much with fine grained tests moving to dataflow layer.
@@ -240,34 +239,17 @@ dispatch = {
 }
 
 
-class TypeCanonicalizer:
-
-    def __init__(self):
-        self.types = {}
-
-    def get_canonical_type(self, initial_type):
-        """
-        Placeholder
-        This is meant to aggregate compatible types into single types in the case of aliasing and for cases
-        where we merely approximate the original type.
-
-        """
-        t = self.types.get(initial_type)
-        return t if t is not None else initial_type
-
-
 class TypeChecker(VisitorBase):
     """
     This only enforces types on explicit assignment. Compound expressions take on monomorphic types
     based on expression evaluation. Casts are only applied on explicit assignment.
     """
 
-    def __call__(self, entry, vartypes: typing.Dict):
-        self.vartypes = vartypes
+    def __call__(self, entry, types_by_vname: typing.Dict):
+        self.type_by_vname = types_by_vname
         self.invalid_truth_tests = set()
         self.array_mismatches = defaultdict(set)
         self.expr_types = {}
-        self.missing = set()
         self.visit(entry)
         missing = self.missing
         expr_types = self.expr_types
@@ -278,7 +260,7 @@ class TypeChecker(VisitorBase):
 
     def lookup_type(self, var_or_expr):
         if isinstance(var_or_expr, ir.NameRef):
-            t = self.vartypes.get(var_or_expr)
+            t = self.type_by_vname.get(var_or_expr)
             if t is None:
                 self.missing.add(var_or_expr)
         else:
@@ -291,12 +273,13 @@ class TypeChecker(VisitorBase):
 
     @visit.register
     def _(self, node: ir.NameRef):
-        if node not in self.vartypes:
+        if node not in self.type_by_vname:
             self.missing.add(node)
 
     @visit.register
     def _(self, node: ir.Call):
-        return parse_array_create(node)
+        # Todo: replace parse_array_create
+        return
 
     @visit.register
     def _(self, node: ir.Assign):
@@ -337,25 +320,27 @@ class TypeChecker(VisitorBase):
 
     @visit.register
     def _(self, node: ir.ForLoop):
-        for target, iterable in node.walk_assignments():
-            self.visit(target)
-            self.visit(iterable)
-            t = self.lookup_type(iterable)
-            if t is None:
-                self.missing.add(t)
+        target = node.target
+        iterable = node.iterable
+        # for target, iterable in node.walk_assignments():
+        self.visit(target)
+        self.visit(iterable)
+        t = self.lookup_type(iterable)
+        if t is None:
+            self.missing.add(t)
+            return
+        if isinstance(t, ir.ArrayRef):
+            target_type = self.lookup_type(target)
+            if target_type is None:
+                self.array_mismatches[iterable].add(target)
                 return
-            if isinstance(t, ir.ArrayRef):
-                target_type = self.lookup_type(target)
-                if target_type is None:
+            if t.ndims > 1:
+                if not isinstance(target_type, ir.ArrayRef):
                     self.array_mismatches[iterable].add(target)
-                    return
-                if t.ndims > 1:
-                    if not isinstance(target_type, ir.ArrayRef):
-                        self.array_mismatches[iterable].add(target)
-                    elif target_type.ndims != t.ndims - 1:
-                        self.array_mismatches[iterable].add(target)
-                else:
+                elif target_type.ndims != t.ndims - 1:
                     self.array_mismatches[iterable].add(target)
+            else:
+                self.array_mismatches[iterable].add(target)
 
     @visit.register
     def _(self, node: ir.WhileLoop):

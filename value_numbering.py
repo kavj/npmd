@@ -1,18 +1,18 @@
 import itertools
 
 from collections import defaultdict
-from functools import singledispatchmethod
+from functools import singledispatch, singledispatchmethod
 
 import ir
 
-from visitor import walk_branches, walk_expr_params, walk_expr, walk_assigns, VisitorBase
+from visitor import walk_branches, walk_expr_params, walk_assigns
 
 # These yield everything including the original expression
 # This way we can remove a lot of type checks from common paths.
 
 
-def is_control_flow_entry_exit(node):
-    return isinstance(node, (ir.IfElse, ir.ForLoop, ir.WhileLoop))
+def is_control_flow(node):
+    return isinstance(node, (ir.IfElse, ir.ForLoop, ir.WhileLoop, ir.Break, ir.Continue))
 
 
 class scoped:
@@ -54,81 +54,65 @@ class scoped:
             self.register_read(target)
 
 
-class UpwardExposed(VisitorBase):
-    # Todo: This needs to be rethought somewhat, since it's only used for local analyses.
-    """
-    Simple tracking of upward exposed variables. This is less than what would be needed for full liveness
-    analysis. It's intended to help with value numbering over acyclic control flow regions.
+@singledispatch
+def find_upward_exposed(node):
+    raise NotImplementedError
 
-    """
 
-    def __init__(self):
-        self.observer = None
+@find_upward_exposed.register
+def _(node: ir.ForLoop):
+    return find_upward_exposed(node.body)
 
-    def find_upward_exposed(self, entry):
-        self.observer = scoped()
-        self.visit(entry)
-        uevs = self.observer.uevs
-        constants = self.observer.constants
-        self.observer = None
-        return uevs, constants
 
-    @singledispatchmethod
-    def visit(self, node):
-        super().visit(node)
+@find_upward_exposed.register
+def _(node: ir.WhileLoop):
+    uevs = find_upward_exposed(node.body)
+    for param in walk_expr_params(node.test):
+        uevs.add(param)
+    return uevs
 
-    @visit.register
-    def _(self, node: ir.Constant):
-        self.observer.register_read(node)
 
-    @visit.register
-    def _(self, node: ir.IfElse):
-        self.visit(node.if_branch)
-        self.visit(node.else_branch)
+@find_upward_exposed.register
+def _(node: ir.IfElse):
+    uevs = find_upward_exposed(node.if_branch)
+    else_branch = find_upward_exposed(node.else_branch)
+    uevs.update(else_branch)
+    uevs.update(walk_expr_params(node.test))
 
-    @visit.register
-    def _(self, node: ir.ForLoop):
-        # We follow regular Python semantics as much as possible here, which means
-        # that variables are only guaranteed to be bound on a particular iteration if
-        # no iteration interface raises StopIteration. As such, when this analysis runs,
-        # it registers any variable bindings to the loop body and later replaces the header
-        # stuff with a single unique induction variable name. This kills perfect loop nesting,
-        # but we don't depend on loop interchange, so it's basically fine.
-        key = id(node.body)
-        self.observer.enter_scope(key)
-        for target, iterable in node.walk_assignments():
-            self.observer.register_read(iterable)
-            self.observer.register_write(target)
-        self.visit(node.body)
-        self.observer.leave_scope()
 
-    @visit.register
-    def _(self, node: ir.WhileLoop):
-        # scope used for this header and nothing else
-        # since it contains a test
-        self.observer.enter_scope(id(node))
-        self.observer.register_read(node.test)
-        self.visit(node.body)
-        self.observer.leave_scope()
-
-    @visit.register
-    def _(self, node: ir.Assign):
-        self.observer.register_read(node.value)
-        self.observer.register_write(node.target)
-
-    @visit.register
-    def _(self, node: list):
-        key = id(node[0])
-        self.observer.enter_scope(key)
-        for stmt in node:
-            if key is None:
-                # Some statement injected a new scope
-                # We do it like this rather than as a
-                # hierarchy to avoid certain issues.
-                key = id(stmt)
-                self.observer.enter_scope(key)
-            self.visit(stmt)
-        self.observer.leave_scope()
+@find_upward_exposed.register
+def _(node: list):
+    uevs = set()
+    gen = set()
+    constants = set()
+    for stmt in node:
+        if is_control_flow(stmt):
+            break
+        if isinstance(stmt, ir.Assign):
+            target = stmt.target
+            value = stmt.value
+            for param in walk_expr_params(value):
+                if param.constant:
+                    constants.add(param)
+                elif param not in gen:
+                    uevs.add(param)
+            if isinstance(stmt.target, ir.NameRef):
+                gen.add(target)
+            else:
+                for param in walk_expr_params(target):
+                    if param.constant:
+                        constants.add(param)
+                    elif param not in gen:
+                        uevs.add(param)
+        else:
+            # assume SingleExpr
+            expr = stmt.expr
+            for param in walk_expr_params(expr):
+                if param.constant:
+                    constants.add(param)
+                elif param not in gen:
+                    uevs.add(param)
+    return uevs, gen, constants
 
 
 def enumerate_values(values, counter):
@@ -247,7 +231,7 @@ def number_local_values(node: list, inputs, numbered, labeler):
 
     """
     for stmt in node:
-        if is_control_flow_entry_exit(stmt):
+        if is_control_flow(stmt):
             raise TypeError
     local_numbering = ValueTracking(inputs, numbered, labeler)
     for target, value in walk_assigns(node):
@@ -292,7 +276,7 @@ def get_shared_target_names(node: ir.IfElse):
     Find targets that may require ternary ops and/or renaming.
 
     """
-    if any(is_control_flow_entry_exit(stmt) for stmt in itertools.chain(node.if_branch, node.else_branch)):
+    if any(is_control_flow(stmt) for stmt in itertools.chain(node.if_branch, node.else_branch)):
         raise ValueError
     if_targets = set()
     else_targets = set()
@@ -321,9 +305,9 @@ def predicate_branch(branch, local_if, local_else, combine_writes=False):
 
 def if_conversion(node: ir.IfElse, local_name_gen):
 
-    if any(is_control_flow_entry_exit(stmt) for stmt in itertools.chain(node.if_branch, node.else_branch)):
+    if any(is_control_flow(stmt) for stmt in itertools.chain(node.if_branch, node.else_branch)):
         raise ValueError
-    uevs, constants = UpwardExposed().find_upward_exposed(node)
+    uevs, constants = find_upward_exposed(node)
     labeler = itertools.count()
     numbered_uevs = {}
     for v, i in zip(itertools.chain(uevs, constants), labeler):
