@@ -8,7 +8,6 @@ from functools import singledispatch, singledispatchmethod
 
 import ir
 
-from value_numbering import branch_value_numbering
 from visitor import VisitorBase, walk_all, walk_branches
 
 
@@ -554,7 +553,8 @@ def make_loop_interval(counters, syms, index_name):
 
 @singledispatch
 def make_counter(base, syms):
-    raise NotImplementedError
+    msg = f"Make counter not supported for input type {type(base)}"
+    raise NotImplementedError(msg)
 
 
 @make_counter.register

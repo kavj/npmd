@@ -416,9 +416,6 @@ class TreeBuilder(ast.NodeVisitor):
         pos = extract_positional_info(node)
         # we need to make an appropriate loop index here for cases that require
         # subscripting.
-        loop_index = self.syms.make_unique_name()
-        loop_counter = None
-
         # track conflicts between target an iterable names, so we can fail
         # early if necessary
         target_set = set()
@@ -443,13 +440,17 @@ class TreeBuilder(ast.NodeVisitor):
             # start and step calculations to the loop body assignments.
 
             # add constraints
-
+            loop_index = self.syms.make_unique_name("i")
+            loop_counter = make_loop_interval(iter_set, self.syms, loop_index)
             for stmt in node.body:
                 self.visit(stmt)
-            # need loop index creation
+            # This can still be an ill-formed loop, eg one ending in a single break
+            # or continue statement. These cases should be caught later on, as construction
+            # here is already complicated enough.
             loop = ir.ForLoop(loop_index, loop_counter, self.body, pos)
-        #  First append a definition for the loop bound variable
-        # ........
+        loop_bound = ir.Assign(loop_index, loop_counter, node.pos)
+        # append loop bound calculations outside loop
+        self.body.append(loop_bound)
         self.body.append(loop)
 
     def visit_While(self, node: ast.While):
@@ -500,7 +501,7 @@ class TreeBuilder(ast.NodeVisitor):
         raise NotImplementedError(f"{type(node)} is unsupported")
 
 
-def build_module_ir(src):
+def build_module_ir(src, filename):
     """
     Module level point of entry for IR construction.
 
@@ -515,7 +516,7 @@ def build_module_ir(src):
     # are not reasonable to type via annotations
     # It's not optimal, but this isn't necessarily
     # meant to be user facing.
-    symbols = create_symbol_tables(src)
+    symbols = create_symbol_tables(src, filename)
     tree = ast.parse(src)
     tree = ast.fix_missing_locations(tree)
 
@@ -541,6 +542,5 @@ def build_module_ir(src):
                 imports.append(ir.NameImport(mod, name.name, name.asname, pos))
         else:
             raise ValueError("Unsupported")
-
 
     return ir.Module(funcs, imports)

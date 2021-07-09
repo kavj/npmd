@@ -26,13 +26,22 @@ class symbol_gen:
     def __init__(self, existing):
         self.names = existing
         self.added = set()
-        self.gen = itertools.count()
+        self.prefixes = {}
         self.arrays = {}
 
     def __contains__(self, item):
         if isinstance(item, ir.NameRef):
             item = item.name
         return item in self.names
+
+    def _get_num_generator(self, prefix):
+        # splitting by prefix helps avoids appending
+        # large numbers in most cases
+        gen = self.prefixes.get(prefix)
+        if gen is None:
+            gen = itertools.count()
+            self.prefixes[prefix] = gen
+        return gen
 
     def is_array(self, name):
         return name in self.arrays
@@ -54,10 +63,12 @@ class symbol_gen:
         self.arrays[name] = arr
 
     def make_unique_name(self, prefix):
-        name = f"{prefix}_{next(self.gen)}"
+        gen = self._get_num_generator(prefix)
+        name = f"{prefix}_{next(gen)}"
         while name in self.names:
-            name = f"{prefix}_{next(self.gen)}"
+            name = f"{prefix}_{next(gen)}"
         self.names.add(name)
+        self.added.add(name)
         return name
 
 

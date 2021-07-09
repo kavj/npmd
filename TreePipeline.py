@@ -1,3 +1,5 @@
+import os.path
+
 from ASTTransform import build_module_ir
 from Canonicalize import RemoveContinues, MergePaths
 from folding import fold_constant_expressions
@@ -11,7 +13,8 @@ def run_tree_pipeline(pth):
     remove_continues = RemoveContinues()
     reaching_check = ReachingCheck()
     merge_paths = MergePaths()
-    mod = build_module_ir(r)
+    filename = os.path.basename(pth)
+    mod = build_module_ir(r, filename)
     repl = []
     for func in mod.funcs:
         func = merge_paths(func)
