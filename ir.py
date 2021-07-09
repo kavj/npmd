@@ -189,6 +189,16 @@ ValueRef = typing.TypeVar('ValueRef', Expression, Constant, NameRef, AttributeRe
 
 
 @dataclass(frozen=True)
+class Length(Expression):
+    value: ValueRef
+    constant: clscond = False
+
+    @property
+    def subexprs(self):
+        yield self.value
+
+
+@dataclass(frozen=True)
 class Subscript(Expression):
     value: ValueRef
     slice: ValueRef

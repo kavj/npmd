@@ -500,8 +500,7 @@ def make_loop_interval(counters, syms, index_name):
     syms:
         Symbol table for lookups of array parameters
 
-    returns:
-        a loop index counter if a simple shared bound can be found without relying on explicit
+    returns:        a loop index counter if a simple shared bound can be found without relying on explicit
         counter normalization of counters with symbolic parameters, otherwise None
 
     """
@@ -551,3 +550,52 @@ def make_loop_interval(counters, syms, index_name):
             counter = ir.Counter(ir.IntNode(0), ir.Min(tuple(it for it in iter_counts)), ir.IntNode(1))
 
     return counter
+
+
+@singledispatch
+def make_counter(base, syms):
+    raise NotImplementedError
+
+
+@make_counter.register
+def _(base: ir.Counter, syms):
+    return arr
+
+
+@make_counter.register
+def _(base: ir.NameRef, syms):
+    arr = syms.arrays[base]
+    leading = arr.dims[0]
+    leading = wrap_constant(leading)
+    # this is delinearized, so not a direct access func
+    counter = ir.Counter(ir.IntNode(0), leading, ir.IntNode(1))
+
+
+@make_counter.register
+def _(base: ir.Subscript, syms):
+    arr = syms.arrays[base.value]
+    # avoid linearizing
+    sl = base.slice
+    if isinstance(sl, ir.Slice):
+        start = wrap_constant(sl.start)
+        stop = arr.dims[0]
+        if sl.stop is not None:
+            stop = ir.Min(stop, sl.stop)
+        step = sl.step
+        counter = ir.Counter(start, stop, step)
+    else:
+        # assume single subscript
+        if len(arr.dims) < 2:
+            raise ValueError
+        start = ir.IntNode(0)
+        stop = arr.dims[1]
+        stop = wrap_constant(stop)
+        step = ir.IntNode(1)
+        counter = ir.Counter(start, stop, step)
+    return counter
+
+
+def make_loop_interval(iters, syms, loop_index):
+    counters = [make_counter(it, syms) for it in iters]
+    interval = make_loop_interval(counters, syms, loop_index)
+    return interval

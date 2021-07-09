@@ -8,6 +8,7 @@ from contextlib import ContextDecorator
 import ir
 from symboltable import create_symbol_tables
 from Canonicalize import replace_builtin_call
+from lowering import make_loop_interval
 from visitor import VisitorBase
 
 binaryops = {ast.Add: "+",
@@ -436,23 +437,19 @@ class TreeBuilder(ast.NodeVisitor):
             if target_set.intersection(iter_set):
                 raise ValueError
             # Make single loop index and construct subscripts with respect to it.
-            # Doing this properly should rely on the infrastructure from lowering.
-            # This means we need to know array parameters here. Since we have strict rules
-            # that their definition must reach along all paths, we either have a definition at this point
-            # for each array used or we have an error, noting that an inconsistent definition encountered
-            # later is also an error.
+            # If iterables have different steps, this normalizes based on unit step,
+            # even though that isn't ideal (see Wolfe, beyond induction variables)
+            # In the case of a normalized bound with slices here, we have to move
+            # start and step calculations to the loop body assignments.
 
+            # add constraints
 
-
-            # It's possible that we already have a viable non-escaping loop index via some enumerate
-            # statement, but it's not always easily provable at this stage, and retaining the full
-            # for loop structure creates too many splits in the IR. It worked previously when some of the
-            # other supporting work was under-engineered.
             for stmt in node.body:
                 self.visit(stmt)
             # need loop index creation
             loop = ir.ForLoop(loop_index, loop_counter, self.body, pos)
-        # append counter limit def first
+        #  First append a definition for the loop bound variable
+        # ........
         self.body.append(loop)
 
     def visit_While(self, node: ast.While):

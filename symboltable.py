@@ -27,11 +27,31 @@ class symbol_gen:
         self.names = existing
         self.added = set()
         self.gen = itertools.count()
+        self.arrays = {}
 
     def __contains__(self, item):
         if isinstance(item, ir.NameRef):
             item = item.name
         return item in self.names
+
+    def is_array(self, name):
+        return name in self.arrays
+
+    def add_array_view(self, name, base, subscript):
+        if name in self.arrays:
+            # Aliasing and multiple parameter combinations become too tedious
+            # if we have multiple possible assignments to a given array.
+            raise KeyError
+        view = ir.ViewRef(base, subscript)
+        self.arrays[name] = view
+
+    def add_array(self, name, dims, elem_type):
+        if name in self.arrays:
+            # Aliasing and multiple parameter combinations become too tedious
+            # if we have multiple possible assignments to a given array.
+            raise KeyError
+        arr = ir.ArrayRef(dims, elem_type)
+        self.arrays[name] = arr
 
     def make_unique_name(self, prefix):
         name = f"{prefix}_{next(self.gen)}"
@@ -61,5 +81,6 @@ def create_symbol_tables(src, filename):
             else:
                 var_names.add(name)
         funcname = func.get_name()
-        tables[funcname] = var_names
+        table = symbol_gen(var_names)
+        tables[funcname] = table
     return tables

@@ -7,7 +7,7 @@ from functools import singledispatchmethod
 import numpy as np
 
 import ir
-from visitor import walk_all, walk_assigns, TransformBase
+from visitor import walk_all, TransformBase
 
 unaryops = {"+": operator.pos,
             "-": operator.neg,
