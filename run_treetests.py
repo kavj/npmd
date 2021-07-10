@@ -15,8 +15,8 @@ tests = ("unpack_with_subscripts.py",)
 
 
 uws_types = {"unpack_test": {UniformArrayInput(float, ("n",)): {"a", "b", "c", "d"},
-                             int: {"k"},
-                             float: {"u", "v", "i"}}
+                             int: {"k", "i"},
+                             float: {"u", "v"}}
              }
 
 Type_Info = {}

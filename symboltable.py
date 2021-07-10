@@ -237,6 +237,10 @@ def standardize_type_map(types, builder):
 
 def assign_type_info(func, types, type_builder):
     types = standardize_type_map(types, type_builder)
+    arrays = {}
+    for name, type_ in types.items():
+        if isinstance(type_, ArrayBase):
+            arrays[name] = type_
     func_name = func.get_name()
     # Check validity of type info
     for sym in func.get_symbols():

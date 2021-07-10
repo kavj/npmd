@@ -268,17 +268,6 @@ class Slice(Expression):
 
 
 @dataclass(frozen=True)
-class Unsupported(Expression):
-    name: str
-    msg: str
-
-    # dummy class, just treats expression as a protocol
-    @property
-    def subexprs(self):
-        raise StopIteration
-
-
-@dataclass(frozen=True)
 class Tuple(Expression):
     """
     High level sentinel matching a tuple.
@@ -400,9 +389,6 @@ class Counter(Expression):
     stop: typing.Optional[ValueRef]
     step: ValueRef
 
-    is_iterator_like: clscond = True
-    is_counter: clscond = True
-
     @property
     def reversed(self):
         raise NotImplementedError
@@ -441,7 +427,6 @@ class Reversed(Expression):
     """
 
     iterable: ValueRef
-    is_iterator_like: clscond = True
 
     @property
     def subexprs(self):

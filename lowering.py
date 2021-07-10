@@ -556,12 +556,15 @@ def make_counter(base, syms):
 
 @make_counter.register
 def _(base: ir.Counter, syms):
-    return arr
+    return base
 
 
 @make_counter.register
 def _(base: ir.NameRef, syms):
-    arr = syms.arrays[base]
+    arr = syms.arrays.get(base)
+    if arr is None:
+        msg = f"Variable {base} is iterated over without being declared an array type."
+        raise KeyError(msg)
     leading = arr.dims[0]
     leading = wrap_constant(leading)
     # this is delinearized, so not a direct access func
@@ -592,12 +595,11 @@ def _(base: ir.Subscript, syms):
     return counter
 
 
-def make_loop_interval(targets, iters, syms, loop_index):
-    assert(len(targets) == len(iters))
+def make_loop_interval(assigns, syms, loop_index):
     counters = []
-    for it in iters:
-        c = make_counter(it, syms)
+    for target, iterable in assigns:
+        c = make_counter(iterable, syms)
         counters.append(c)
-    interval = make_loop_interval(counters, syms, loop_index)
+    # interval = make_loop_interval(counters, syms, loop_index)
     # Now, map each iterable based on
-    return interval
+    return counters

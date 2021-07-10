@@ -172,6 +172,8 @@ class FlowContext(ContextDecorator):
         self.builder.body, self.body = self.body, self.builder.body
         if self.enters_loop:
             self.builder.enclosing_loop, self.header = self.header, self.builder.enclosing_loop
+        if exc_type:
+            raise
 
 
 class AnnotationCollector(VisitorBase):
@@ -423,7 +425,7 @@ class TreeBuilder(ast.NodeVisitor):
         # Construct the actual loop header, using a single induction variable.
         with self.flow_region(node):
             assigns = []
-            for target, iterable in serialize_iterated_assignments(it, target):
+            for target, iterable in serialize_iterated_assignments(target, it):
                 if isinstance(target, ir.Tuple) or isinstance(iterable, ir.Zip):
                     raise ValueError(f"Unable to fully unpack loop, line: {node.lineno}")
                 target_set.add(target)
@@ -441,7 +443,7 @@ class TreeBuilder(ast.NodeVisitor):
 
             # add constraints
             loop_index = self.syms.make_unique_name("i", self.syms.default_int)
-            loop_counter = make_loop_interval(target_set, iter_set, self.syms, loop_index)
+            loop_counter = make_loop_interval(assigns, self.syms, loop_index)
             for stmt in node.body:
                 self.visit(stmt)
             # This can still be an ill-formed loop, eg one ending in a single break

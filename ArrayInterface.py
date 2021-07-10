@@ -38,3 +38,12 @@ class ByDimArrayInput(ArrayBase):
     def __init__(self, dtype, dims):
         self.dtype = dtype
         self.dims = dims
+
+
+class FuncDecl:
+    def __init__(self, args, return_type):
+        self.args = args
+        self.return_type = return_type
+
+    def __hash__(self):
+        return hash(self.args)
