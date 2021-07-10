@@ -1,6 +1,4 @@
 import builtins
-import inspect
-import importlib
 import itertools
 import keyword
 
@@ -39,6 +37,9 @@ class TypeBuilder:
         types[float] = float64_type
         self.types = types
 
+    def __getitem__(self, item):
+        return self.types[item]
+
     @property
     def default_float(self):
         return self.types[float]
@@ -46,6 +47,20 @@ class TypeBuilder:
     @property
     def default_int(self):
         return self.types[int]
+
+
+class FunctionContext:
+
+    def __init__(self, func, types):
+        self.func = func
+        self.types = types
+
+
+class CompilerContext:
+
+    def __init__(self, funcs, type_maps):
+        self.funcs = funcs
+        self.type_maps = type_maps
 
 
 def map_alias_to_qualified_names(import_nodes):
@@ -65,6 +80,7 @@ def map_alias_to_qualified_names(import_nodes):
             qual_names[node.asname] = node.mod
         else:
             raise ValueError
+
 
 # array creation nodes
 
@@ -109,17 +125,27 @@ class name_generator:
         return f"{self.prefix}_{next(self.gen)}"
 
 
+class symbol:
+    def __init__(self, name, var_type):
+        self.name = name
+        self.var_type = var_type
+
+    def __hash__(self):
+        return hash(self.name)
+
+
 class symbol_gen:
-    def __init__(self, existing):
+    def __init__(self, existing, type_builder):
         self.names = existing
         self.added = set()
-        self.prefixes = {}
-        self.arrays = {}
+        self.type_builder = type_builder
+        self.prefixes = {}  # prefix for adding enumerated variable names
+        self.arrays = {}  # array types
 
     def __contains__(self, item):
         if isinstance(item, ir.NameRef):
             item = item.name
-        return item in self.names
+        return item in self.names or item in self.added
 
     def _get_num_generator(self, prefix):
         # splitting by prefix helps avoids appending
@@ -167,8 +193,9 @@ def unify_types(by_type, canonical_types):
     """
     repl = defaultdict(set)
     for t, names in by_type.items():
-        ct = canonical_types.get(t)
-        if ct is None:
+        try:
+            ct = canonical_types[t]
+        except KeyError:
             msg = f"Cannot map unsupported type {t}"
             raise TypeError(msg)
         repl[ct].update(names)
@@ -193,7 +220,32 @@ def bind_types_to_names(types):
             by_name[name] = type_
 
 
-def create_symbol_tables(src, filename, types_by_func):
+def standardize_type_map(types, builder):
+    types = unify_types(types, builder)
+    types = bind_types_to_names(types)
+    return types
+
+
+def assign_type_info(func, types, type_builder):
+    # standardize type map
+    types = standardize_type_map(types, type_builder)
+    func_name = func.get_name()
+    # Check validity of type info
+    for sym in func.get_symbols():
+        name = sym.get_name()
+        # checking only python reserved names thus far
+        if name in reserved_names:
+            if sym.is_assigned():
+                raise NotImplementedError(f"Reassigning names used by the language itself is unsupported. "
+                                          "{name} marked as assignment target")
+        elif name not in types:
+            raise TypeError(f"Missing type info for symbol {name} in function {func_name}")
+    table = symbol_gen(types, type_builder)
+    return table
+
+
+def extract_function_symbols(src, filename, types_by_func, use_default_int64=True):
+    type_builder = TypeBuilder(use_default_int64)
     tables = {}
     mod = symtable(src, filename, "exec")
     # extract names that correspond to functions
@@ -210,8 +262,7 @@ def create_symbol_tables(src, filename, types_by_func):
             raise ValueError(f"No type information provided for function {func_name}")
         var_names = set()
         args = set()
-        # we'll eventually need back end reserved names
-        # but probably not here
+
         for sym in func.get_symbols():
             name = sym.get_name()
             if name in reserved_names:
@@ -222,6 +273,10 @@ def create_symbol_tables(src, filename, types_by_func):
                 var_names.add(name)
                 if sym.is_parameter():
                     args.add(name)
-        table = symbol_gen(var_names)
-        tables[func_name] = table
+        # Standardize type map for this function
+        func_types = types_by_func.get(func_name)
+        if func_types is None:
+            raise ValueError(f"Missing type information for function {func_name} in file {filename}")
+        func_table = assign_type_info(func, func_types, type_builder)
+        tables[func_name] = func_table
     return tables

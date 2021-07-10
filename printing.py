@@ -3,15 +3,6 @@ from functools import singledispatchmethod
 import ir
 
 
-# Zip and Enumerate aren't really used explicitly elsewhere now
-# so these are just sentinel classes
-
-class Enumerate:
-    def __init__(self, iterables, start):
-        self.iterables = iterables
-        self.start = start
-
-
 class prettystringify:
     """
     The pretty printer is intended as a way to show the state of the IR in a way that resembles a
@@ -37,14 +28,6 @@ class prettystringify:
         return node.__class__.__name__.lower()
 
     @visit.register
-    def _(self, node: Enumerate):
-        if node.start != ir.IntNode(0):
-            s = f"enumerate({self.visit(node.iterables)}, {self.visit(node.start)})"
-        else:
-            s = f"enumerate({self.visit(node.iterables)})"
-        return s
-
-    @visit.register
     def _(self, node: ir.AttributeRef):
         return self.visit(node.value)
 
@@ -61,8 +44,8 @@ class prettystringify:
             return f"{arr}.shape[{self.visit(node.dim)}]"
 
     @visit.register
-    def _(self, node: ir.MinConstraint):
-        args = ", ".join(self.visit(arg) for arg in node.constraints)
+    def _(self, node: ir.Min):
+        args = ", ".join(self.visit(arg) for arg in node.subexprs)
         return f"min({args})"
 
     @visit.register
@@ -195,50 +178,8 @@ class prettystringify:
             return f"{node.op}{self.visit(node.operand)}"
 
     @visit.register
-    def _(self, node: ir.Zip):
-        counter = node.elements[0]
-        if not isinstance(counter, ir.Counter) or len(node.elements) != 2:
-            # general zip
-            s = ", ".join(self.visit(e) for e in node.elements)
-            s = f"zip({s})"
-        elif counter.step != ir.IntNode(1) or counter.stop is not None:
-            # zip(range(...), iterable) as opposed to enumerate(iterable)
-            s = f"zip({self.visit(counter)}, {self.visit(node.elements[1])})"
-        elif counter.start == ir.IntNode(0):
-            s = f"enumerate({self.visit(node.elements[1])})"
-        else:
-            s = f"enumerate({self.visit(node.elements[1])}, {self.visit(node.elements[0])})"
-        return s
-
-    @visit.register
     def _(self, node: ir.SingleExpr):
         return self.visit(node.expr)
-
-
-def rebuild_enumerate_nesting(assigns):
-    zipped_targets = []
-    zipped_values = []
-    for index, (target, value) in enumerate(assigns):
-        value = value
-        if isinstance(value, ir.Counter) and value.stop is None and value.step == ir.IntNode(1):
-            # hit enumerate, wrap remainder
-            t, v = rebuild_enumerate_nesting(assigns[index + 1:])
-            zipped_values.append(Enumerate(v, value.start))
-            zipped_targets.append(target)
-            zipped_targets.append(t)
-            break
-        else:
-            zipped_targets.append(target)
-            zipped_values.append(value)
-    if len(zipped_targets) == 1:
-        zipped_targets = zipped_targets[0]
-    else:
-        zipped_targets = ir.Tuple(tuple(zipped_targets))
-    if len(zipped_values) == 1:
-        zipped_values = zipped_values[0]
-    else:
-        zipped_values = ir.Zip(tuple(zipped_values))
-    return zipped_targets, zipped_values
 
 
 class printtree:

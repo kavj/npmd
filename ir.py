@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import itertools
 import numbers
 import operator
 import typing
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
 
@@ -36,7 +36,7 @@ class StmtBase:
 Statement = typing.TypeVar('Statement', bound=StmtBase)
 
 
-class Expression:
+class Expression(ABC):
     """
     This is the start of a base class for expressions.
     
@@ -395,19 +395,6 @@ class Call(Expression):
 
 
 @dataclass(frozen=True)
-class MinConstraint(Expression):
-    """
-    used primarily for lowering for loops with zip and enumerate
-    """
-    constraints: set
-
-    @property
-    def subexprs(self):
-        for c in self.constraints:
-            yield c
-
-
-@dataclass(frozen=True)
 class Counter(Expression):
     start: ValueRef
     stop: typing.Optional[ValueRef]
@@ -588,9 +575,13 @@ class Max(Expression):
 class Min(Expression):
     exprs: typing.Tuple[typing.Union[NameRef, Expression], ...]
 
+    @property
     def subexprs(self):
-        for subexpr in self.exprs:
-            yield subexpr
+        if isinstance(self.exprs, Iterable):
+            for subexpr in self.exprs:
+                yield subexpr
+        else:
+            yield self.exprs
 
 
 @dataclass(frozen=True)
