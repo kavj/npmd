@@ -1,6 +1,15 @@
+import typing
+from dataclasses import dataclass
+
+import ir
 
 
-class UniformArrayInput:
+class ArrayBase:
+    pass
+
+
+@dataclass(frozen=True)
+class UniformArrayInput(ArrayBase):
     """
     Array type descriptor.
 
@@ -9,20 +18,18 @@ class UniformArrayInput:
     stride: input stride
 
     """
-
-    def __init__(self, dtype, dims):
-        self.dtype = dtype
-        self.dims = dims
+    dtype: type
+    dims: typing.Tuple[typing.Union[str, int, ir.IntNode], ...]
 
 
-class SlidingWindowInput:
+class SlidingWindowInput(ArrayBase):
     def __init__(self, dtype, dims, stride):
         self.dtype = dtype
         self.dims = dims
         self.stride = stride
 
 
-class ByDimArrayInput:
+class ByDimArrayInput(ArrayBase):
     """
     Iterates acrosss consecutive calls over the leading array dim.
 
@@ -31,4 +38,3 @@ class ByDimArrayInput:
     def __init__(self, dtype, dims):
         self.dtype = dtype
         self.dims = dims
-

@@ -9,6 +9,8 @@ from symtable import symtable
 
 import ir
 
+from ArrayInterface import ArrayBase
+
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
 
 
@@ -38,6 +40,8 @@ class TypeBuilder:
         self.types = types
 
     def __getitem__(self, item):
+        if isinstance(item, ArrayBase):
+            return item
         return self.types[item]
 
     @property
@@ -147,6 +151,10 @@ class symbol_gen:
             item = item.name
         return item in self.names or item in self.added
 
+    @property
+    def default_int(self):
+        return self.type_builder.default_int
+
     def _get_num_generator(self, prefix):
         # splitting by prefix helps avoids appending
         # large numbers in most cases
@@ -175,12 +183,12 @@ class symbol_gen:
         arr = ir.ArrayRef(dims, elem_type)
         self.arrays[name] = arr
 
-    def make_unique_name(self, prefix):
+    def make_unique_name(self, prefix, type_):
         gen = self._get_num_generator(prefix)
         name = f"{prefix}_{next(gen)}"
         while name in self.names:
             name = f"{prefix}_{next(gen)}"
-        self.names.add(name)
+        self.names[name] = type_
         self.added.add(name)
         return name
 
@@ -218,6 +226,7 @@ def bind_types_to_names(types):
                 msg = f"Duplicate type entry {first} and {type_} for name {name}"
                 raise ValueError(msg)
             by_name[name] = type_
+    return by_name
 
 
 def standardize_type_map(types, builder):
@@ -227,7 +236,6 @@ def standardize_type_map(types, builder):
 
 
 def assign_type_info(func, types, type_builder):
-    # standardize type map
     types = standardize_type_map(types, type_builder)
     func_name = func.get_name()
     # Check validity of type info
@@ -244,7 +252,7 @@ def assign_type_info(func, types, type_builder):
     return table
 
 
-def extract_function_symbols(src, filename, types_by_func, use_default_int64=True):
+def create_symbol_tables(src, filename, types_by_func, use_default_int64=True):
     type_builder = TypeBuilder(use_default_int64)
     tables = {}
     mod = symtable(src, filename, "exec")
@@ -260,19 +268,12 @@ def extract_function_symbols(src, filename, types_by_func, use_default_int64=Tru
                             f"unsupported.")
         if func_name not in types_by_func:
             raise ValueError(f"No type information provided for function {func_name}")
-        var_names = set()
-        args = set()
-
         for sym in func.get_symbols():
             name = sym.get_name()
             if name in reserved_names:
                 if sym.is_assigned():
                     raise NotImplementedError(f"Reassigning names used by the language itself is unsupported. "
                                               "{name} marked as assignment target")
-            else:
-                var_names.add(name)
-                if sym.is_parameter():
-                    args.add(name)
         # Standardize type map for this function
         func_types = types_by_func.get(func_name)
         if func_types is None:

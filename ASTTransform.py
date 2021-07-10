@@ -440,8 +440,8 @@ class TreeBuilder(ast.NodeVisitor):
             # start and step calculations to the loop body assignments.
 
             # add constraints
-            loop_index = self.syms.make_unique_name("i")
-            loop_counter = make_loop_interval(iter_set, self.syms, loop_index)
+            loop_index = self.syms.make_unique_name("i", self.syms.default_int)
+            loop_counter = make_loop_interval(target_set, iter_set, self.syms, loop_index)
             for stmt in node.body:
                 self.visit(stmt)
             # This can still be an ill-formed loop, eg one ending in a single break
@@ -501,7 +501,7 @@ class TreeBuilder(ast.NodeVisitor):
         raise NotImplementedError(f"{type(node)} is unsupported")
 
 
-def build_module_ir(src, filename):
+def build_module_ir(src, filename, types):
     """
     Module level point of entry for IR construction.
 
@@ -516,7 +516,7 @@ def build_module_ir(src, filename):
     # are not reasonable to type via annotations
     # It's not optimal, but this isn't necessarily
     # meant to be user facing.
-    symbols = create_symbol_tables(src, filename)
+    symbols = create_symbol_tables(src, filename, types)
     tree = ast.parse(src)
     tree = ast.fix_missing_locations(tree)
 

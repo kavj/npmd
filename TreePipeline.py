@@ -6,7 +6,7 @@ from folding import fold_constant_expressions
 from reachingcheck import ReachingCheck
 
 
-def run_tree_pipeline(pth):
+def run_tree_pipeline(pth, types):
     print("filepath: ", pth)
     with open(pth) as r:
         r = r.read()
@@ -14,7 +14,7 @@ def run_tree_pipeline(pth):
     reaching_check = ReachingCheck()
     merge_paths = MergePaths()
     filename = os.path.basename(pth)
-    mod = build_module_ir(r, filename)
+    mod = build_module_ir(r, filename, types)
     repl = []
     for func in mod.funcs:
         func = merge_paths(func)

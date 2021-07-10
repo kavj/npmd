@@ -594,8 +594,10 @@ def _(base: ir.Subscript, syms):
 
 def make_loop_interval(targets, iters, syms, loop_index):
     assert(len(targets) == len(iters))
-    counters = [make_counter(it, syms) for it in iters]
+    counters = []
+    for it in iters:
+        c = make_counter(it, syms)
+        counters.append(c)
     interval = make_loop_interval(counters, syms, loop_index)
     # Now, map each iterable based on
-
     return interval
