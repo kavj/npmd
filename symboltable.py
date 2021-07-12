@@ -24,25 +24,41 @@ class ArrayCreationInitializer:
 class TypeBuilder:
 
     def __init__(self, default_int64=True):
-        int32_type = ir.ScalarType(signed=True, boolean=False, integral=True, bitwidth=32)
-        int64_type = ir.ScalarType(signed=True, boolean=False, integral=True, bitwidth=64)
-        float32_type = ir.ScalarType(signed=True, boolean=False, integral=False, bitwidth=32)
-        float64_type = ir.ScalarType(signed=True, boolean=False, integral=False, bitwidth=64)
-        bool_type = ir.ScalarType(signed=True, boolean=True, integral=True, bitwidth=1)
-        types = {np.int32: int32_type, np.int64: int64_type, float32_type: np.float32, float64_type: np.float64,
-                 bool: bool_type}
+        int32 = ir.ScalarType(signed=True, boolean=False, integral=True, bitwidth=32)
+        int64 = ir.ScalarType(signed=True, boolean=False, integral=True, bitwidth=64)
+        float32 = ir.ScalarType(signed=True, boolean=False, integral=False, bitwidth=32)
+        float64 = ir.ScalarType(signed=True, boolean=False, integral=False, bitwidth=64)
+        bool_ = ir.ScalarType(signed=True, boolean=True, integral=True, bitwidth=1)
+        types = {np.int32: int32,
+                 np.int64: int64,
+                 float32: np.float32,
+                 float64: np.float64,
+                 bool: bool_}
         if default_int64:
-            types[int] = int64_type
+            types[int] = int64
         else:
-            types[int] = int32_type
+            types[int] = int32
         # Python floats are always double precision
-        types[float] = float64_type
+        types[float] = float64
+        types[np.float] = float64
+        types[np.float64] = float64
+        types[np.float32] = float32
         self.types = types
 
     def __getitem__(self, item):
         if isinstance(item, ArrayBase):
+            # apply to dtype
+            dtype = self.types.get(item.dtype)
+            if dtype is None:
+                msg = f"No canonical type matches input type {dtype}"
+                raise KeyError(msg)
+            item.remap_dtype(dtype)
             return item
-        return self.types[item]
+        type_ = self.types.get(item)
+        if type_ is None:
+            msg = f"No type assigned for {item}"
+            raise KeyError(msg)
+        return type_
 
     @property
     def default_float(self):
@@ -200,11 +216,11 @@ def unify_types(by_type, canonical_types):
 
     """
     repl = defaultdict(set)
-    for t, names in by_type.items():
+    for type_, names in by_type.items():
         try:
-            ct = canonical_types[t]
+            ct = canonical_types[type_]
         except KeyError:
-            msg = f"Cannot map unsupported type {t}"
+            msg = f"Cannot map unsupported type {type_}"
             raise TypeError(msg)
         repl[ct].update(names)
     return repl
@@ -230,6 +246,11 @@ def bind_types_to_names(types):
 
 
 def standardize_type_map(types, builder):
+    """
+    Map input types to unambiguous internal types.
+    For example, int -> default_int_type
+
+    """
     types = unify_types(types, builder)
     types = bind_types_to_names(types)
     return types
@@ -271,7 +292,11 @@ def create_symbol_tables(src, filename, types_by_func, use_default_int64=True):
             raise TypeError(f"{func_name} in file {filename} refers to a class rather than a function. This is "
                             f"unsupported.")
         if func_name not in types_by_func:
-            raise ValueError(f"No type information provided for function {func_name}")
+            # Only raise an error here for missing parameter type info.
+            # Annotations are unsupported, because they are insufficient for array types.
+            params = func.get_parameters()
+            if func.get_parameters():
+                raise ValueError(f"No type information provided for parameters: {params} of function {func_name}.")
         for sym in func.get_symbols():
             name = sym.get_name()
             if name in reserved_names:

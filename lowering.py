@@ -563,7 +563,7 @@ def _(base: ir.Counter, syms):
 def _(base: ir.NameRef, syms):
     arr = syms.arrays.get(base)
     if arr is None:
-        msg = f"Variable {base} is iterated over without being declared an array type."
+        msg = f"Variable {base} is iterated over without an array type declaration or assignment."
         raise KeyError(msg)
     leading = arr.dims[0]
     leading = wrap_constant(leading)
@@ -600,6 +600,5 @@ def make_loop_interval(assigns, syms, loop_index):
     for target, iterable in assigns:
         c = make_counter(iterable, syms)
         counters.append(c)
-    # interval = make_loop_interval(counters, syms, loop_index)
     # Now, map each iterable based on
     return counters
