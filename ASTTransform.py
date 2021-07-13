@@ -6,7 +6,7 @@ import typing
 from contextlib import ContextDecorator
 
 import ir
-from symboltable import create_symbol_tables
+from symbols import create_symbol_tables
 from Canonicalize import replace_builtin_call
 from lowering import make_loop_interval
 from visitor import VisitorBase

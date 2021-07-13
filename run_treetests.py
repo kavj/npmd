@@ -1,6 +1,6 @@
 import os
 
-from ArrayInterface import UniformArrayInput
+from ArrayInterface import ArrayInput
 from TreePipeline import run_tree_pipeline as rtp
 from printing import printtree
 
@@ -14,7 +14,7 @@ tests = ("unpack_with_subscripts.py",)
 # "test_folding.py", "test_fold_unreachable.py", "test_normalize_return_flow.py")
 
 
-uws_types = {"unpack_test": {UniformArrayInput(("n",), float): {"a", "b", "c", "d"},
+uws_types = {"unpack_test": {ArrayInput(("n",), float): {"a", "b", "c", "d"},
                              int: {"k", "i"},
                              float: {"u", "v"}}
              }

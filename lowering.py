@@ -1,5 +1,6 @@
 import ctypes.wintypes
 import itertools
+import numbers
 import operator
 
 from collections import deque, defaultdict
@@ -17,6 +18,22 @@ def is_innermost(header):
 
 def unwrap_loop_body(node):
     return node.body if isinstance(node, (ir.ForLoop, ir.WhileLoop)) else node
+
+
+def wrap_constant(value):
+    if isinstance(value, ir.Constant):
+        return value
+    if isinstance(value, bool):
+        return ir.BoolNode(value)
+    elif isinstance(value, numbers.Integral):
+        # needed for numpy compatibility
+        return ir.IntNode(value)
+    elif isinstance(value, numbers.Real):
+        # needed for numpy compatibility
+        return ir.FloatNode(value)
+    else:
+        msg = f"{value} of type {type(value)} is not recognized as a constant."
+        raise TypeError(msg)
 
 
 def block_partition(stmts):
@@ -561,10 +578,10 @@ def _(base: ir.Counter, syms):
 
 @make_counter.register
 def _(base: ir.NameRef, syms):
-    arr = syms.arrays.get(base)
-    if arr is None:
+    if not syms.is_array(base):
         msg = f"Variable {base} is iterated over without an array type declaration or assignment."
         raise KeyError(msg)
+    arr = syms.lookup(base)
     leading = arr.dims[0]
     leading = wrap_constant(leading)
     # this is delinearized, so not a direct access func

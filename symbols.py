@@ -9,7 +9,7 @@ from symtable import symtable
 
 import ir
 
-from ArrayInterface import ArrayBase
+from ArrayInterface import ArrayInput
 
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
 
@@ -31,34 +31,39 @@ class TypeBuilder:
         bool_ = ir.ScalarType(signed=True, boolean=True, integral=True, bitwidth=1)
         types = {np.int32: int32,
                  np.int64: int64,
-                 float32: np.float32,
-                 float64: np.float64,
+                 np.float32: float32,
+                 np.float64: float64,
+                 np.float: float64,
+                 float: float64,  # Python floats default to double precision
                  bool: bool_}
         if default_int64:
             types[int] = int64
         else:
             types[int] = int32
-        # Python floats are always double precision
-        types[float] = float64
-        types[np.float] = float64
-        types[np.float64] = float64
-        types[np.float32] = float32
         self.types = types
 
-    def __getitem__(self, item):
-        if isinstance(item, ArrayBase):
-            # apply to dtype
-            dtype = self.types.get(item.dtype)
-            if dtype is None:
-                msg = f"No canonical type matches input type {dtype}"
-                raise KeyError(msg)
-            item.remap_dtype(dtype)
-            return item
-        type_ = self.types.get(item)
-        if type_ is None:
-            msg = f"No type assigned for {item}"
+    def get_internal_type(self, item):
+        is_array = isinstance(item, ArrayInput)
+        is_internal_scalar_type = isinstance(item, ir.ScalarType)
+        if is_array:
+            input_scalar_type = item.dtype
+            if isinstance(input_scalar_type, ir.ScalarType):
+                dtype = item.dtype
+            else:
+                dtype = self.types.get(input_scalar_type)
+        elif is_internal_scalar_type:
+            dtype = input_scalar_type = item
+        else:
+            input_scalar_type = item
+            dtype = self.types.get(input_scalar_type)
+        if dtype is None:
+            msg = f"Unable to map input parameter {input_scalar_type} to an internal type"
             raise KeyError(msg)
-        return type_
+        if is_array:
+            internal_type = ArrayInput(item.dims, dtype, item.stride)
+        else:
+            internal_type = dtype
+        return internal_type
 
     @property
     def default_float(self):
@@ -154,13 +159,12 @@ class symbol:
         return hash(self.name)
 
 
-class symbol_gen:
+class symboltable:
     def __init__(self, existing, type_builder):
         self.names = existing
         self.added = set()
         self.type_builder = type_builder
         self.prefixes = {}  # prefix for adding enumerated variable names
-        self.arrays = {}  # array types
 
     def __contains__(self, item):
         if isinstance(item, ir.NameRef):
@@ -181,87 +185,97 @@ class symbol_gen:
         return gen
 
     def is_array(self, name):
-        return name in self.arrays
+        if isinstance(name, ir.NameRef):
+            name = name.name
+        type_ = self.names.get(name)
+        if type_ is None:
+            assert isinstance(name, str)
+            msg = f"No symbol table or type information avaiable for variable name: {name}"
+            raise KeyError(msg)
+        return isinstance(type_, ArrayInput)
 
-    def add_array_view(self, name, base, subscript):
-        if name in self.arrays:
-            # Aliasing and multiple parameter combinations become too tedious
-            # if we have multiple possible assignments to a given array.
-            raise KeyError
+    def add_view(self, name, base, subscript, added=False):
+        if not self.is_array(name):
+            msg = f"{name} is not recognized as an array or view."
+            raise TypeError(msg)
+        # If the subscript expression is non-integral, this must be
+        # caught elsewhere for now.
         view = ir.ViewRef(base, subscript)
         self.arrays[name] = view
+        if added:
+            self.added.add(name)
 
-    def add_array(self, name, dims, elem_type):
-        if name in self.arrays:
-            # Aliasing and multiple parameter combinations become too tedious
-            # if we have multiple possible assignments to a given array.
-            raise KeyError
+    def add_array(self, name, dims, elem_type, added=False):
+        if name in self.names:
+            msg = f"Array name {name} shadows an existing name. For implementation reasons, arrays names are " \
+                  f"restricted to a single definition per scope"
+            raise KeyError(msg)
         arr = ir.ArrayRef(dims, elem_type)
         self.arrays[name] = arr
+        if added:
+            self.added.add(name)
 
-    def make_unique_name(self, prefix, type_):
+    def make_unique_name(self, prefix, type_, added=False):
         gen = self._get_num_generator(prefix)
         name = f"{prefix}_{next(gen)}"
         while name in self.names:
             name = f"{prefix}_{next(gen)}"
         self.names[name] = type_
-        self.added.add(name)
+        if added:
+            self.added.add(name)
         return name
 
+    def lookup(self, name):
+        if isinstance(name, ir.NameRef):
+            name = name.name
+        sym = self.names.get(name)
+        if name is None:
+            msg = f"Missing symbol table entry for {name}"
+            raise KeyError(msg)
+        return sym
 
-def unify_types(by_type, canonical_types):
+
+def map_input_types_to_internal(by_type, canonical_types):
     """
     Map type parameterized name sets to use canonical types.
     This may merge type aliases that otherwise appear incompatible.
 
     """
-    repl = defaultdict(set)
-    for type_, names in by_type.items():
-        try:
-            ct = canonical_types[type_]
-        except KeyError:
-            msg = f"Cannot map unsupported type {type_}"
-            raise TypeError(msg)
-        repl[ct].update(names)
+    repl = {}
+    for type_ in by_type:
+        ct = canonical_types.get_internal_type(type_)
+        repl[type_] = ct
     return repl
 
 
-def bind_types_to_names(types):
-    """
-    Convert from a dictionary mapping types to sets of variable names
-    to a dictionary mapping each distinct variable name to a single type.
-
-    This should run after type unification to avoid false conflicts.
-
-    """
-    by_name = {}
-    for type_, names in types.items():
-        for name in names:
-            if name in by_name:
-                first = by_name[name]
-                msg = f"Duplicate type entry {first} and {type_} for name {name}"
-                raise ValueError(msg)
-            by_name[name] = type_
-    return by_name
-
-
-def standardize_type_map(types, builder):
+def assign_input_types(types, builder):
     """
     Map input types to unambiguous internal types.
     For example, int -> default_int_type
 
     """
-    types = unify_types(types, builder)
-    types = bind_types_to_names(types)
-    return types
+
+    # map interface types to internal
+    type_map = {}
+    for type_ in types:
+        ct = builder.get_internal_type(type_)
+        type_map[type_] = ct
+
+    # map each variable name to an internal type
+    by_name = {}
+    for type_, names in types.items():
+        internal_type = type_map[type_]
+        for name in names:
+            if name in by_name:
+                first = by_name[name]
+                msg = f"Duplicate type entry {first} and {type_} for name {name}"
+                raise KeyError(msg)
+            by_name[name] = internal_type
+    return by_name
 
 
-def assign_type_info(func, types, type_builder):
-    types = standardize_type_map(types, type_builder)
-    arrays = {}
-    for name, type_ in types.items():
-        if isinstance(type_, ArrayBase):
-            arrays[name] = type_
+def map_types_by_func(func, interface_types, type_builder):
+    type_map = assign_input_types(interface_types, type_builder)
     func_name = func.get_name()
     # Check validity of type info
     for sym in func.get_symbols():
@@ -271,9 +285,9 @@ def assign_type_info(func, types, type_builder):
             if sym.is_assigned():
                 raise NotImplementedError(f"Reassigning names used by the language itself is unsupported. "
                                           "{name} marked as assignment target")
-        elif name not in types:
+        elif name not in type_map:
             raise TypeError(f"Missing type info for symbol {name} in function {func_name}")
-    table = symbol_gen(types, type_builder)
+    table = symboltable(type_map, type_builder)
     return table
 
 
@@ -307,6 +321,6 @@ def create_symbol_tables(src, filename, types_by_func, use_default_int64=True):
         func_types = types_by_func.get(func_name)
         if func_types is None:
             raise ValueError(f"Missing type information for function {func_name} in file {filename}")
-        func_table = assign_type_info(func, func_types, type_builder)
+        func_table = map_types_by_func(func, func_types, type_builder)
         tables[func_name] = func_table
     return tables
