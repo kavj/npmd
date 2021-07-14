@@ -416,10 +416,6 @@ class TreeBuilder(ast.NodeVisitor):
         it = self.visit(node.iter)
         target = self.visit(node.target)
         pos = extract_positional_info(node)
-        # we need to make an appropriate loop index here for cases that require
-        # subscripting.
-        # track conflicts between target an iterable names, so we can fail
-        # early if necessary
         target_set = set()
         iter_set = set()
         # Construct the actual loop header, using a single induction variable.
@@ -450,7 +446,7 @@ class TreeBuilder(ast.NodeVisitor):
             # or continue statement. These cases should be caught later on, as construction
             # here is already complicated enough.
             loop = ir.ForLoop(loop_index, loop_counter, self.body, pos)
-        loop_bound = ir.Assign(loop_index, loop_counter, node.pos)
+        loop_bound = ir.Assign(loop_index, loop_counter, pos)
         # append loop bound calculations outside loop
         self.body.append(loop_bound)
         self.body.append(loop)

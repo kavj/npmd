@@ -305,19 +305,6 @@ class MergePaths(TransformBase):
         return repl
 
 
-class ErrorObject:
-    """
-    Unless I find a better method for this, this allows us to delay logging an error until
-    control returns to the statement handler, which can add positional information.
-    """
-
-    def __init__(self, msg):
-        self.msg = msg
-
-    def __str__(self):
-        return self.msg
-
-
 class CallSpecialize:
     """
     Class to set up specialized call replacements. This is meant to be as simple as possible.
@@ -360,13 +347,13 @@ class CallSpecialize:
         arg_count = len(args)
         kw_count = len(keywords)
         if not self.allow_keywords and kw_count > 0:
-            return ErrorObject(f"Function {self.name} does not allow keyword arguments.")
+            raise ValueError(f"Function {self.name} does not allow keyword arguments.")
         mapped = {}
         unrecognized = set()
         duplicates = set()
         missing = set()
         if arg_count + kw_count > self.max_arg_count:
-            return ErrorObject(f"Function {self.name} has {self.max_arg_count} fields. "
+            raise ValueError(f"Function {self.name} has {self.max_arg_count} fields. "
                                f"{arg_count + kw_count} arguments were provided.")
         for field, arg in zip(self.args, args):
             mapped[field] = arg
@@ -383,7 +370,7 @@ class CallSpecialize:
                 else:
                     missing.add(field)
         for u, v in unrecognized:
-            return ErrorObject(f"unrecognized field {u} in call to {self.name}")
+            raise ValueError(f"unrecognized field {u} in call to {self.name}")
         return self.replacement(mapped)
 
     def validate_simple_call(self, args):
@@ -391,10 +378,10 @@ class CallSpecialize:
         arg_count = len(args)
         mapped = {}
         if arg_count > self.max_arg_count:
-            return ErrorObject(f"Signature for {self.name} accepts {self.max_arg_count} arguments. "
+            raise ValueError(f"Signature for {self.name} accepts {self.max_arg_count} arguments. "
                                f"{arg_count} arguments received.")
         elif arg_count < self.min_arg_count:
-            return ErrorObject(f"Signature for {self.name} expects at least {self.min_arg_count} arguments, "
+            raise ValueError(f"Signature for {self.name} expects at least {self.min_arg_count} arguments, "
                                f"{arg_count} arguments received.")
         for field, arg in zip(self.args, args):
             mapped[field] = arg
@@ -408,16 +395,12 @@ class CallSpecialize:
         # This should still return None on invalid mapping.
         if node.keywords:
             if not self.allow_keywords:
-                return ErrorObject(f"{self.name} does not allow keywords.")
+                raise ValueError(f"{self.name} does not allow keywords.")
             else:
                 mapped = self.validate_call(node.args, node.keywords)
-                if isinstance(mapped, ErrorObject):
-                    return mapped
                 return self.replacement(mapped)
         else:
             mapped = self.validate_simple_call(node.args)
-            if isinstance(mapped, ErrorObject):
-                return mapped
             return self.replacement(mapped)
 
 
@@ -448,7 +431,7 @@ def ZipBuilder(node: ir.Call):
     """
     assert (node.funcname == "zip")
     if node.keywords:
-        return ErrorObject("Zip does not accept keyword arguments.")
+        raise ValueError("Zip does not accept keyword arguments.")
 
     return ir.Zip(tuple(arg for arg in node.args))
 

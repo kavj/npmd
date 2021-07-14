@@ -1,10 +1,12 @@
 import builtins
 import itertools
 import keyword
+import numbers
+import typing
 
 import numpy as np
 
-from collections import defaultdict
+from dataclasses import dataclass
 from symtable import symtable
 
 import ir
@@ -107,6 +109,15 @@ def map_alias_to_qualified_names(import_nodes):
             raise ValueError
 
 
+@dataclass(frozen=True)
+class symbol:
+    name: str
+    is_scope: bool
+    is_var: bool
+    is_added: bool
+    type_: typing.Union[ArrayInput, ir.ScalarType]
+
+
 # array creation nodes
 
 
@@ -139,24 +150,6 @@ def make_numpy_call(node: ir.Call):
 
 def extract_name(name):
     return name.name if isinstance(name, ir.NameRef) else name
-
-
-class name_generator:
-    def __init__(self, prefix):
-        self.prefix = prefix
-        self.gen = itertools.count()
-
-    def make_name(self):
-        return f"{self.prefix}_{next(self.gen)}"
-
-
-class symbol:
-    def __init__(self, name, var_type):
-        self.name = name
-        self.var_type = var_type
-
-    def __hash__(self):
-        return hash(self.name)
 
 
 class symboltable:
@@ -270,6 +263,30 @@ def assign_input_types(types, builder):
                 first = by_name[name]
                 msg = f"Duplicate type entry {first} and {type_} for name {name}"
                 raise KeyError(msg)
+            if isinstance(internal_type, ArrayInput):
+                # Check for implicit parameters
+                dims = internal_type.dims
+                stride = internal_type.stride
+                for dim in dims:
+                    if isinstance(dim, str):
+                        # check consistency
+                        if dim in by_name:
+                            prior_type = by_name[dim]
+                            if not prior_type.integral:
+                                msg = f"Type conflict. Existing type info for array dim parameter {dim} is not integral."
+                                raise ValueError(msg)
+                        else:
+                            # prior takes precedence over default int here
+                            by_name[dim] = builder.default_int
+                if isinstance(stride, str):
+                    if stride in by_name:
+                        prior_type = by_name[stride]
+                        if not prior_type.integral:
+                            msg = f"Existing type info stride parameter {stride} of array {name} is not integral."
+                            raise ValueError(msg)
+                    else:
+                        by_name[stride] = builder.default_int
+
             by_name[name] = internal_type
     return by_name
 

@@ -583,7 +583,10 @@ def _(base: ir.NameRef, syms):
         raise KeyError(msg)
     arr = syms.lookup(base)
     leading = arr.dims[0]
-    leading = wrap_constant(leading)
+    if isinstance(leading, numbers.Integral):
+        leading = wrap_constant(leading)
+    elif isinstance(leading, str):
+        leading = ir.NameRef(leading)
     # this is delinearized, so not a direct access func
     counter = ir.Counter(ir.IntNode(0), leading, ir.IntNode(1))
 

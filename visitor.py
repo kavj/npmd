@@ -185,7 +185,10 @@ class TransformBase:
 
     @singledispatchmethod
     def visit(self, node):
-        msg = f"No handler for node type {type(node)}"
+        # Todo: We may need textwrap and error formatting for some of these.
+        #    The change to inline the node itself here is due to lack of information
+        #    provided by type info only.
+        msg = f"No handler for node {node} of type {type(node)}"
         raise NotImplementedError(msg)
 
     @visit.register
