@@ -117,12 +117,57 @@ class NameRef:
     constant: clscond = False
 
 
-@dataclass(frozen=True)
+# register basic types here,
+# These are left as classes due to anticipated interface expansion, which could be problematic with tuples.
+# Since this is simd focused, we are relying on predicates rather than C-like boolean types. bools cause a lot
+# of vectorization headaches due to the divergence between common implementations and their single bit nature, and
+# the required simd ops to convert between the common 8 bit width and greater widths can be costly.
+
+# fixed width integers
+
 class ScalarType:
-    signed: bool
-    boolean: bool
-    integral: bool
-    bitwidth: int
+    pass
+
+@dataclass(frozen=True)
+class int32(ScalarType):
+    bitwidth: typing.ClassVar[int] = 32
+    integral: typing.ClassVar[bool] = True
+    boolean: typing.ClassVar[bool] = False
+
+
+@dataclass(frozen=True)
+class int64(ScalarType):
+    bitwidth: typing.ClassVar[int] = 64
+    integral: typing.ClassVar[bool] = True
+    boolean: typing.ClassVar[bool] = False
+
+
+@dataclass(frozen=True)
+class float32(ScalarType):
+    bitwidth: typing.ClassVar[int] = 32
+    integral: typing.ClassVar[bool] = False
+    boolean: typing.ClassVar[bool] = False
+
+
+@dataclass(frozen=True)
+class float64(ScalarType):
+    bitwidth: typing.ClassVar[int] = 64
+    integral: typing.ClassVar[bool] = False
+    boolean: typing.ClassVar[bool] = False
+
+
+# predicate types
+
+class pred32(ScalarType):
+    bitwidth: typing.ClassVar[int] = 32
+    integral: typing.ClassVar[bool] = True
+    boolean: typing.ClassVar[bool] = True
+
+
+class pred64(ScalarType):
+    bitwidth: typing.ClassVar[int] = 64
+    integral: typing.ClassVar[bool] = True
+    boolean: typing.ClassVar[bool] = True
 
 
 @dataclass(frozen=True)

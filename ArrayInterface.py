@@ -14,9 +14,15 @@ class ArrayInput:
     stride: input stride
 
     """
-    dims: typing.Tuple[typing.Union[str, int], ...]
+    dims: typing.Tuple[typing.Union[str, int, ir.NameRef, ir.IntNode], ...]
     dtype: typing.Union[type, ir.ScalarType]
-    stride: typing.Optional[int] = None
+    stride: typing.Optional[typing.Union[int, ir.IntNode]] = None
+
+
+@dataclass(frozen=True)
+class ArrayView:
+    base: ir.NameRef
+    subscript: ir.Subscript
 
 
 class FuncDecl:

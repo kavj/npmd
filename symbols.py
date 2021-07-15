@@ -1,12 +1,9 @@
 import builtins
 import itertools
 import keyword
-import numbers
-import typing
 
 import numpy as np
 
-from dataclasses import dataclass
 from symtable import symtable
 
 import ir
@@ -23,25 +20,34 @@ class ArrayCreationInitializer:
         self.fill_value = fill_value
 
 
+class TypeLookup:
+    def __init__(self):
+        # partly intern basic types
+        self.types = {"Int32": ir.int32(), "Int64": ir.int64(), "Float32": ir.float32(),
+                      "Pred32": ir.pred32(), "Pred64": ir.pred64()}
+
+    def lookup(self, type_):
+        t = self.types.get(type_)
+        if t is None:
+            msg = f"No internal type matches name type name {type_}."
+            raise KeyError(msg)
+        return t
+
+
 class TypeBuilder:
 
-    def __init__(self, default_int64=True):
-        int32 = ir.ScalarType(signed=True, boolean=False, integral=True, bitwidth=32)
-        int64 = ir.ScalarType(signed=True, boolean=False, integral=True, bitwidth=64)
-        float32 = ir.ScalarType(signed=True, boolean=False, integral=False, bitwidth=32)
-        float64 = ir.ScalarType(signed=True, boolean=False, integral=False, bitwidth=64)
-        bool_ = ir.ScalarType(signed=True, boolean=True, integral=True, bitwidth=1)
-        types = {np.int32: int32,
-                 np.int64: int64,
-                 np.float32: float32,
-                 np.float64: float64,
-                 np.float: float64,
-                 float: float64,  # Python floats default to double precision
-                 bool: bool_}
+    def __init__(self, lookup, default_int64=True):
+
+        types = {np.int32: lookup["int32"],
+                 np.int64: lookup["int64"],
+                 np.float32: lookup["float32"],
+                 np.float64: lookup["float64"],
+                 np.float: lookup["float64"],
+                 float: lookup["float64"]}
         if default_int64:
-            types[int] = int64
+            types[int] = lookup["int64"]
         else:
-            types[int] = int32
+            types[int] = lookup["int32"]
         self.types = types
 
     def get_internal_type(self, item):
@@ -109,13 +115,33 @@ def map_alias_to_qualified_names(import_nodes):
             raise ValueError
 
 
-@dataclass(frozen=True)
 class symbol:
-    name: str
-    is_scope: bool
-    is_var: bool
-    is_added: bool
-    type_: typing.Union[ArrayInput, ir.ScalarType]
+    """
+    variable name symbol class
+    """
+    def __init__(self, name, type_, is_added):
+        self.name = name
+        self.type_ = type_
+        self.is_added = is_added
+
+    def __eq__(self, other):
+        assert isinstance(other, symbol)
+        return (self.name == other.name
+                and self.type_ == other.type_
+                and self.is_added == other.is_added)
+
+    def __ne__(self, other):
+        assert isinstance(other, symbol)
+        return (self.name != other.name
+                or self.type_ != other.type_
+                or self.is_added != other.is_added)
+
+    def __hash__(self):
+        return hash(self.name)
+
+    @property
+    def is_array(self):
+        return isinstance(self.type_, ArrayInput)
 
 
 # array creation nodes
@@ -155,14 +181,13 @@ def extract_name(name):
 class symboltable:
     def __init__(self, existing, type_builder):
         self.names = existing
-        self.added = set()
         self.type_builder = type_builder
         self.prefixes = {}  # prefix for adding enumerated variable names
 
     def __contains__(self, item):
         if isinstance(item, ir.NameRef):
             item = item.name
-        return item in self.names or item in self.added
+        return item in self.names
 
     @property
     def default_int(self):
@@ -178,49 +203,48 @@ class symboltable:
         return gen
 
     def is_array(self, name):
-        if isinstance(name, ir.NameRef):
-            name = name.name
-        type_ = self.names.get(name)
-        if type_ is None:
-            assert isinstance(name, str)
-            msg = f"No symbol table or type information avaiable for variable name: {name}"
+        assert isinstance(name, ir.NameRef)
+        sym = self.names.get(name)
+        if sym is None:
+            msg = f"No symbol table or type information available for variable name: {name}"
             raise KeyError(msg)
-        return isinstance(type_, ArrayInput)
+        return sym.is_array
 
     def add_view(self, name, base, subscript, added=False):
+        if isinstance(name, str):
+            name = ir.NameRef(name)
         if not self.is_array(name):
             msg = f"{name} is not recognized as an array or view."
             raise TypeError(msg)
         # If the subscript expression is non-integral, this must be
         # caught elsewhere for now.
         view = ir.ViewRef(base, subscript)
-        self.arrays[name] = view
-        if added:
-            self.added.add(name)
 
-    def add_array(self, name, dims, elem_type, added=False):
+    def add_array(self, name, array_type):
+        sym = symbol(name, array_type, is_added=True)
         if name in self.names:
-            msg = f"Array name {name} shadows an existing name. For implementation reasons, arrays names are " \
-                  f"restricted to a single definition per scope"
-            raise KeyError(msg)
-        arr = ir.ArrayRef(dims, elem_type)
-        self.arrays[name] = arr
-        if added:
-            self.added.add(name)
+            existing_sym = self.names[name]
+            if existing_sym != sym:
+                msg = f"Array name {name} shadows an existing name. For implementation reasons, arrays names are " \
+                      f"restricted to a single definition per scope"
+                raise KeyError(msg)
+        else:
+            self.names[name] = sym
 
-    def make_unique_name(self, prefix, type_, added=False):
+    def add_view(self, name, array_type, base):
+        sym = symbol(name, array_type)
+
+    def make_unique_name(self, prefix, type_):
         gen = self._get_num_generator(prefix)
         name = f"{prefix}_{next(gen)}"
         while name in self.names:
             name = f"{prefix}_{next(gen)}"
-        self.names[name] = type_
-        if added:
-            self.added.add(name)
+        name = ir.NameRef(name)
+        sym = symbol(name, type_, is_added=True)
+        self.names[sym] = type_
         return name
 
     def lookup(self, name):
-        if isinstance(name, ir.NameRef):
-            name = name.name
         sym = self.names.get(name)
         if name is None:
             msg = f"Missing symbol table entry for {name}"
@@ -288,7 +312,10 @@ def assign_input_types(types, builder):
                         by_name[stride] = builder.default_int
 
             by_name[name] = internal_type
-    return by_name
+    wrapped = {}
+    for name, sym in by_name.items():
+        wrapped[ir.NameRef(name)] = sym
+    return wrapped
 
 
 def map_types_by_func(func, interface_types, type_builder):
