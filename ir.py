@@ -125,49 +125,20 @@ class NameRef:
 
 # fixed width integers
 
+@dataclass(frozen=True)
 class ScalarType:
-    pass
+    """
+    Basic numeric type.
+    This uses boolean as a flag to allow declaration of fixed width typed predicates.
 
-@dataclass(frozen=True)
-class int32(ScalarType):
-    bitwidth: typing.ClassVar[int] = 32
-    integral: typing.ClassVar[bool] = True
-    boolean: typing.ClassVar[bool] = False
+    Note: bitwidth is required. This presents an issue with initializations of the form "value = 0" or similar.
+    Since they're commonly assigned this way for both integer and floating point values, we should just assume
+    these do not add numeric type constraints and initially record only the assignment.
 
-
-@dataclass(frozen=True)
-class int64(ScalarType):
-    bitwidth: typing.ClassVar[int] = 64
-    integral: typing.ClassVar[bool] = True
-    boolean: typing.ClassVar[bool] = False
-
-
-@dataclass(frozen=True)
-class float32(ScalarType):
-    bitwidth: typing.ClassVar[int] = 32
-    integral: typing.ClassVar[bool] = False
-    boolean: typing.ClassVar[bool] = False
-
-
-@dataclass(frozen=True)
-class float64(ScalarType):
-    bitwidth: typing.ClassVar[int] = 64
-    integral: typing.ClassVar[bool] = False
-    boolean: typing.ClassVar[bool] = False
-
-
-# predicate types
-
-class pred32(ScalarType):
-    bitwidth: typing.ClassVar[int] = 32
-    integral: typing.ClassVar[bool] = True
-    boolean: typing.ClassVar[bool] = True
-
-
-class pred64(ScalarType):
-    bitwidth: typing.ClassVar[int] = 64
-    integral: typing.ClassVar[bool] = True
-    boolean: typing.ClassVar[bool] = True
+    """
+    integral: bool
+    boolean: bool
+    bitwidth: int
 
 
 @dataclass(frozen=True)
