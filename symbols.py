@@ -8,7 +8,7 @@ from symtable import symtable
 
 import ir
 
-from ArrayInterface import ArrayInput
+from TypeInterface import ArrayInput, ArrayView, ScalarType
 
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
 
@@ -26,14 +26,14 @@ class TypeLookup:
         # Predicates don't really differ between integral and floating point representations,
         # but AVX intrinsics distinguish between the two, based on the operand types that generated
         # the predicate mask and how it is used.
-        self.types = {"int32": ir.ScalarType(bitwidth=32, integral=True, boolean=False),
-                      "int64": ir.ScalarType(bitwidth=64, integral=True, boolean=False),
-                      "float32": ir.ScalarType(bitwidth=32, integral=False, boolean=False),
-                      "float64": ir.ScalarType(bitwidth=64, integral=False, boolean=False),
-                      "pred32": ir.ScalarType(bitwidth=32, integral=True, boolean=True),
-                      "pred64": ir.ScalarType(bitwidth=64, integral=True, boolean=True),
-                      "fpred32": ir.ScalarType(bitwidth=32, integral=False, boolean=True),
-                      "fpred64": ir.ScalarType(bitwidth=64, integral=False, boolean=True)}
+        self.types = {"int32": ScalarType(bitwidth=32, integral=True, boolean=False),
+                      "int64": ScalarType(bitwidth=64, integral=True, boolean=False),
+                      "float32": ScalarType(bitwidth=32, integral=False, boolean=False),
+                      "float64": ScalarType(bitwidth=64, integral=False, boolean=False),
+                      "pred32": ScalarType(bitwidth=32, integral=True, boolean=True),
+                      "pred64": ScalarType(bitwidth=64, integral=True, boolean=True),
+                      "fpred32": ScalarType(bitwidth=32, integral=False, boolean=True),
+                      "fpred64": ScalarType(bitwidth=64, integral=False, boolean=True)}
 
     def lookup(self, type_):
         t = self.types.get(type_)
@@ -48,14 +48,14 @@ class TypeBuilder:
     # Predicates don't really differ between integral and floating point representations,
     # but AVX intrinsics distinguish between the two, based on the operand types that generated
     # the predicate mask and how it is used.
-    _internal_types = {"int32": ir.ScalarType(bitwidth=32, integral=True, boolean=False),
-                       "int64": ir.ScalarType(bitwidth=64, integral=True, boolean=False),
-                       "float32": ir.ScalarType(bitwidth=32, integral=False, boolean=False),
-                       "float64": ir.ScalarType(bitwidth=64, integral=False, boolean=False),
-                       "pred32": ir.ScalarType(bitwidth=32, integral=True, boolean=True),
-                       "pred64": ir.ScalarType(bitwidth=64, integral=True, boolean=True),
-                       "fpred32": ir.ScalarType(bitwidth=32, integral=False, boolean=True),
-                       "fpred64": ir.ScalarType(bitwidth=64, integral=False, boolean=True)}
+    _internal_types = {"int32": ScalarType(bitwidth=32, integral=True, boolean=False),
+                       "int64": ScalarType(bitwidth=64, integral=True, boolean=False),
+                       "float32": ScalarType(bitwidth=32, integral=False, boolean=False),
+                       "float64": ScalarType(bitwidth=64, integral=False, boolean=False),
+                       "pred32": ScalarType(bitwidth=32, integral=True, boolean=True),
+                       "pred64": ScalarType(bitwidth=64, integral=True, boolean=True),
+                       "fpred32": ScalarType(bitwidth=32, integral=False, boolean=True),
+                       "fpred64": ScalarType(bitwidth=64, integral=False, boolean=True)}
 
     # These are only used for interface lookups, since we
     # don't distinguish numpy specific types internally.
@@ -77,10 +77,10 @@ class TypeBuilder:
 
     def get_internal_type(self, item):
         is_array = isinstance(item, ArrayInput)
-        is_internal_scalar_type = isinstance(item, ir.ScalarType)
+        is_internal_scalar_type = isinstance(item, ScalarType)
         if is_array:
             input_scalar_type = item.dtype
-            if isinstance(input_scalar_type, ir.ScalarType):
+            if isinstance(input_scalar_type, ScalarType):
                 dtype = item.dtype
             else:
                 dtype = self.lookup.get(input_scalar_type)
@@ -204,15 +204,43 @@ def extract_name(name):
 
 
 class symboltable:
-    def __init__(self, existing, type_builder):
-        self.names = existing
+    def __init__(self, type_builder):
+        self.symbols = {}
+        self.added = set()
         self.type_builder = type_builder
         self.prefixes = {}  # prefix for adding enumerated variable names
 
-    def __contains__(self, item):
-        if isinstance(item, ir.NameRef):
-            item = item.name
-        return item in self.names
+    def lookup(self, name):
+        sym = self.symbols.get(name)
+        if name is None:
+            msg = f"Missing symbol table entry for {name}"
+            raise KeyError(msg)
+        return sym
+
+    def wrap_name(self, name):
+        if isinstance(name, ir.NameRef):
+            return name
+        elif isinstance(name, str):
+            return ir.NameRef(name)
+        else:
+            msg = f"{name} is not a valid key for variable type lookup."
+            raise TypeError(msg)
+
+    def declares(self, name):
+        name = self.wrap_name(name)
+        return name in self.symbols
+
+    def lookup(self, name):
+        name = self.wrap_name(name)
+        sym = self.symbols.get(name)
+        if sym is None:
+            msg = f"{name} is not a registered variable name."
+            raise KeyError(msg)
+        return sym
+
+    def is_added_name(self, name):
+        name = self.wrap_name(name)
+        return name in self.added
 
     @property
     def default_int(self):
@@ -228,54 +256,70 @@ class symboltable:
         return gen
 
     def is_array(self, name):
-        assert isinstance(name, ir.NameRef)
-        sym = self.names.get(name)
+        if isinstance(name, str):
+            name = ir.NameRef(name)
+        sym = self.symbols.get(name)
         if sym is None:
             msg = f"No symbol table or type information available for variable name: {name}"
             raise KeyError(msg)
         return sym.is_array
 
-    def add_view(self, name, base, subscript, added=False):
-        if isinstance(name, str):
-            name = ir.NameRef(name)
-        if not self.is_array(name):
-            msg = f"{name} is not recognized as an array or view."
+    def matches(self, ref, value):
+        """
+        Check if ref is both registered and the existing definition matches value
+        """
+        if not self.declares(ref):
+            return False
+        existing = self.lookup(ref)
+        return existing == value
+
+    def register_symbol(self, sym):
+        assert isinstance(sym, symbol)
+        if self.declares(sym.name):
+            if not self.matches(sym.name, sym):
+                existing = self.lookup(sym.name)
+                msg = f"Existing symbol definition {existing} for {sym.name} is incompatible with new definition" \
+                      f"{sym}."
+                raise KeyError(msg)
+        else:
+            self.symbols[sym.name] = sym
+
+    def add_var(self, name, type_, is_added):
+        if not isinstance(type_, (ArrayInput, ArrayView, ScalarType)):
+            type_ = self.type_builder.get_internal_type(type_)
+        name = self.wrap_name(name)
+        sym = symbol(name, type_, is_added)
+        self.register_symbol(sym)
+
+    def add_view(self, name, base, subscript, is_added):
+        if not isinstance(base, (ir.ArrayRef, ir.ViewRef)):
+            # this could be a handle
+            base = self.lookup(base)
+        if not self.is_array(base):
+            msg = f"{base.name} is not recognized as an array or view."
             raise TypeError(msg)
         # If the subscript expression is non-integral, this must be
         # caught elsewhere for now.
         view = ir.ViewRef(base, subscript)
+        self.add_var(name, view, is_added)
 
-    def add_array(self, name, array_type):
-        sym = symbol(name, array_type, is_added=True)
-        if name in self.names:
-            existing_sym = self.names[name]
-            if existing_sym != sym:
-                msg = f"Array name {name} shadows an existing name. For implementation reasons, arrays names are " \
-                      f"restricted to a single definition per scope"
-                raise KeyError(msg)
-        else:
-            self.names[name] = sym
-
-    def add_view(self, name, array_type, base, is_added):
+    def add_array(self, name, array_type, is_added):
+        if not isinstance(array_type, (ArrayInput, ArrayView)):
+            msg = f"This interface only supports ArrayInput and ArrayView from the TypeInterface module. Received " \
+                  f"{array_type}"
+            raise TypeError(msg)
         sym = symbol(name, array_type, is_added)
-
+        self.register_symbol(sym)
 
     def make_unique_name(self, prefix, type_):
         gen = self._get_num_generator(prefix)
         name = f"{prefix}_{next(gen)}"
-        while name in self.names:
+        while name in self.symbols:
             name = f"{prefix}_{next(gen)}"
         name = ir.NameRef(name)
         sym = symbol(name, type_, is_added=True)
-        self.names[sym] = type_
+        self.symbols[sym] = type_
         return name
-
-    def lookup(self, name):
-        sym = self.names.get(name)
-        if name is None:
-            msg = f"Missing symbol table entry for {name}"
-            raise KeyError(msg)
-        return sym
 
 
 def map_input_types_to_internal(by_type, canonical_types):
@@ -349,15 +393,16 @@ def map_types_by_func(func, interface_types, type_builder):
     func_name = func.get_name()
     # Check validity of type info
     for sym in func.get_symbols():
-        name = sym.get_name()
+        name = ir.NameRef(sym.get_name())
         # checking only python reserved names thus far
         if name in reserved_names:
             if sym.is_assigned():
                 raise NotImplementedError(f"Reassigning names used by the language itself is unsupported. "
                                           "{name} marked as assignment target")
-        elif name not in type_map:
-            raise TypeError(f"Missing type info for symbol {name} in function {func_name}")
-    table = symboltable(type_map, type_builder)
+        elif sym.is_parameter():
+            if name not in type_map:
+                raise TypeError(f"Missing type info for symbol {name} in function {func_name}")
+    table = symboltable(type_builder)
     return table
 
 

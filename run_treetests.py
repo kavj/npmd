@@ -1,6 +1,6 @@
 import os
 
-from ArrayInterface import ArrayInput
+from TypeInterface import ArrayInput
 from TreePipeline import run_tree_pipeline as rtp
 from printing import printtree
 

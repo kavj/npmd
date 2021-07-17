@@ -117,30 +117,6 @@ class NameRef:
     constant: clscond = False
 
 
-# register basic types here,
-# These are left as classes due to anticipated interface expansion, which could be problematic with tuples.
-# Since this is simd focused, we are relying on predicates rather than C-like boolean types. bools cause a lot
-# of vectorization headaches due to the divergence between common implementations and their single bit nature, and
-# the required simd ops to convert between the common 8 bit width and greater widths can be costly.
-
-# fixed width integers
-
-@dataclass(frozen=True)
-class ScalarType:
-    """
-    Basic numeric type.
-    This uses boolean as a flag to allow declaration of fixed width typed predicates.
-
-    Note: bitwidth is required. This presents an issue with initializations of the form "value = 0" or similar.
-    Since they're commonly assigned this way for both integer and floating point values, we should just assume
-    these do not add numeric type constraints and initially record only the assignment.
-
-    """
-    integral: bool
-    boolean: bool
-    bitwidth: int
-
-
 @dataclass(frozen=True)
 class ArrayRef:
     dims: typing.Tuple[typing.Union[int, str], ...]
