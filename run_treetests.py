@@ -6,7 +6,7 @@ from printing import printtree
 
 # tests = ("test_conditional_terminated.py",)
 
-tests = ("unpack_with_subscripts.py",)
+tests = ("test_nested.py",)
 
 # "test_nested.py", "test_cascade_if.py", "test_dead.py", "test_dead2.py",
 # "test_while.py", "test_cascade_assign.py", "test_for.py", "test_forif.py", "test_while.py", "test_retval.py",
