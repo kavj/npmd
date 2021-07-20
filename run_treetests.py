@@ -13,10 +13,17 @@ tests = ("unpack_with_subscripts.py",)
 # "test_pass.py", "test_conditional_terminated.py", "test_bothterminated.py", "test_chained_comparisons.py",
 # "test_folding.py", "test_fold_unreachable.py", "test_normalize_return_flow.py")
 
+array_n = ArrayInput(("n",), float)
 
-uws_types = {"unpack_test": {ArrayInput(("n",), float): {"a", "b", "c", "d"},
-                             int: {"k", "i"},
-                             float: {"u", "v"}}
+uws_types = {"unpack_test": {"a": array_n,
+                             "b": array_n,
+                             "c": array_n,
+                             "d": array_n,
+                             "k": int,
+                             "i": int,
+                             "u": float,
+                             "v": float
+                             }
              }
 
 Type_Info = {}

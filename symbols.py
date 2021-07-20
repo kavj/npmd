@@ -1,9 +1,11 @@
 import builtins
 import itertools
 import keyword
+import numbers
 
 import numpy as np
 
+from functools import singledispatch
 from symtable import symtable
 
 import ir
@@ -41,6 +43,25 @@ class TypeLookup:
             msg = f"No internal type matches name type name {type_}."
             raise KeyError(msg)
         return t
+
+
+@singledispatch
+def wrap_array_parameter(param):
+    if param is not None:
+        msg = f"{param} cannot be coerced to a suitable array parameter type."
+        raise TypeError(msg)
+
+
+@wrap_array_parameter.register
+def _(param: str):
+    return ir.NameRef(param)
+
+
+@wrap_array_parameter.register
+def _(param: numbers.Integral):
+    # numbers.Integral catches numpy integral types
+    # which are not caught by int
+    return ir.IntNode(param)
 
 
 class TypeBuilder:
@@ -93,7 +114,10 @@ class TypeBuilder:
             msg = f"Unable to map input parameter {input_scalar_type} to an internal type"
             raise KeyError(msg)
         if is_array:
-            internal_type = ArrayInput(item.dims, dtype, item.stride)
+            # wrap parameters
+            dims = tuple(wrap_array_parameter(d) for d in item.dims)
+            stride = wrap_array_parameter(item.stride)
+            internal_type = ArrayInput(dims, dtype, stride)
         else:
             internal_type = dtype
         return internal_type
@@ -210,13 +234,6 @@ class symboltable:
         self.type_builder = type_builder
         self.prefixes = {}  # prefix for adding enumerated variable names
 
-    def lookup(self, name):
-        sym = self.symbols.get(name)
-        if name is None:
-            msg = f"Missing symbol table entry for {name}"
-            raise KeyError(msg)
-        return sym
-
     def wrap_name(self, name):
         if isinstance(name, ir.NameRef):
             return name
@@ -239,8 +256,8 @@ class symboltable:
         return sym
 
     def is_added_name(self, name):
-        name = self.wrap_name(name)
-        return name in self.added
+        sym = self.lookup(name)
+        return name.is_added
 
     @property
     def default_int(self):
@@ -256,12 +273,7 @@ class symboltable:
         return gen
 
     def is_array(self, name):
-        if isinstance(name, str):
-            name = ir.NameRef(name)
-        sym = self.symbols.get(name)
-        if sym is None:
-            msg = f"No symbol table or type information available for variable name: {name}"
-            raise KeyError(msg)
+        sym = self.lookup(name)
         return sym.is_array
 
     def matches(self, ref, value):
@@ -273,25 +285,41 @@ class symboltable:
         existing = self.lookup(ref)
         return existing == value
 
-    def register_symbol(self, sym):
-        assert isinstance(sym, symbol)
-        if self.declares(sym.name):
-            if not self.matches(sym.name, sym):
-                existing = self.lookup(sym.name)
-                msg = f"Existing symbol definition {existing} for {sym.name} is incompatible with new definition" \
-                      f"{sym}."
+    def make_symbol(self, name, type_, is_added):
+        name = self.wrap_name(name)
+        if self.declares(name):
+            if not self.matches(name, type_):
+                existing = self.lookup(name)
+                msg = f"Existing symbol definition {existing} for {name} is incompatible with new definition" \
+                      f"{type_}."
                 raise KeyError(msg)
         else:
-            self.symbols[sym.name] = sym
+            sym = symbol(name, type_, is_added)
+            self.symbols[name] = sym
+
+    def make_unique_name(self, prefix):
+        if isinstance(prefix, ir.NameRef):
+            prefix = prefix.name
+        if self.declares(prefix):
+            gen = self._get_num_generator(prefix)
+            name = f"{prefix}_{next(gen)}"
+            while self.declares(name):
+                name = f"{prefix}_{next(gen)}"
+            name = ir.NameRef(name)
+        else:
+            # No need to rename
+            name = prefix
+        return name
 
     def add_var(self, name, type_, is_added):
         if not isinstance(type_, (ArrayInput, ArrayView, ScalarType)):
             type_ = self.type_builder.get_internal_type(type_)
-        name = self.wrap_name(name)
-        sym = symbol(name, type_, is_added)
-        self.register_symbol(sym)
+        if is_added:
+            name = self.make_unique_name(prefix=name)
+        self.make_symbol(name, type_, is_added)
 
     def add_view(self, name, base, subscript, is_added):
+        # Generally not intended
         if not isinstance(base, (ir.ArrayRef, ir.ViewRef)):
             # this could be a handle
             base = self.lookup(base)
@@ -301,25 +329,9 @@ class symboltable:
         # If the subscript expression is non-integral, this must be
         # caught elsewhere for now.
         view = ir.ViewRef(base, subscript)
-        self.add_var(name, view, is_added)
-
-    def add_array(self, name, array_type, is_added):
-        if not isinstance(array_type, (ArrayInput, ArrayView)):
-            msg = f"This interface only supports ArrayInput and ArrayView from the TypeInterface module. Received " \
-                  f"{array_type}"
-            raise TypeError(msg)
-        sym = symbol(name, array_type, is_added)
-        self.register_symbol(sym)
-
-    def make_unique_name(self, prefix, type_):
-        gen = self._get_num_generator(prefix)
-        name = f"{prefix}_{next(gen)}"
-        while name in self.symbols:
-            name = f"{prefix}_{next(gen)}"
-        name = ir.NameRef(name)
-        sym = symbol(name, type_, is_added=True)
-        self.symbols[sym] = type_
-        return name
+        if is_added:
+            name = self.make_unique_name(prefix=name)
+        self.make_symbol(name, view, is_added)
 
 
 def map_input_types_to_internal(by_type, canonical_types):
@@ -344,51 +356,27 @@ def assign_input_types(types, builder):
 
     # map interface types to internal
     type_map = {}
-    for type_ in types:
+    for type_ in types.values():
         ct = builder.get_internal_type(type_)
         type_map[type_] = ct
 
     # map each variable name to an internal type
     by_name = {}
-    for type_, names in types.items():
+    for name, type_ in types.items():
+        if not isinstance(name, ir.NameRef):
+            name = ir.NameRef(name)
         internal_type = type_map[type_]
-        for name in names:
-            if name in by_name:
-                first = by_name[name]
+        if name in by_name:
+            first = by_name[name]
+            if first != type_:
                 msg = f"Duplicate type entry {first} and {type_} for name {name}"
                 raise KeyError(msg)
-            if isinstance(internal_type, ArrayInput):
-                # Check for implicit parameters
-                dims = internal_type.dims
-                stride = internal_type.stride
-                for dim in dims:
-                    if isinstance(dim, str):
-                        # check consistency
-                        if dim in by_name:
-                            prior_type = by_name[dim]
-                            if not prior_type.integral:
-                                msg = f"Type conflict. Existing type info for array dim parameter {dim} is not integral."
-                                raise ValueError(msg)
-                        else:
-                            # prior takes precedence over default int here
-                            by_name[dim] = builder.default_int
-                if isinstance(stride, str):
-                    if stride in by_name:
-                        prior_type = by_name[stride]
-                        if not prior_type.integral:
-                            msg = f"Existing type info stride parameter {stride} of array {name} is not integral."
-                            raise ValueError(msg)
-                    else:
-                        by_name[stride] = builder.default_int
-
+        else:
             by_name[name] = internal_type
-    wrapped = {}
-    for name, sym in by_name.items():
-        wrapped[ir.NameRef(name)] = sym
-    return wrapped
+    return by_name
 
 
-def map_types_by_func(func, interface_types, type_builder):
+def map_to_internal_types(func, interface_types, type_builder):
     type_map = assign_input_types(interface_types, type_builder)
     func_name = func.get_name()
     # Check validity of type info
@@ -436,6 +424,8 @@ def create_symbol_tables(src, filename, types_by_func, use_default_int64=True):
         func_types = types_by_func.get(func_name)
         if func_types is None:
             raise ValueError(f"Missing type information for function {func_name} in file {filename}")
-        func_table = map_types_by_func(func, func_types, type_builder)
+        func_table = map_to_internal_types(func, func_types, type_builder)
+        for name, type_ in func_types.items():
+            func_table.add_var(name, type_, is_added=False)
         tables[func_name] = func_table
     return tables
