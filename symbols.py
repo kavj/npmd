@@ -10,6 +10,7 @@ from symtable import symtable
 
 import ir
 
+from visitor import walk_expr
 from TypeInterface import ArrayInput, ArrayView, ScalarType
 
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
@@ -206,9 +207,14 @@ class symbol:
     def is_array(self):
         return isinstance(self.type_, ArrayInput)
 
+    @property
+    def is_integer(self):
+        if isinstance(self.type_, ArrayInput):
+            return False
+        return self.type_.integral
+
 
 # array creation nodes
-
 
 def make_numpy_call(node: ir.Call):
     name = node.funcname
@@ -325,28 +331,45 @@ class symboltable:
             name = prefix
         return name
 
+    # These return a name reference to the symbol name that is actually used.
+    # In the case of is_added=False, this is the original name. Otherwise it
+    # may be a unique variable name that instantiates some renaming or implementation binding.
+
     def add_var(self, name, type_, is_added):
         if not isinstance(type_, (ArrayInput, ArrayView, ScalarType)):
             type_ = self.type_builder.get_internal_type(type_)
         if is_added:
             name = self.make_unique_name(prefix=name)
         self.make_symbol(name, type_, is_added)
+        return name
 
     def add_view(self, name, base, subscript, is_added):
         if not isinstance(base, (ir.ArrayRef, ir.ViewRef)):
-            # this could be a handle
+            # When adding an array, we generate array type info.
+            # Views must uniquely bind to a particular array, so we need
+            # a reference to it to disambiguate that it's a view to a particular
+            # array and not just one of a matching type.
             base = self.lookup(base)
         if not self.is_array(base):
             msg = f"{base.name} is not recognized as an array or view."
             raise TypeError(msg)
-        # If the subscript expression is non-integral, this must be
-        # caught elsewhere for now.
+        for subexpr in walk_expr(subscript):
+            if isinstance(subexpr, ir.NameRef):
+                t = self.lookup(subexpr)
+                if not t.is_integer:
+                    msg = f"Non integral parameter {subexpr} cannot be used as an index or slice parameter."
+                    raise TypeError(msg)
+            elif isinstance(subexpr, ir.FloatNode):
+                msg = f"Floating point types are not supported as part of a subscript expression. Encountered " \
+                      f"{str(subexpr)}"
+                raise TypeError(msg)
         view = ir.ViewRef(base, subscript)
         if is_added:
             # These are usually not explicitly added. They're generated
             # by for loop header assignments where a target is also an iterable.
             name = self.make_unique_name(prefix=name)
         self.make_symbol(name, view, is_added)
+        return name
 
 
 def symbol_table_from_func(func, type_map, type_builder, filename):
