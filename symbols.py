@@ -46,6 +46,20 @@ class TypeLookup:
 
 
 @singledispatch
+def wrap_variable_name(name):
+    msg = f"{name} cannot be used as an internal variable name. Expected a unicode string or internal name type."
+    raise TypeError(msg)
+
+
+@wrap_variable_name.register
+def _(name: str):
+    if name in reserved_names:
+        msg = f"'{name}' is used by the Python language and may not be used as a local variable."
+        raise ValueError(msg)
+    return ir.NameRef(name)
+
+
+@singledispatch
 def wrap_array_parameter(param):
     if param is not None:
         msg = f"{param} cannot be coerced to a suitable array parameter type."
@@ -54,7 +68,7 @@ def wrap_array_parameter(param):
 
 @wrap_array_parameter.register
 def _(param: str):
-    return ir.NameRef(param)
+    return wrap_variable_name(param)
 
 
 @wrap_array_parameter.register
@@ -319,7 +333,6 @@ class symboltable:
         self.make_symbol(name, type_, is_added)
 
     def add_view(self, name, base, subscript, is_added):
-        # Generally not intended
         if not isinstance(base, (ir.ArrayRef, ir.ViewRef)):
             # this could be a handle
             base = self.lookup(base)
@@ -330,67 +343,41 @@ class symboltable:
         # caught elsewhere for now.
         view = ir.ViewRef(base, subscript)
         if is_added:
+            # These are usually not explicitly added. They're generated
+            # by for loop header assignments where a target is also an iterable.
             name = self.make_unique_name(prefix=name)
         self.make_symbol(name, view, is_added)
 
 
-def map_input_types_to_internal(by_type, canonical_types):
+def symbol_table_from_func(func, type_map, type_builder, filename):
     """
-    Map type parameterized name sets to use canonical types.
-    This may merge type aliases that otherwise appear incompatible.
+    Build an internally used symbol table from a Python function symtable and type information.
 
+    func: Function symbol table symtable.symtable
+    type_map: dict[name: interface_type]
+    type_builder: builder to construct internal type info
     """
-    repl = {}
-    for type_ in by_type:
-        ct = canonical_types.get_internal_type(type_)
-        repl[type_] = ct
-    return repl
-
-
-def assign_input_types(types, builder):
-    """
-    Map input types to unambiguous internal types.
-    For example, int -> default_int_type
-
-    """
-
-    # map interface types to internal
-    type_map = {}
-    for type_ in types.values():
-        ct = builder.get_internal_type(type_)
-        type_map[type_] = ct
-
-    # map each variable name to an internal type
-    by_name = {}
-    for name, type_ in types.items():
-        if not isinstance(name, ir.NameRef):
-            name = ir.NameRef(name)
-        internal_type = type_map[type_]
-        if name in by_name:
-            first = by_name[name]
-            if first != type_:
-                msg = f"Duplicate type entry {first} and {type_} for name {name}"
-                raise KeyError(msg)
-        else:
-            by_name[name] = internal_type
-    return by_name
-
-
-def map_to_internal_types(func, interface_types, type_builder):
-    type_map = assign_input_types(interface_types, type_builder)
     func_name = func.get_name()
-    # Check validity of type info
-    for sym in func.get_symbols():
-        name = ir.NameRef(sym.get_name())
-        # checking only python reserved names thus far
-        if name in reserved_names:
-            if sym.is_assigned():
-                raise NotImplementedError(f"Reassigning names used by the language itself is unsupported. "
-                                          "{name} marked as assignment target")
-        elif sym.is_parameter():
-            if name not in type_map:
-                raise TypeError(f"Missing type info for symbol {name} in function {func_name}")
+    if func.is_nested():
+        raise ValueError(f"{func_name} in file {filename} appears as a nested scope, which is unsupported.")
+    elif func.has_children():
+        raise ValueError(f"{func_name} in file {filename} contains nested scopes, which are unsupported.")
+    elif func.get_type() != "function":
+        raise TypeError(f"{func_name} in file {filename} refers to a class rather than a function. This is "
+                        f"unsupported.")
+    missing = []
+    for arg in func.get_parameters():
+        # Check that all arguments have type info.
+        type_info = type_map.get(arg)
+        if type_info is None:
+            missing.append(arg)
+    if missing:
+        args = ", ".join(arg for arg in missing)
+        msg = f"Function {func.get_name()} is missing type info for the following arguments: {args}."
+        raise ValueError(msg)
     table = symboltable(type_builder)
+    for name, type_ in type_map.items():
+        table.add_var(name, type_, is_added=False)
     return table
 
 
@@ -400,32 +387,7 @@ def create_symbol_tables(src, filename, types_by_func, use_default_int64=True):
     mod = symtable(src, filename, "exec")
     # extract names that correspond to functions
     for func in mod.get_children():
-        func_name = func.get_name()
-        if func.is_nested():
-            raise ValueError(f"{func_name} in file {filename} appears as a nested scope, which is unsupported.")
-        elif func.has_children():
-            raise ValueError(f"{func_name} in file {filename} contains nested scopes, which are unsupported.")
-        elif func.get_type() != "function":
-            raise TypeError(f"{func_name} in file {filename} refers to a class rather than a function. This is "
-                            f"unsupported.")
-        if func_name not in types_by_func:
-            # Only raise an error here for missing parameter type info.
-            # Annotations are unsupported, because they are insufficient for array types.
-            params = func.get_parameters()
-            if func.get_parameters():
-                raise ValueError(f"No type information provided for parameters: {params} of function {func_name}.")
-        for sym in func.get_symbols():
-            name = sym.get_name()
-            if name in reserved_names:
-                if sym.is_assigned():
-                    raise NotImplementedError(f"Reassigning names used by the language itself is unsupported. "
-                                              "{name} marked as assignment target")
-        # Standardize type map for this function
-        func_types = types_by_func.get(func_name)
-        if func_types is None:
-            raise ValueError(f"Missing type information for function {func_name} in file {filename}")
-        func_table = map_to_internal_types(func, func_types, type_builder)
-        for name, type_ in func_types.items():
-            func_table.add_var(name, type_, is_added=False)
-        tables[func_name] = func_table
+        name = func.get_name()
+        types = types_by_func.get(name, ())
+        tables[name] = symbol_table_from_func(func, types, type_builder, filename)
     return tables
