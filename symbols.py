@@ -12,8 +12,7 @@ import ir
 
 from visitor import walk_expr
 from TypeInterface import ArrayInput, ArrayView, ScalarType
-
-reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
+from utils import wrap_array_parameter, wrap_variable_name, extract_name, reserved_names
 
 
 class ArrayCreationInitializer:
@@ -65,6 +64,17 @@ def wrap_array_parameter(param):
     if param is not None:
         msg = f"{param} cannot be coerced to a suitable array parameter type."
         raise TypeError(msg)
+
+
+# return argument if already suitable wrapped
+@wrap_array_parameter.register
+def _(param: ir.NameRef):
+    return param
+
+
+@wrap_array_parameter.register
+def _(param: ir.IntNode):
+    return param
 
 
 @wrap_array_parameter.register
@@ -243,10 +253,6 @@ def make_numpy_call(node: ir.Call):
     return array_init
 
 
-def extract_name(name):
-    return name.name if isinstance(name, ir.NameRef) else name
-
-
 class symboltable:
     def __init__(self, type_builder):
         self.symbols = {}
@@ -336,13 +342,16 @@ class symboltable:
     # may be a unique variable name that instantiates some renaming or implementation binding.
 
     def add_var(self, name, type_, is_added):
-        if not isinstance(type_, (ArrayInput, ArrayView, ScalarType)):
-            type_ = self.type_builder.get_internal_type(type_)
+        # run type check by default, to avoid internal array types
+        # with Python or numpy types as parameters.
+        type_ = self.type_builder.get_internal_type(type_)
         if is_added:
             name = self.make_unique_name(prefix=name)
-        elif self.declares(name):
-            msg = f"Duplicate symbol declaration for variabl name '{name}'."
-            raise ValueError(msg)
+        else:
+            name = wrap_array_parameter(name)
+            if self.declares(name):
+                msg = f"Duplicate symbol declaration for variabl name '{name}'."
+                raise ValueError(msg)
         self.make_symbol(name, type_, is_added)
         return name
 

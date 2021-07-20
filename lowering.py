@@ -8,6 +8,7 @@ from contextlib import ContextDecorator
 from functools import singledispatch, singledispatchmethod
 
 import ir
+import symbols
 
 from visitor import VisitorBase, walk, walk_branches
 
@@ -587,10 +588,6 @@ def _(base: ir.NameRef, syms):
         raise TypeError(msg)
     arr = sym.type_
     leading = arr.dims[0]
-    if isinstance(leading, numbers.Integral):
-        leading = wrap_constant(leading)
-    elif isinstance(leading, str):
-        leading = ir.NameRef(leading)
     # this is delinearized, so not a direct access func
     counter = ir.Counter(ir.IntNode(0), leading, ir.IntNode(1))
 
