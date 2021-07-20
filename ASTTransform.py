@@ -243,8 +243,10 @@ class TreeBuilder(ast.NodeVisitor):
         assert self.enclosing_loop is None
         return func
 
-    def flow_region(self, header):
-        assert isinstance(header, (ast.For, ast.While, ast.If))
+    def make_flow_region(self, header):
+        if not isinstance(header, (ast.For, ast.While, ast.If)):
+            msg = f"{header} is not a valid control flow entry point."
+            raise ValueError(msg)
         return FlowContext(self, header)
 
     def visit_Attribute(self, node: ast.Attribute) -> ir.AttributeRef:
@@ -399,11 +401,11 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_If(self, node: ast.If):
         pos = extract_positional_info(node)
         compare = self.visit(node.test)
-        with self.flow_region(node):
+        with self.make_flow_region(node):
             for stmt in node.body:
                 self.visit(stmt)
             on_true = self.body
-        with self.flow_region(node.test):
+        with self.make_flow_region(node):
             for stmt in node.orelse:
                 self.visit(stmt)
             on_false = self.body
@@ -419,7 +421,7 @@ class TreeBuilder(ast.NodeVisitor):
         targets = []
         iterables = []
         # Construct the actual loop header, using a single induction variable.
-        with self.flow_region(node):
+        with self.make_flow_region(node):
             for target, iterable in serialize_iterated_assignments(target_node, iter_node):
                 if isinstance(target, ir.Tuple) or isinstance(iterable, ir.Zip):
                     msg = f"Unable to fully unpack loop, line: {node.lineno}"
@@ -452,7 +454,7 @@ class TreeBuilder(ast.NodeVisitor):
             raise ValueError("or else clause not supported for for statements")
         test = self.visit(node.test)
         pos = extract_positional_info(node)
-        with self.flow_region(node):
+        with self.make_flow_region(node):
             for stmt in node.body:
                 self.visit(stmt)
             loop = ir.WhileLoop(test, self.body, pos)
@@ -504,6 +506,12 @@ def build_module_ir(src, filename, types):
 
     src: str
         Source code for the corresponding module
+
+    filename:
+        File path we used to extract source. This is used for error reporting.
+
+    types:
+        Map of function parameters and local variables to numpy or python numeric types.
    
     """
     # Type info helps annotate things that
