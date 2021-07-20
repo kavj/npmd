@@ -2,6 +2,7 @@ import ctypes.wintypes
 import itertools
 import numbers
 import operator
+import typing
 
 from collections import deque, defaultdict
 from contextlib import ContextDecorator
@@ -384,19 +385,19 @@ def numeric_max_iter_count(bound):
     return count
 
 
-def combine_numeric_checks(bounds):
+def combine_numeric_checks(bounds: typing.List[ir.Counter]):
     numeric = set()
     for bound in bounds:
-        if all(isinstance(param, ir.IntNode) for param in bound.subexprs):
+        # note: can't use sub-expressions here, because stop will be None
+        #       if this is lowered from an enumerate construct
+        if all(isinstance(param, ir.IntNode) for param in (bound.start, bound.stop, bound.step)):
             numeric.add(bound)
-    if not numeric:
-        return bounds
-    updated = bounds.difference(numeric)
-    numeric_iter = iter(numeric)
-    min_bound = numeric_max_iter_count(next(numeric_iter))
-    for bound in numeric_iter:
-        min_bound = min(min_bound, numeric_max_iter_count(bound))
-    updated.add(ir.IntNode(ir.IntNode(0), ir.IntNode(min_bound), ir.IntNode(1)))
+    if numeric:
+        updated = set(bounds).difference(numeric)
+        min_bound = min(numeric_max_iter_count(b) for b in numeric)
+        updated.add(ir.Counter(ir.IntNode(0), ir.IntNode(min_bound), ir.IntNode(1)))
+        bounds = updated
+    return bounds
 
 
 def make_min_sliced_len_expr(slices, leading_dim_expr):
@@ -505,7 +506,7 @@ def make_explicit_iter_count(counter):
     return count
 
 
-def make_loop_interval(counters, syms, index_name):
+def merge_loop_counters(counters, syms, index_name):
     """
     Attempt to handle cases where we have relatively simple structured loop constraints.
 
@@ -519,7 +520,7 @@ def make_loop_interval(counters, syms, index_name):
 
     """
 
-    reduced_bounds = combine_numeric_bound_checks(counters)
+    reduced_bounds = combine_numeric_checks(counters)
     # optimize for the case where we have a single delinearized step size
     if len(reduced_bounds) == 1:
         # uniform parameters
@@ -544,12 +545,12 @@ def make_loop_interval(counters, syms, index_name):
         elif start_step_count == min_count:
             intervals = []
             for (start, step), group in by_start_step.items():
-                stop = make_min_expr((g.stop for g in group))
+                stop = make_min_integer_expr((g.stop for g in group))
                 intervals.append(ir.Counter(start, stop, step))
         elif stop_step_count == min_count:
             intervals = []
             for (stop, step), group in by_stop_step.items():
-                start = make_max_expr((g.start for g in group))
+                start = make_max_integer_expr((g.start for g in group))
                 intervals.append(ir.Counter(start, stop, step))
         iter_counts = []
         for interval in intervals:
@@ -590,7 +591,7 @@ def _(base: ir.NameRef, syms):
     leading = arr.dims[0]
     # this is delinearized, so not a direct access func
     counter = ir.Counter(ir.IntNode(0), leading, ir.IntNode(1))
-
+    return counter
 
 @make_counter.register
 def _(base: ir.Subscript, syms):
@@ -621,5 +622,5 @@ def make_loop_interval(targets, iterables, syms, loop_index):
     for target, iterable in zip(targets, iterables):
         c = make_counter(iterable, syms)
         counters.append(c)
-    # Now, map each iterable based on
+    counter = merge_loop_counters(counters, syms, loop_index)
     return counters

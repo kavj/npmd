@@ -435,7 +435,7 @@ class TreeBuilder(ast.NodeVisitor):
                 if prefix is None and isinstance(iterable, ir.Counter):
                     if iterable.stop is None:
                         # first enumerate encountered
-                        loop_index_prefix = target
+                        prefix = target
                 targets.append(target)
                 iterables.append(iterable)
             conflicts = set(targets).intersection(iterables)
@@ -449,15 +449,13 @@ class TreeBuilder(ast.NodeVisitor):
                 prefix = "i"
             loop_index = self.syms.add_var(prefix, self.syms.default_int, is_added=True)
             loop_counter = make_loop_interval(targets, iterables, self.syms, loop_index)
+
             for stmt in node.body:
                 self.visit(stmt)
             # This can still be an ill formed loop, eg one with an unreachable latch.
             # These are not supported, because they look weird after transformation to a legal one
             # and raising an error is less mysterious. They should be be caught during tree validation checks.
             loop = ir.ForLoop(loop_index, loop_counter, self.body, pos)
-        loop_bound = ir.Assign(loop_index, loop_counter, pos)
-        # append loop bound calculations outside loop
-        self.body.append(loop_bound)
         self.body.append(loop)
 
     def visit_While(self, node: ast.While):
