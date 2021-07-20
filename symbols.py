@@ -11,8 +11,9 @@ from symtable import symtable
 import ir
 
 from visitor import walk_expr
-from TypeInterface import ArrayInput, ArrayView, ScalarType
-from utils import wrap_array_parameter, wrap_variable_name, extract_name, reserved_names
+from TypeInterface import ArrayInput, ScalarType
+
+reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
 
 
 class ArrayCreationInitializer:

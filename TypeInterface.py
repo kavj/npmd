@@ -39,14 +39,6 @@ class ArrayInput:
     is_view: typing.ClassVar[bool] = False
 
 
-@dataclass(frozen=True)
-class ArrayView:
-    base: ir.NameRef
-    subscript: ir.Subscript
-    is_array: typing.ClassVar[bool] = True
-    is_view: typing.ClassVar[bool] = True
-
-
 class FuncDecl:
     def __init__(self, args, return_type):
         self.args = args

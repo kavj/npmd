@@ -420,6 +420,7 @@ class TreeBuilder(ast.NodeVisitor):
         pos = extract_positional_info(node)
         targets = []
         iterables = []
+        prefix = None
         # Construct the actual loop header, using a single induction variable.
         with self.make_flow_region(node):
             for target, iterable in serialize_iterated_assignments(target_node, iter_node):
@@ -431,18 +432,28 @@ class TreeBuilder(ast.NodeVisitor):
                     # These can render it impossible to fully group memory loads at the beginning of a loop.
                     msg = f"Subscripts are not supported as for loop targets, line: {pos.line_begin}"
                     raise ValueError(msg)
+                if prefix is None and isinstance(iterable, ir.Counter):
+                    if iterable.stop is None:
+                        # first enumerate encountered
+                        loop_index_prefix = target
                 targets.append(target)
                 iterables.append(iterable)
-            if set(targets).intersection(iterables):
-                raise ValueError
+            conflicts = set(targets).intersection(iterables)
+            if conflicts:
+                conflict_names = ", ".join(c for c in conflicts)
+                msg = f"{conflict_names} appear in both the target an iterable sequences of a for loop, " \
+                      f"line {pos.line_begin}. This is not supported."
+                raise ValueError(msg)
             # make a unique loop index name, which cannot escape the current scope
-            loop_index = self.syms.add_var("i", self.syms.default_int, is_added=True)
+            if prefix is None:
+                prefix = "i"
+            loop_index = self.syms.add_var(prefix, self.syms.default_int, is_added=True)
             loop_counter = make_loop_interval(targets, iterables, self.syms, loop_index)
             for stmt in node.body:
                 self.visit(stmt)
-            # This can still be an ill-formed loop, eg one ending in a single break
-            # or continue statement. These cases should be caught later on, as construction
-            # here is already complicated enough.
+            # This can still be an ill formed loop, eg one with an unreachable latch.
+            # These are not supported, because they look weird after transformation to a legal one
+            # and raising an error is less mysterious. They should be be caught during tree validation checks.
             loop = ir.ForLoop(loop_index, loop_counter, self.body, pos)
         loop_bound = ir.Assign(loop_index, loop_counter, pos)
         # append loop bound calculations outside loop

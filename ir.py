@@ -123,6 +123,9 @@ class ArrayRef:
     dtype: type
     constant: clscond = False
 
+    def make_view(self, subscript, transpose=False):
+        return ViewRef(self, subscript, transpose)
+
     @property
     def base(self):
         return self
@@ -149,8 +152,6 @@ class ViewRef:
             seen.add(d)
             d = d.derived_from
         return d
-
-    # these could be cached_property
 
     @cached_property
     def dtype(self):
