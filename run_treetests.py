@@ -6,7 +6,7 @@ from printing import printtree
 
 # tests = ("test_conditional_terminated.py",)
 
-tests = ("test_nested.py",)
+tests = ("test_forifcont.py",)
 
 # "test_nested.py", "test_cascade_if.py", "test_dead.py", "test_dead2.py",
 # "test_while.py", "test_cascade_assign.py", "test_for.py", "test_forif.py", "test_while.py", "test_retval.py",
@@ -15,15 +15,20 @@ tests = ("test_nested.py",)
 
 array_n = ArrayInput(("n",), float)
 
-uws_types = {"unpack_test": {"a": array_n,
-                             "b": array_n,
-                             "c": array_n,
-                             "d": array_n,
-                             "k": int,
-                             "i": int,
-                             "u": float,
-                             "v": float
-                             }
+# uws_types = {"unpack_test": {"a": array_n,
+#                             "b": array_n,
+#                             "c": array_n,
+#                             "d": array_n,
+#                             "k": int,
+#                             "i": int,
+#                             "u": float,
+#                             "v": float
+#                             }
+#             }
+
+uws_types = {"something": {"x": array_n,
+                           "y": array_n,
+                           "z": array_n}
              }
 
 Type_Info = {}

@@ -328,7 +328,7 @@ class symboltable:
             name = ir.NameRef(name)
         else:
             # No need to rename
-            name = prefix
+            name = ir.NameRef(prefix)
         return name
 
     # These return a name reference to the symbol name that is actually used.
@@ -340,6 +340,9 @@ class symboltable:
             type_ = self.type_builder.get_internal_type(type_)
         if is_added:
             name = self.make_unique_name(prefix=name)
+        elif self.declares(name):
+            msg = f"Duplicate symbol declaration for variabl name '{name}'."
+            raise ValueError(msg)
         self.make_symbol(name, type_, is_added)
         return name
 
@@ -391,12 +394,11 @@ def symbol_table_from_func(func, type_map, type_builder, filename):
     missing = []
     for arg in func.get_parameters():
         # Check that all arguments have type info.
-        type_info = type_map.get(arg)
-        if type_info is None:
+        if arg not in type_map:
             missing.append(arg)
     if missing:
         args = ", ".join(arg for arg in missing)
-        msg = f"Function {func.get_name()} is missing type info for the following arguments: {args}."
+        msg = f"Function '{func.get_name()}' is missing type info for the following arguments: {args}."
         raise ValueError(msg)
     table = symboltable(type_builder)
     for name, type_ in type_map.items():
