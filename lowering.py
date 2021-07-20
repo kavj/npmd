@@ -581,7 +581,11 @@ def _(base: ir.NameRef, syms):
     if not syms.is_array(base):
         msg = f"Variable {base} is iterated over without an array type declaration or assignment."
         raise KeyError(msg)
-    arr = syms.lookup(base)
+    sym = syms.lookup(base)
+    if not sym.is_array:
+        msg = f"Cannot create counter from non-array type {sym.type_}"
+        raise TypeError(msg)
+    arr = sym.type_
     leading = arr.dims[0]
     if isinstance(leading, numbers.Integral):
         leading = wrap_constant(leading)
@@ -615,9 +619,9 @@ def _(base: ir.Subscript, syms):
     return counter
 
 
-def make_loop_interval(assigns, syms, loop_index):
+def make_loop_interval(targets, iterables, syms, loop_index):
     counters = []
-    for target, iterable in assigns:
+    for target, iterable in zip(targets, iterables):
         c = make_counter(iterable, syms)
         counters.append(c)
     # Now, map each iterable based on

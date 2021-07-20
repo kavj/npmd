@@ -413,33 +413,29 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_For(self, node: ast.For):
         if node.orelse:
             raise ValueError("or else clause not supported for for statements")
-        it = self.visit(node.iter)
-        target = self.visit(node.target)
+        iter_node = self.visit(node.iter)
+        target_node = self.visit(node.target)
         pos = extract_positional_info(node)
-        target_set = set()
-        iter_set = set()
+        targets = []
+        iterables = []
         # Construct the actual loop header, using a single induction variable.
         with self.flow_region(node):
-            assigns = []
-            for target, iterable in serialize_iterated_assignments(target, it):
+            for target, iterable in serialize_iterated_assignments(target_node, iter_node):
                 if isinstance(target, ir.Tuple) or isinstance(iterable, ir.Zip):
-                    raise ValueError(f"Unable to fully unpack loop, line: {node.lineno}")
-                target_set.add(target)
-                iter_set.add(iterable)
-                assigns.append((target, iterable))
-                # We should optimize interval analysis at this point. The corresponding counter
-                # limit is then appended to the enclosing body prior to the loop node.
-            if target_set.intersection(iter_set):
+                    msg = f"Unable to fully unpack loop, line: {node.lineno}"
+                    raise ValueError(msg)
+                elif isinstance(target, ir.Subscript):
+                    # Catch this early, because otherwise it manifests in weird ways.
+                    # These can render it impossible to fully group memory loads at the beginning of a loop.
+                    msg = f"Subscripts are not supported as for loop targets, line: {pos.line_begin}"
+                    raise ValueError(msg)
+                targets.append(target)
+                iterables.append(iterable)
+            if set(targets).intersection(iterables):
                 raise ValueError
-            # Make single loop index and construct subscripts with respect to it.
-            # If iterables have different steps, this normalizes based on unit step,
-            # even though that isn't ideal (see Wolfe, beyond induction variables)
-            # In the case of a normalized bound with slices here, we have to move
-            # start and step calculations to the loop body assignments.
-
-            # add constraints
-            loop_index = self.syms.make_unique_name("i", self.syms.default_int)
-            loop_counter = make_loop_interval(assigns, self.syms, loop_index)
+            # make a unique loop index name, which cannot escape the current scope
+            loop_index = self.syms.add_var("i", self.syms.default_int, is_added=True)
+            loop_counter = make_loop_interval(targets, iterables, self.syms, loop_index)
             for stmt in node.body:
                 self.visit(stmt)
             # This can still be an ill-formed loop, eg one ending in a single break
