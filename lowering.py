@@ -3,6 +3,7 @@ import itertools
 import numbers
 import operator
 import typing
+import warnings
 
 from collections import deque, defaultdict
 from contextlib import ContextDecorator
@@ -386,12 +387,10 @@ def numeric_max_iter_count(bound):
 
 
 def combine_numeric_checks(bounds: typing.List[ir.Counter]):
-    numeric = set()
-    for bound in bounds:
-        # note: can't use sub-expressions here, because stop will be None
-        #       if this is lowered from an enumerate construct
-        if all(isinstance(param, ir.IntNode) for param in (bound.start, bound.stop, bound.step)):
-            numeric.add(bound)
+    numeric = {b for b in bounds if all(isinstance(param, ir.IntNode) for param in b.subexprs)}
+    # Check for unbounded
+    unbounded = {b for b in numeric if b.stop is None}
+    numeric.difference_update(unbounded)
     if numeric:
         updated = set(bounds).difference(numeric)
         min_bound = min(numeric_max_iter_count(b) for b in numeric)
@@ -520,7 +519,9 @@ def merge_loop_counters(counters, syms, index_name):
 
     """
 
-    reduced_bounds = combine_numeric_checks(counters)
+    # enumerate constructs lower to unbounded counters
+    bounded = {c for c in counters if c.stop is not None}
+    reduced_bounds = combine_numeric_checks(bounded)
     # optimize for the case where we have a single delinearized step size
     if len(reduced_bounds) == 1:
         # uniform parameters
