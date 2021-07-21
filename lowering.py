@@ -12,6 +12,7 @@ from functools import singledispatch, singledispatchmethod
 import ir
 import symbols
 
+from TypeInterface import ArrayInput
 from visitor import VisitorBase, walk, walk_branches
 
 
@@ -319,7 +320,42 @@ def simplify_ternary_op(expr, symbols, predicate, types):
     pass
 
 
-def make_loop_counters(iterables, arrays):
+def discard_unbounded(iterables):
+    bounded = {it for it in iterables if not (isinstance(it, ir.Counter) and it.stop is None)}
+    return bounded
+
+
+@singledispatch
+def make_counter(iterable, syms):
+    raise NotImplementedError
+
+
+@make_counter.register
+def _(iterable: ir.Subscript, syms):
+    pass
+
+
+@make_counter.register
+def _(iterable: ir.NameRef, syms):
+    pass
+
+
+@make_counter.register
+def _(iterable: ArrayInput):
+    pass
+
+
+@make_counter.register
+def _(iterable: ir.ArrayRef):
+    pass
+
+
+@make_counter.register
+def _(iterable: ir.ViewRef):
+    pass
+
+
+def make_loop_counters(iterables, syms):
     """
     Map a combination of array iterators and range and enumerate calls to a set of counters,
     which capture the appropriate intervals.
@@ -329,12 +365,10 @@ def make_loop_counters(iterables, arrays):
 
     """
     # Make counters for access functions
+    bounded = discard_unbounded(iterables)
     bounds = set()
-    for iterable in iterables:
-        if isinstance(iterable, ir.Counter):
-            if iterable.stop is not None:
-                bounds.add(iterable)
-        elif isinstance(iterable, ir.Subscript):
+    for iterable in bounded:
+        if isinstance(iterable, ir.Subscript):
             arr = arrays[iterable.value]
             leading_dim = arr.dims.elements[0]
             sl = iterable.slice

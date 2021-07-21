@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import builtins
 import itertools
 import keyword
@@ -5,7 +7,7 @@ import numbers
 
 import numpy as np
 
-from functools import singledispatch
+from functools import singledispatch, singledispatchmethod
 from symtable import symtable
 
 import ir
@@ -14,6 +16,22 @@ from visitor import walk_expr
 from TypeInterface import ArrayInput, ScalarType
 
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
+
+
+def wrap_constant(value):
+    if isinstance(value, ir.Constant):
+        return value
+    if isinstance(value, bool):
+        return ir.BoolNode(value)
+    elif isinstance(value, numbers.Integral):
+        # needed for numpy compatibility
+        return ir.IntNode(value)
+    elif isinstance(value, numbers.Real):
+        # needed for numpy compatibility
+        return ir.FloatNode(value)
+    else:
+        msg = f"{value} of type {type(value)} is not recognized as a constant."
+        raise TypeError(msg)
 
 
 class ArrayCreationInitializer:
@@ -254,6 +272,16 @@ def make_numpy_call(node: ir.Call):
     return array_init
 
 
+def _make_reduce_dim_expr(expr, reduce_by):
+    if expr.constant:
+        value = expr.value - reduce_by
+        reduced = wrap_constant(value)
+    else:
+        reduce_by = wrap_constant(reduce_by)
+        reduced = ir.BinOp(expr, reduce_by, "-")
+    return reduced
+
+
 class symboltable:
     def __init__(self, type_builder):
         self.symbols = {}
@@ -356,33 +384,54 @@ class symboltable:
         self.make_symbol(name, type_, is_added)
         return name
 
-    def add_view(self, name, base, subscript, is_added):
-        if not isinstance(base, (ir.ArrayRef, ir.ViewRef)):
-            # When adding an array, we generate array type info.
-            # Views must uniquely bind to a particular array, so we need
-            # a reference to it to disambiguate that it's a view to a particular
-            # array and not just one of a matching type.
-            base = self.lookup(base)
-        if not self.is_array(base):
-            msg = f"{base.name} is not recognized as an array or view."
+    @singledispatchmethod
+    def _get_view_type(self, ref, transpose, is_added):
+        raise NotImplementedError
+
+    @_get_view_type.register
+    def _(self, ref: ir.NameRef, transpose, is_added):
+        ref_type = self.lookup(ref)
+        if ref_type.ndims == 1 and transpose:
+            msg = f"Cannot transpose scalar view of a 1D array: {ref}"
+            raise ValueError(msg)
+        dims = ref_type.dims
+        if len(dims) == 1:
+            # view_type =
+            pass
+        else:
+            pass
+
+    @_get_view_type.register
+    def _(self, ref: ir.Subscript, transpose, is_added):
+        if not isinstance(ref.slice, ir.Slice):
+            # single subscript. Since we don't allow binding slices to names
+            # this must project onto a single leading value, assuming a valid input parameter.
+            # Todo: This won't allow delayed evaluation of annotations, so have to unpack before this
+            # Todo: ensure integral parameter
+            raise ValueError
+        ref_type = self.lookup(ref)
+
+    def add_view(self, name, base, transpose, is_added):
+        base_type = self.lookup(base)
+        if not base_type.is_array:
+            msg = f"{base_type.name} is not recognized as an array or view."
             raise TypeError(msg)
-        for subexpr in walk_expr(subscript):
+        for subexpr in walk_expr(base):
             if isinstance(subexpr, ir.NameRef):
                 t = self.lookup(subexpr)
                 if not t.is_integer:
                     msg = f"Non integral parameter {subexpr} cannot be used as an index or slice parameter."
-                    raise TypeError(msg)
+                    raise ValueError(msg)
+            elif isinstance(subexpr, ir.BinOp):
+                if subexpr.op == "/":
+                    msg = f"True divide generates non-integer expressions and therefore cannot be used as an " \
+                          "index or slice parameter: {subexpr}."
+                    raise ValueError(msg)
             elif isinstance(subexpr, ir.FloatNode):
                 msg = f"Floating point types are not supported as part of a subscript expression. Encountered " \
                       f"{str(subexpr)}"
-                raise TypeError(msg)
-        view = ir.ViewRef(base, subscript)
-        if is_added:
-            # These are usually not explicitly added. They're generated
-            # by for loop header assignments where a target is also an iterable.
-            name = self.make_unique_name(prefix=name)
-        self.make_symbol(name, view, is_added)
-        return name
+                raise ValueError(msg)
+        dims = base.dims
 
 
 def symbol_table_from_func(func, type_map, type_builder, filename):

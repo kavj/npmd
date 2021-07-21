@@ -123,9 +123,6 @@ class ArrayRef:
     dtype: type
     constant: clscond = False
 
-    def make_view(self, subscript, transpose=False):
-        return ViewRef(self, subscript, transpose)
-
     @property
     def base(self):
         return self
@@ -201,6 +198,14 @@ class Subscript(Expression):
     def subexprs(self):
         yield self.value
         yield self.slice
+
+
+class Len(Expression):
+    value: ValueRef
+
+    @property
+    def subexprs(self):
+        yield self.value
 
 
 @dataclass(frozen=True)
