@@ -220,10 +220,10 @@ class ArrayRef(ValueRef):
 
 @dataclass(frozen=True)
 class ViewRef:
-    name: NameRef
     derived_from: typing.Union[ArrayRef, ViewRef]
     subscript: typing.Optional[typing.Union[IntNode, Slice, NameRef, BinOp, UnaryOp]]
     array_type: ViewType
+    name: NameRef
     transposed: bool = False
     constant: clscond = False
 

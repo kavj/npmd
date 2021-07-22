@@ -209,22 +209,22 @@ class symbol:
     """
     variable name symbol class
     """
-    def __init__(self, name, type_, is_added):
+    def __init__(self, name, type_, make_unique):
         self.name = name
         self.type_ = type_
-        self.is_added = is_added
+        self.unique = make_unique
 
     def __eq__(self, other):
         assert isinstance(other, symbol)
         return (self.name == other.name
                 and self.type_ == other.type_
-                and self.is_added == other.is_added)
+                and self.unique == other.unique)
 
     def __ne__(self, other):
         assert isinstance(other, symbol)
         return (self.name != other.name
                 or self.type_ != other.type_
-                or self.is_added != other.is_added)
+                or self.unique != other.unique)
 
     def __hash__(self):
         return hash(self.name)
@@ -309,7 +309,7 @@ class symboltable:
 
     def is_added_name(self, name):
         sym = self.lookup(name)
-        return name.is_added
+        return name.unique
 
     @property
     def default_int(self):

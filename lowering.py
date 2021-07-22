@@ -436,5 +436,5 @@ def make_loop_interval(targets, iterables, symbols, loop_index):
     # Since we need to be able to reach an array definition along each path
     # and array names are not meant to be reassigned, we should be passing an array
     # reference here.
-    counter = merge_loop_counters(counters, syms, loop_index)
+    counter = merge_loop_counters(counters, symbols, loop_index)
     return counters

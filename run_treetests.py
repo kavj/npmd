@@ -2,6 +2,7 @@ import os
 
 from TreePipeline import run_tree_pipeline as rtp
 from printing import printtree
+from ir import ArrayType
 
 # tests = ("test_conditional_terminated.py",)
 
