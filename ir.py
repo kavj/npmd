@@ -215,14 +215,6 @@ class Subscript(ValueRef):
         yield self.slice
 
 
-class Len(ValueRef):
-    value: ValueRef
-
-    @property
-    def subexprs(self):
-        yield self.value
-
-
 @dataclass(frozen=True)
 class Min(ValueRef):
     """
@@ -289,27 +281,6 @@ class Slice(ValueRef):
 
 @dataclass(frozen=True)
 class Tuple(ValueRef):
-    """
-    High level sentinel matching a tuple.
-    These cannot be directly assigned but may be unpacked as they enter scope.
-
-    They also arise in loop unpacking and variable permutations.
-
-    For example, constructs such as zip generate tuple valued outputs, which are typically immediately unpacked.
-
-    for u,v in zip(a,b):
-       ...
-
-    Tuples can also be used to indicate variable permutations.
-
-    b, a, d, c = a, b, c, d
-
-    Tuples are commonly used to hold array dimensions.
-
-    dim_zero, dim_one = array.shape
-
-    """
-
     elements: typing.Tuple[ValueRef, ...]
 
     def __post_init__(self):
@@ -319,6 +290,10 @@ class Tuple(ValueRef):
     def subexprs(self):
         for e in self.elements:
             yield e
+
+    @property
+    def length(self):
+        return len(self.elements)
 
 
 Targetable = typing.TypeVar('Targetable', NameRef, Subscript, Tuple)
@@ -378,7 +353,7 @@ class Call(ValueRef):
 
     """
 
-    funcname: str
+    func: NameRef
     args: typing.Tuple[ValueRef, ...]
     # expressions must be safely hashable, so we can't use a dictionary here
     keywords: typing.Tuple[typing.Tuple[str, ValueRef], ...]
@@ -404,7 +379,10 @@ class Call(ValueRef):
 
 
 @dataclass(frozen=True)
-class Counter(ValueRef):
+class AffineSeq(ValueRef):
+    """
+    This captures range, enumerate, and some generated access functions.
+    """
     start: ValueRef
     stop: typing.Optional[ValueRef]
     step: ValueRef
@@ -470,7 +448,7 @@ class UnaryOp(ValueRef):
 class Zip(ValueRef):
     """
     High level sentinel representing a zip object. This is the only unpackable iterator type in this IR.
-    Enumerate(object) is handled by Zip(Counter, object).
+    Enumerate(object) is handled by Zip(AffineSeq, object).
     """
 
     elements: typing.Tuple[ValueRef, ...]
@@ -482,6 +460,10 @@ class Zip(ValueRef):
     def subexprs(self):
         for e in self.elements:
             yield e
+
+    @property
+    def length(self):
+        return len(self.elements)
 
 
 @dataclass
@@ -519,7 +501,7 @@ class Continue(StmtBase):
 @dataclass
 class ForLoop(StmtBase):
     target: typing.Any
-    iterable: Counter
+    iterable: AffineSeq
     body: typing.List[Statement]
     pos: Position
 
@@ -587,71 +569,3 @@ class Min(ValueRef):
                 yield subexpr
         else:
             yield self.exprs
-
-
-@dataclass(frozen=True)
-class IntegralType:
-    name: str
-    bit_width: int
-    is_numpy_dtype: bool
-    is_signed: bool
-
-
-@dataclass(frozen=True)
-class FloatType:
-    """
-    Used to aggregate numpy and python floating point types
-
-    """
-    name: str
-    bit_width: int
-    is_numpy_dtype: bool
-    is_signed: clscond = True
-
-
-@dataclass(frozen=True)
-class Cast(ValueRef):
-    expr: ValueRef
-    as_type: type
-
-    @property
-    def is_integral(self):
-        return issubclass(self.as_type, numbers.Integral)
-
-    @property
-    def is_float(self):
-        return issubclass(self.as_type, numbers.Real)
-
-    @property
-    def subexprs(self):
-        yield self.expr
-
-
-@dataclass
-class CascadeIf(StmtBase):
-    tests: typing.List[typing.Union[Constant, NameRef, ValueRef], ...]
-    if_branches: typing.List[list, ...]
-    else_branch: list
-
-    def __post_init__(self):
-        assert(len(self.tests) == len(self.if_branches))
-
-    def walk(self):
-        for branch in self.if_branches:
-            for stmt in branch:
-                yield stmt
-        yield self.else_branch
-
-
-@dataclass(frozen=True)
-class CPtrRef:
-    name: str
-    dtype: str
-
-
-@dataclass(frozen=True)
-class VarRef:
-    name: str
-    dtype: typing.Union[CPtrRef, NameRef]
-    declare: bool = False
-    stride: int = 0

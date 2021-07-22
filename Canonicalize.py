@@ -405,7 +405,7 @@ class CallSpecialize:
 
 
 def EnumerateBuilder(mapping):
-    return ir.Zip((ir.Counter(mapping["start"], None, ir.IntNode(1)), mapping["iterable"]))
+    return ir.Zip((ir.AffineSeq(mapping["start"], None, ir.IntNode(1)), mapping["iterable"]))
 
 
 def IterBuilder(mapping):
@@ -413,9 +413,9 @@ def IterBuilder(mapping):
 
 
 def ReversedBuilder(arg):
-    if isinstance(arg, ir.Counter):
+    if isinstance(arg, ir.AffineSeq):
         if arg.stop is not None:
-            node = ir.Counter(arg.stop, arg.start, negate_condition(arg.step))
+            node = ir.AffineSeq(arg.stop, arg.start, negate_condition(arg.step))
         else:
             # must be enumerate
             return "Cannot reverse enumerate type"
@@ -429,7 +429,7 @@ def ZipBuilder(node: ir.Call):
     Zip takes an arbitrary number of positional arguments, something which we don't generally support.
 
     """
-    assert (node.funcname == "zip")
+    assert (node.func == "zip")
     if node.keywords:
         raise ValueError("Zip does not accept keyword arguments.")
 
@@ -455,11 +455,11 @@ def RangeBuilder(node: ir.Call):
     elif node.keywords:
         return None, "Range does not support keyword arguments"
     if argct == 1:
-        repl = ir.Counter(ir.IntNode(0), node.args[0], ir.IntNode(1))
+        repl = ir.AffineSeq(ir.IntNode(0), node.args[0], ir.IntNode(1))
     elif argct == 2:
-        repl = ir.Counter(node.args[0], node.args[1], ir.IntNode(1))
+        repl = ir.AffineSeq(node.args[0], node.args[1], ir.IntNode(1))
     else:
-        repl = ir.Counter(node.args[0], node.args[1], node.args[2])
+        repl = ir.AffineSeq(node.args[0], node.args[1], node.args[2])
     return repl
 
 
@@ -495,7 +495,7 @@ builders = {"enumerate": CallSpecialize(name="enumerate",
 
 
 def replace_builtin_call(node: ir.Call):
-    handler = builders.get(node.funcname)
+    handler = builders.get(node.func)
     if handler is None:
         return node
     return handler(node)

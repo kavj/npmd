@@ -308,11 +308,11 @@ class TransformBase:
         return ir.Call(node.funcname, args, keywords)
 
     @visit.register
-    def _(self, node: ir.Counter):
+    def _(self, node: ir.AffineSeq):
         start = self.visit(node.start)
         stop = self.visit(node.stop) if node.stop is not None else None
         step = self.visit(node.step)
-        return ir.Counter(start, stop, step)
+        return ir.AffineSeq(start, stop, step)
 
     @visit.register
     def _(self, node: ir.IfExpr):
@@ -338,7 +338,3 @@ class TransformBase:
         operand = self.visit(node.operand)
         repl = ir.UnaryOp(operand, node.op)
         return repl
-
-    @visit.register
-    def _(self, node: ir.Cast):
-        return ir.Cast(self.visit(node.expr), node.as_type)

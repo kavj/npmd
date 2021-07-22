@@ -99,7 +99,7 @@ class prettystringify:
 
     @visit.register
     def _(self, node: ir.Call):
-        funcname = node.funcname
+        funcname = node.func
         args = ", ".join(self.visit(arg) for arg in node.args)
         if args:
             return f"{funcname}({args})"
@@ -138,7 +138,7 @@ class prettystringify:
         return s
 
     @visit.register
-    def _(self, node: ir.Counter):
+    def _(self, node: ir.AffineSeq):
         if node.stop is None:
             # rarely used, just marking enumerate without full context
             s = "enumerate()"

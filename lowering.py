@@ -211,7 +211,7 @@ def try_replace_unary_binary(expr):
 
 
 def discard_unbounded(iterables):
-    bounded = {it for it in iterables if not (isinstance(it, ir.Counter) and it.stop is None)}
+    bounded = {it for it in iterables if not (isinstance(it, ir.AffineSeq) and it.stop is None)}
     return bounded
 
 
@@ -231,20 +231,20 @@ def _(iterable: ir.Subscript, syms):
             stop = array_type.dims[0]
         else:
             stop = ir.Min(leading_dim, slice_.stop)
-        counter = ir.Counter(slice_.start, stop, slice_.step)
+        counter = ir.AffineSeq(slice_.start, stop, slice_.step)
     else:
         # iterating over a single index subscript means iteration is bounded by
         # the second dimension.
         if array_type.ndims < 2:
             msg = f"Cannot iterate over a scalar reference {iterable}."
             raise ValueError(msg)
-        counter = ir.Counter(ir.IntNode(0), array_type.dims[1], ir.Counter(1))
+        counter = ir.AffineSeq(ir.IntNode(0), array_type.dims[1], ir.AffineSeq(1))
     return counter
 
 
 @make_iter_counter.register
 def _(iterable: ArrayType):
-    return ir.Counter(ir.IntNode(0), iterable.dims[0], ir.IntNode(1))
+    return ir.AffineSeq(ir.IntNode(0), iterable.dims[0], ir.IntNode(1))
 
 
 @make_iter_counter.register
@@ -274,19 +274,19 @@ def make_loop_counters(iterables, syms):
             if not isinstance(sl, ir.Slice):
                 raise ValueError("non-slice subscript is not yet supported here for array iteration base")
             if sl.stop is None or leading_dim == sl.stop:
-                bounds.add(ir.Counter(sl.start, leading_dim, sl.step))
+                bounds.add(ir.AffineSeq(sl.start, leading_dim, sl.step))
             else:
                 # Expand all bounds, since we don't always know which is tighter.
-                bounds.add(ir.Counter(sl.start, sl.stop, sl.step))
-                bounds.add(ir.Counter(sl.start, leading_dim, sl.step))
+                bounds.add(ir.AffineSeq(sl.start, sl.stop, sl.step))
+                bounds.add(ir.AffineSeq(sl.start, leading_dim, sl.step))
         else:
             arr = arrays[iterable]
             leading_dim = arr.dims.elements[0]
-            bounds.add(ir.Counter(ir.IntNode(0), leading_dim, ir.IntNode(1)))
+            bounds.add(ir.AffineSeq(ir.IntNode(0), leading_dim, ir.IntNode(1)))
     return bounds
 
 
-def combine_numeric_checks(bounds: typing.List[ir.Counter]):
+def combine_numeric_checks(bounds: typing.List[ir.AffineSeq]):
     numeric = {b for b in bounds if all(isinstance(param, ir.IntNode) for param in b.subexprs)}
     # Check for unbounded
     unbounded = {b for b in numeric if b.stop is None}
@@ -294,7 +294,7 @@ def combine_numeric_checks(bounds: typing.List[ir.Counter]):
     if numeric:
         updated = set(bounds).difference(numeric)
         min_bound = min(numeric_max_iter_count(b) for b in numeric)
-        updated.add(ir.Counter(ir.IntNode(0), ir.IntNode(min_bound), ir.IntNode(1)))
+        updated.add(ir.AffineSeq(ir.IntNode(0), ir.IntNode(min_bound), ir.IntNode(1)))
         bounds = updated
     return bounds
 
@@ -329,7 +329,7 @@ def merge_loop_counters(counters, syms, index_name):
     Attempt to handle cases where we have relatively simple structured loop constraints.
 
     counters:
-        A set of Counter functions, denoting affine sequences with imposed boundary conditions.
+        A set of AffineSeq functions, denoting affine sequences with imposed boundary conditions.
     syms:
         Symbol table for lookups of array parameters
 
@@ -361,14 +361,6 @@ def merge_loop_counters(counters, syms, index_name):
             # interval = try
         pass
 
-    # for now, just declare this as min
-    # for bound in bounds:
-    #    if
-
-    # optimize for the case where we have a single delinearized step size
-
-    # Check if we can
-
     return counter
 
 
@@ -379,7 +371,7 @@ def make_counter(base, syms):
 
 
 @make_counter.register
-def _(base: ir.Counter, syms):
+def _(base: ir.AffineSeq, syms):
     return base
 
 
@@ -395,7 +387,7 @@ def _(base: ir.NameRef, syms):
     arr = sym.type_
     leading = arr.dims[0]
     # this is delinearized, so not a direct access func
-    counter = ir.Counter(ir.IntNode(0), leading, ir.IntNode(1))
+    counter = ir.AffineSeq(ir.IntNode(0), leading, ir.IntNode(1))
     return counter
 
 
@@ -410,7 +402,7 @@ def _(base: ir.Subscript, syms):
         if sl.stop is not None:
             stop = ir.Min(stop, sl.stop)
         step = sl.step
-        counter = ir.Counter(start, stop, step)
+        counter = ir.AffineSeq(start, stop, step)
     else:
         # assume single subscript
         if len(arr.dims) < 2:
@@ -419,7 +411,7 @@ def _(base: ir.Subscript, syms):
         stop = arr.dims[1]
         stop = wrap_constant(stop)
         step = ir.IntNode(1)
-        counter = ir.Counter(start, stop, step)
+        counter = ir.AffineSeq(start, stop, step)
     return counter
 
 

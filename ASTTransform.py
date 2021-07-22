@@ -3,7 +3,7 @@ import numbers
 import sys
 import typing
 
-from contextlib import ContextDecorator
+from contextlib import contextmanager
 
 import ir
 from symbols import create_symbol_tables
@@ -62,61 +62,27 @@ supported_builtins = {"iter", "range", "enumerate", "zip", "all", "any", "max", 
                       "round", "reversed"}
 
 
-# Prior version maintained a more native assignment structure.
-# this is nice for determining what bounds are preserved, but it complicates lowering.
-
-
-def serialize_iterated_assignments(target, iterable):
-    """
-    Serializes (target, iterable) pairs by unpacking order
-    """
-    if (isinstance(target, ir.Tuple)
-            and isinstance(iterable, ir.Zip)
-            and len(target.elements) == len(iterable.elements)):
-
-        queued = [zip(target.elements, iterable.elements)]
-
-        while queued:
-            try:
-                t, v = next(queued[-1])
-                if (isinstance(t, ir.Tuple)
-                        and isinstance(v, ir.Zip)
-                        and len(t.elements) == len(v.elements)):
-                    queued.append(zip(t.elements, v.elements))
-                else:
-                    yield t, v
-            except StopIteration:
-                queued.pop()
-    else:
+def unpack_iterated(target, iterable, pos):
+    if not isinstance(target, ir.Tuple) or not isinstance(iterable, ir.Zip):
         yield target, iterable
+    elif target.length != iterable.length:
+        msg = f"Cannot ensure full unpacking of {iterable} with {target}, line: {pos.line_begin}."
+        raise ValueError(msg)
+    else:
+        for t, v in zip(target.subexprs, iterable.subexprs):
+            yield from unpack_iterated(t, v, pos)
 
 
-def serialize_assignments(node: ir.Assign):
-    """
-    This is here to break things like
-
-    (a,b,c,d) = (b,d,c,a)
-
-    into a series of assignments, since these are somewhat rare, and explicitly lowering them
-    to shuffles is not worthwhile here.
-
-    """
-    if not isinstance(node.target, ir.Tuple) or not isinstance(node.value, ir.Tuple) \
-            or len(node.target.elements) != len(node.value.elements):
-        return [node]
-
-    queued = [zip(node.target.elements, node.value.elements)]
-    while queued:
-        try:
-            t, v = next(queued[-1])
-            if (isinstance(node.target, ir.Tuple)
-                    and isinstance(node.value, ir.Tuple)
-                    and len(node.target.elements) == len(node.value.elements)):
-                queued.append(zip(t.elements, v.elements))
-            else:
-                yield t, v, node.pos
-        except StopIteration:
-            queued.pop()
+def unpack_assignment(target, value, pos):
+    if isinstance(target, ir.Tuple) and isinstance(value, ir.Tuple):
+        if target.length != value.length:
+            msg = f"Cannot unpack {value} with {value.length} elements using {target} with {target.length} elements: " \
+                  f"line {pos.line_begin}."
+            raise ValueError(msg)
+        for t, v in zip(target.subexprs, value.subexprs):
+            yield from unpack_assignment(t, v, pos)
+    else:
+        yield target, value
 
 
 def is_ellipsis(node):
@@ -137,102 +103,13 @@ def extract_positional_info(node):
                        col_end=node.end_col_offset)
 
 
-def collect_constraint_variables(iters):
-    iterable_constraints = set()
-    range_constraints = set()
-
-    for iterable in iters:
-        if isinstance(iterable, ir.Counter):
-            if iterable.stop is not None:
-                #  keep step since we may not know sign
-                range_constraints.add(iterable)
-        else:
-            iterable_constraints.add(iterable)
-    return iterable_constraints, range_constraints
-
-
-class FlowContext(ContextDecorator):
-    """
-    Start of a loop context manager
-    """
-
-    def __init__(self, builder, header):
-        assert isinstance(header, (ast.For, ast.If, ast.While, ast.FunctionDef))
-        self.builder = builder
-        self.header = header
-        self.enters_loop = isinstance(header, (ast.For, ast.While))
-        self.body = []
-
-    def __enter__(self):
-        self.builder.body, self.body = self.body, self.builder.body
-        if self.enters_loop:
-            self.builder.enclosing_loop, self.header = self.header, self.builder.enclosing_loop
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.builder.body, self.body = self.body, self.builder.body
-        if self.enters_loop:
-            self.builder.enclosing_loop, self.header = self.header, self.builder.enclosing_loop
-        if exc_type:
-            raise
-
-
-class AnnotationCollector(VisitorBase):
-    """
-    This tries to parse anything the grammar can handle.
-    Note: Annotations are no longer used, since they make templating awkward.
-
-    """
-
-    def __call__(self, node):
-        return self.visit(node)
-
-    def visit_Attribute(self, node: ast.Attribute):
-        value = self.visit(node.value)
-        if isinstance(value, ir.AttributeRef):
-            value = ir.AttributeRef(value.value, value.attr + node.attr)
-        else:
-            value = ir.AttributeRef(value, node.attr)
-        return value
-
-    def visit_Constant(self, node: ast.Constant):
-        if is_ellipsis(node.value):
-            raise NotImplementedError("Ellipsis is not yet supported.")
-        if isinstance(node.value, str):
-            return ir.StringNode(node.value)
-        elif isinstance(node.value, numbers.Integral):
-            return ir.IntNode(node.value)
-        elif isinstance(node.value, numbers.Real):
-            return ir.FloatNode(node.value)
-        else:
-            raise TypeError("unrecognized constant type")
-
-    def visit_Name(self, node: ast.Name):
-        return ir.NameRef(node.id)
-
-    def visit_Subscript(self, node: ast.Subscript):
-        if isinstance(node.value, ast.Subscript):
-            raise NotImplementedError("Annotations aren't supported with nested subscripts")
-        target = self.visit(node.value)
-        s = self.visit(node.slice)
-        if isinstance(target, ir.Subscript):
-            # annotations can't have consecutive subscripts like name[...][...]
-            raise ValueError
-        return ir.Subscript(target, s)
-
-    def visit_Index(self, node: ast.Index):
-        return self.visit(node.value)
-
-    def visit_Slice(self, node: ast.Slice):
-        lower = self.visit(node.lower) if node.lower is not None else None
-        upper = self.visit(node.upper) if node.upper is not None else None
-        step = self.visit(node.step) if node.step is not None else None
-        return ir.Slice(lower, upper, step)
-
-    def generic_visit(self, node):
-        raise NotImplementedError(f"{type(node)} is not supported here for type annotations.")
-
-
 class TreeBuilder(ast.NodeVisitor):
+
+    def __init__(self):
+        self.body = None
+        self.entry = None
+        self.enclosing_loop = None
+        self.syms = None
 
     def __call__(self, entry: ast.FunctionDef, syms):
         self.enclosing_loop = None
@@ -243,11 +120,22 @@ class TreeBuilder(ast.NodeVisitor):
         assert self.enclosing_loop is None
         return func
 
-    def make_flow_region(self, header):
-        if not isinstance(header, (ast.For, ast.While, ast.If)):
-            msg = f"{header} is not a valid control flow entry point."
-            raise ValueError(msg)
-        return FlowContext(self, header)
+    @contextmanager
+    def loop_context(self, header):
+        stashed = self.body
+        enclosing = self.enclosing_loop
+        self.body = []
+        self.enclosing_loop = header
+        yield
+        self.enclosing_loop = enclosing
+        self.body = stashed
+
+    @contextmanager
+    def flow_context(self):
+        stashed = self.body
+        self.body = []
+        yield
+        self.body = stashed
 
     def visit_Attribute(self, node: ast.Attribute) -> ir.AttributeRef:
         value = self.visit(node.value)
@@ -375,10 +263,7 @@ class TreeBuilder(ast.NodeVisitor):
         for target in node.targets:
             # break cascaded assignments into multiple assignments
             target = self.visit(target)
-            initial = ir.Assign(target, value, pos)
-            for subtarget, subvalue, pos in serialize_assignments(initial):
-                if isinstance(subtarget, ir.Tuple) or isinstance(subvalue, ir.Tuple):
-                    raise TypeError(f"unable to determine that assignment at line {pos.line_begin} is fully unpackable.")
+            for subtarget, subvalue in unpack_assignment(target, value, pos):
                 subassign = ir.Assign(subtarget, subvalue, pos)
                 self.body.append(subassign)
 
@@ -399,11 +284,11 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_If(self, node: ast.If):
         pos = extract_positional_info(node)
         compare = self.visit(node.test)
-        with self.make_flow_region(node):
+        with self.flow_context():
             for stmt in node.body:
                 self.visit(stmt)
             on_true = self.body
-        with self.make_flow_region(node):
+        with self.flow_context():
             for stmt in node.orelse:
                 self.visit(stmt)
             on_false = self.body
@@ -419,18 +304,12 @@ class TreeBuilder(ast.NodeVisitor):
         targets = []
         iterables = []
         prefix = None
+        # If the first target unpacked corresponds to enumerate, use it as a prefix
+
         # Construct the actual loop header, using a single induction variable.
-        with self.make_flow_region(node):
-            for target, iterable in serialize_iterated_assignments(target_node, iter_node):
-                if isinstance(target, ir.Tuple) or isinstance(iterable, ir.Zip):
-                    msg = f"Unable to fully unpack loop, line: {node.lineno}"
-                    raise ValueError(msg)
-                elif isinstance(target, ir.Subscript):
-                    # Catch this early, because otherwise it manifests in weird ways.
-                    # These can render it impossible to fully group memory loads at the beginning of a loop.
-                    msg = f"Subscripts are not supported as for loop targets, line: {pos.line_begin}"
-                    raise ValueError(msg)
-                if prefix is None and isinstance(iterable, ir.Counter):
+        with self.loop_context(node):
+            for target, iterable in unpack_iterated(target_node, iter_node, pos):
+                if prefix is None and isinstance(iterable, ir.AffineSeq):
                     if iterable.stop is None:
                         # first enumerate encountered
                         prefix = target
