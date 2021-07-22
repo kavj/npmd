@@ -8,6 +8,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
 
+import ir
+
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
 inplace_ops = frozenset({"+=", "-=", "*=", "/=", "//=", "%=", "**=", "<<=", ">>=", "|=", "^=", "&=", "@="})
 unaryops = frozenset({"+", "-", "~", "not"})
@@ -209,22 +211,29 @@ class Len(Expression):
 
 
 @dataclass(frozen=True)
-class ShapeRef(Expression):
-    array: typing.Any
-    dim: typing.Optional[ValueRef] = None
-
-    @property
-    def ndims(self):
-        return self.array.ndims
+class Min(Expression):
+    """
+    Min iteration count over a number of counters
+    """
+    values: typing.Tuple[ValueRef, ...]
 
     @property
     def subexprs(self):
-        yield self.array
-        yield self.dim
+        for subexpr in self.values:
+            yield subexpr
 
-    # not quite constant since it can refer to single definitions
-    # which appear in loops
-    constant: clscond = False
+
+@dataclass(frozen=True)
+class Max(Expression):
+    """
+    Max iteration count over a number of counters
+    """
+    values: typing.Tuple[ValueRef, ...]
+
+    @property
+    def subexprs(self):
+        for subexpr in self.values:
+            yield subexpr
 
 
 @dataclass

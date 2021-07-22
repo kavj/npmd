@@ -13,9 +13,11 @@ from symtable import symtable
 import ir
 
 from visitor import walk_expr
-from TypeInterface import ArrayInput, ScalarType
+from TypeInterface import ArrayType, FloatType, IntType, PredicateType
 
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
+
+internal_scalar_type = (IntType, FloatType, PredicateType)
 
 
 def wrap_constant(value):
@@ -47,14 +49,13 @@ class TypeLookup:
         # Predicates don't really differ between integral and floating point representations,
         # but AVX intrinsics distinguish between the two, based on the operand types that generated
         # the predicate mask and how it is used.
-        self.types = {"int32": ScalarType(bitwidth=32, integral=True, boolean=False),
-                      "int64": ScalarType(bitwidth=64, integral=True, boolean=False),
-                      "float32": ScalarType(bitwidth=32, integral=False, boolean=False),
-                      "float64": ScalarType(bitwidth=64, integral=False, boolean=False),
-                      "pred32": ScalarType(bitwidth=32, integral=True, boolean=True),
-                      "pred64": ScalarType(bitwidth=64, integral=True, boolean=True),
-                      "fpred32": ScalarType(bitwidth=32, integral=False, boolean=True),
-                      "fpred64": ScalarType(bitwidth=64, integral=False, boolean=True)}
+        self.types = {"int32": IntType(bitwidth=32),
+                      "int64": IntType(bitwidth=64),
+                      "float32": FloatType(bitwidth=32),
+                      "float64": FloatType(bitwidth=64),
+                      "pred32": PredicateType(bitwidth=32),
+                      "pred64": PredicateType(bitwidth=64),
+                      }
 
     def lookup(self, type_):
         t = self.types.get(type_)
@@ -113,14 +114,12 @@ class TypeBuilder:
     # Predicates don't really differ between integral and floating point representations,
     # but AVX intrinsics distinguish between the two, based on the operand types that generated
     # the predicate mask and how it is used.
-    _internal_types = {"int32": ScalarType(bitwidth=32, integral=True, boolean=False),
-                       "int64": ScalarType(bitwidth=64, integral=True, boolean=False),
-                       "float32": ScalarType(bitwidth=32, integral=False, boolean=False),
-                       "float64": ScalarType(bitwidth=64, integral=False, boolean=False),
-                       "pred32": ScalarType(bitwidth=32, integral=True, boolean=True),
-                       "pred64": ScalarType(bitwidth=64, integral=True, boolean=True),
-                       "fpred32": ScalarType(bitwidth=32, integral=False, boolean=True),
-                       "fpred64": ScalarType(bitwidth=64, integral=False, boolean=True)}
+    _internal_types = {"int32": IntType(bitwidth=32),
+                       "int64": IntType(bitwidth=64),
+                       "float32": FloatType(bitwidth=32),
+                       "float64": FloatType(bitwidth=64),
+                       "pred32": PredicateType(bitwidth=32),
+                       "pred64": PredicateType(bitwidth=64)}
 
     # These are only used for interface lookups, since we
     # don't distinguish numpy specific types internally.
@@ -141,29 +140,28 @@ class TypeBuilder:
             self.lookup[int] = self._internal_types["int32"]
 
     def get_internal_type(self, item):
-        is_array = isinstance(item, ArrayInput)
-        is_internal_scalar_type = isinstance(item, ScalarType)
-        if is_array:
+        # is_array = isinstance(item, ArrayType)
+        # is_internal_scalar_type = isinstance(item, internal_scalar_type)
+        if isinstance(item, ArrayType):
             input_scalar_type = item.dtype
-            if isinstance(input_scalar_type, ScalarType):
+            if isinstance(input_scalar_type, internal_scalar_type):
                 dtype = item.dtype
             else:
                 dtype = self.lookup.get(input_scalar_type)
-        elif is_internal_scalar_type:
-            dtype = input_scalar_type = item
-        else:
-            input_scalar_type = item
-            dtype = self.lookup.get(input_scalar_type)
-        if dtype is None:
-            msg = f"Unable to map input parameter {input_scalar_type} to an internal type"
-            raise KeyError(msg)
-        if is_array:
-            # wrap parameters
+            if dtype is None:
+                msg = f"Cannot map array data type {input_scalar_type} to an internal type."
+                raise KeyError(msg)
             dims = tuple(wrap_array_parameter(d) for d in item.dims)
             stride = wrap_array_parameter(item.stride)
-            internal_type = ArrayInput(dims, dtype, stride)
+            internal_type = ArrayType(dims, dtype, stride)
         else:
-            internal_type = dtype
+            if isinstance(item, internal_scalar_type):
+                internal_type = item
+            else:
+                internal_type = self.lookup.get(item)
+                if internal_type is None:
+                    msg = f"Unable to map input parameter {item} to an internal type"
+                    raise KeyError(msg)
         return internal_type
 
     @property
@@ -234,11 +232,11 @@ class symbol:
 
     @property
     def is_array(self):
-        return isinstance(self.type_, ArrayInput)
+        return isinstance(self.type_, ArrayType)
 
     @property
     def is_integer(self):
-        if isinstance(self.type_, ArrayInput):
+        if isinstance(self.type_, ArrayType):
             return False
         return self.type_.integral
 

@@ -1,19 +1,113 @@
-import ctypes.wintypes
-import itertools
 import numbers
 import operator
 import typing
-import warnings
 
-from collections import deque, defaultdict
-from contextlib import ContextDecorator
+from collections import defaultdict
 from functools import singledispatch, singledispatchmethod
 
 import ir
 import symbols
 
-from TypeInterface import ArrayInput
+from TypeInterface import ArrayType
 from visitor import VisitorBase, walk, walk_branches
+
+
+unaryops = {"+": operator.pos,
+            "-": operator.neg,
+            "~": operator.inv,
+            "not": operator.not_,
+            }
+
+binops = {"+": operator.add,
+          "-": operator.sub,
+          "*": operator.mul,
+          "/": operator.truediv,
+          "//": operator.floordiv,
+          "%": operator.mod,
+          "**": operator.pow,
+          "@": operator.matmul,
+          "+=": operator.iadd,
+          "-=": operator.isub,
+          "*=": operator.imul,
+          "/=": operator.ifloordiv,
+          "//=": operator.itruediv,
+          "%=": operator.imod,
+          "**=": operator.ipow,
+          "@=": operator.imatmul,
+          "==": operator.eq,
+          "!=": operator.ne,
+          "<": operator.lt,
+          "<=": operator.le,
+          ">": operator.gt,
+          ">=": operator.ge,
+          "<<": operator.lshift,
+          ">>": operator.rshift,
+          "&": operator.and_,
+          "|": operator.or_,
+          "^": operator.xor,
+          "<<=": operator.ilshift,
+          ">>=": operator.irshift,
+          "&=": operator.iand,
+          "|=": operator.ior,
+          "^=": operator.ixor,
+          "isnot": NotImplemented,
+          "in": NotImplemented,
+          "notin": NotImplemented
+          }
+
+
+def simplify_pow(base, coeff, in_place=False):
+    if coeff.constant:
+        if not isinstance(coeff, (ir.IntNode, ir.FloatNode)):
+            msg = f"Cannot evaluate pow operation with power of type {type(coeff)}"
+            raise RuntimeError(msg)
+        if isinstance(coeff, ir.IntNode):
+            coeff = coeff.value
+            if coeff == 0:
+                return ir.IntNode(1)
+            elif coeff == 1:
+                return base
+            elif coeff == 2:
+                if base.constant:
+                    repl = wrap_constant(operator.pow(base.value, 2))
+                else:
+                    op = "*=" if in_place else "*"
+                    repl = ir.BinOp(base, base, op)
+                return repl
+        elif isinstance(coeff, ir.FloatNode):
+            if coeff.value == 0.5:
+                if base.constant:
+                    left = base.value
+                    try:
+                        left = math.sqrt(left)
+                        return wrap_constant(left)
+                    except (TypeError, ValueError):
+                        msg = f"The source code may compute a square root of {base.value}" \
+                              f"at runtime, which is invalid. We cautiously refuse to compile this."
+                        raise RuntimeError(msg)
+                else:
+                    return ir.Call("sqrt", args=(base,), keywords=())
+    return ir.BinOp(base, coeff, "**=" if in_place else "**")
+
+
+def simplify_binop(left, right, op):
+    if right.constant:
+        if left.constant:
+            const_folder = binops.get(op)
+            if op in bitwise_binops and not isinstance(left, ir.IntNode):
+                raise RuntimeError(f"Source code contains an invalid bit field expression"
+                                   f"{op} requires integral operands, received {left}"
+                                   f"and {right}")
+            try:
+                value = const_folder(left.value, right.value)
+                return wrap_constant(value)
+            except (TypeError, ValueError):
+                raise RuntimeError(f"Extracted source expression {left} {op} {right}"
+                                   f"cannot be safely evaluated.")
+        else:
+            if op in ("**", "*=") and right.value in (0, 1, 2, 0.5):
+                return simplify_pow(left, right, op == "**=")
+        return ir.BinOp(left, right, op)
 
 
 def is_innermost(header):
@@ -40,229 +134,29 @@ def wrap_constant(value):
         raise TypeError(msg)
 
 
-def block_partition(stmts):
-    partitions = []
-    curr = []
-    for stmt in stmts:
-        if isinstance(stmt, (ir.IfElse, ir.CascadeIf, ir.ForLoop, ir.WhileLoop)):
-            if curr:
-                partitions.append(curr)
-                curr = []
-            partitions.append(stmt)
-    if curr:
-        partitions.append(curr)
-    return tuple(partitions)
+@singledispatch
+def fold_numeric_expression(expr):
+    msg = f"fold expression not implemented for "
+    raise NotImplementedError
 
 
-class DeclBuilder(VisitorBase):
-    """
-    Indicates where to place declarations when lowering
-
-    """
-
-    def __call__(self, entry):
-        self.decls = None
-        self.cumulative = None
-        self.visit(entry)
-        decls = self.decls
-        self.decls = self.cumulative = None
-        return decls
-
-    @singledispatchmethod
-    def visit(self, node):
-        super().visit(node)
-
-    @visit.register
-    def _(self, node: ir.Function):
-        self.decls = defaultdict(set)
-        args = {arg for arg in node.args}
-        self.decls[id(node)] = args
-        self.cumulative = args.copy()
-        self.visit(node.body)
-
-    @visit.register
-    def _(self, node: ir.IfElse):
-        stashed = self.cumulative
-        self.cumulative = self.cumulative.copy()
-        if_branch = self.visit(node.if_branch)
-        self.cumulative = stashed.copy()
-        else_branch = self.visit(node.else_branch)
-        if if_branch and else_branch:
-            shared = if_branch.intersection(else_branch)
-            if_branch.difference_update(shared)
-            else_branch.difference_update(shared)
-            return shared
-        else:
-            return ()
-
-    @visit.register
-    def _(self, node: list):
-        for stmt in node:
-            decls = self.visit(stmt)
-            self.cumulative.update(decls)
-            self.decls[id(node)].update(decls)
-
-    @visit.register
-    def _(self, node: ir.ForLoop):
-        stashed = self.cumulative
-        self.cumulative = self.cumulative.copy()
-        for_id = id(node)
-        body_id = id(node.body)
-        target = node.target
-        # this should be scoped to a single loop
-        assert target not in self.cumulative
-        self.decls[for_id].update(target)
-        self.cumulative.add(target)
-        self.visit(node.body)
-        self.cumulative = stashed
-
-    @visit.register
-    def _(self, node: ir.WhileLoop):
-        stashed = self.cumulative
-        self.cumulative = self.cumulative.copy()
-        self.visit(node.body)
-        self.cumulative = stashed
-
-    @visit.register
-    def _(self, node: ir.Assign):
-        target = node.target
-        if isinstance(target, ir.NameRef):
-            if target not in self.cumulative:
-                self.cumulative.add(target)
-                return (target,) if isinstance(target, ir.NameRef) else ()
+@fold_numeric_expression.register
+def _(expr: ir.BinOp):
+    oper = binops[expr.op]
+    res = oper(expr.left, expr.right)
+    return res
 
 
-def extract_elifs(header: ir.IfElse):
-    branches = [(header.test, header.if_branch)]
-    stmt = header.else_branch
-    while len(stmt) == 1 and isinstance(stmt[0], ir.IfElse):
-        stmt = stmt[0]
-        branches.append((stmt.test, stmt.if_branch))
-        stmt = stmt.else_branch
-    if stmt:
-        # trailing non-empty else
-        branches.append((None, stmt))
-    return branches
+@fold_numeric_expression.register
+def _(expr: ir.UnaryOp):
+    value = try_fold_expression(expr.value)
+    if value.constant:
+        pass
 
 
-def flatten_if_branch_tests(header: ir.IfElse):
-    """
-    This flattens perfectly checks into a long single conditional without reordering.
-
-    """
-
-    body = header.if_branch
-    tests = [header.test]
-    while ((len(current) == 1)
-           and isinstance(body[0], ir.IfElse)
-           and not body[0].else_branch):
-        tests.append(body[0]).test
-        body = body[0].if_branch
-    if len(tests) > 1:
-        header = ir.IfElse(ir.BoolOp(tuple(tests), "and"), body, header.else_branch, header.pos)
-    return header
-
-
-def cascade_flatten_branch_tests(header: ir.IfElse):
-    header = flatten_if_branch_tests(header)
-    repl_if_body = []
-    for stmt in header.if_branch:
-        if isinstance(stmt, ir.IfElse):
-            stmt = flatten_if_branch_tests(stmt)
-        repl_if_body.append(stmt)
-    repl_else_body = []
-    for stmt in header.else_branch:
-        if isinstance(stmt, ir.IfElse):
-            stmt = flatten_if_branch_tests(stmt)
-        repl_else_body.append(stmt)
-    header.if_branch = repl_if_body
-    header.else_branch = repl_else_body
-    return header
-
-
-def renest_branches(header: ir.IfElse, varying):
-    """
-    group cascaded branches, based on whether they are uniformly taken
-
-    """
-    branches = extract_elifs(header)
-    if len(branches) < 3:
-        return header
-    else_branch = branches.pop()
-    lead = branches.pop()
-    lead_is_uniform = lead.test not in varying
-    if_branches = [lead.test]
-    tests = [lead.if_branch]
-    for test, body in reversed(branches):
-        is_uniform = test not in varying
-        if is_uniform != lead_is_uniform:
-            if_branches.reverse()
-            tests.reverse()
-            combined = ir.CascadeIf(tests, if_branches, else_branch)
-            if_branches = []
-            tests = []
-            else_branch = combined
-            lead_is_uniform = is_uniform
-        if_branches.append(body)
-        tests.append(test)
-    if_branches.reverse()
-    tests.reverse()
-    combined = ir.CascadeIf(tests, if_branches, else_branch)
-    return combined
-
-
-def has_break_stmt(entry):
-    if isinstance(entry, (ir.ForLoop, ir.WhileLoop)):
-        entry = entry.body
-    return any(isinstance(stmt, (ir.Break, ir.Return)) for stmt in entry)
-
-
-def contains_any_break(entry):
-    for stmt in walk_branches(entry):
-        if isinstance(stmt, ir.Break):
-            return True
-
-
-def contains_varying_break(entry, uniform):
-    # check for false loop conversions before this
-    # This should run before flattening of nested branches.
-    for stmt in entry:
-        if isinstance(stmt, ir.IfElse):
-            if stmt.test in uniform:
-                if contains_varying_break(stmt.if_branch, uniform) or contains_varying_break(stmt.else_branch):
-                    return True
-            else:
-                # Break is only varying if it appears along a varying path. Otherwise any remaining lanes
-                # exit the loop. For elif type statements, we still have to consider that only some may exit.
-                if contains_any_break(stmt.if_branch) or contains_any_break(stmt.else_branch):
-                    return True
-    return False
-
-
-def loop_body_may_exit_func(entry):
-    if isinstance(entry, (ir.ForLoop, ir.WhileLoop)):
-        entry = entry.body
-    for stmt in walk(entry):
-        if isinstance(stmt, ir.Return):
-            return True
-    return False
-
-
-def can_convert_break_to_noop(entry):
-    if isinstance(entry, (ir.ForLoop, ir.WhileLoop)):
-        entry = entry.body
-    for stmt in walk_branches(entry):
-        if isinstance(stmt, (ir.ForLoop, ir.WhileLoop)):
-            continue
-        if isinstance(ir.Assign):
-            if isinstance(stmt.value, (ir.BinOp, ir.UnaryOp)):
-                if isinstance(stmts.target, ir.Subscript):
-                    # If this is marked in-place, or the same subscript appears as a sub-expression
-                    # of the right hand side, and the left hand side refers to a varying array reference,
-                    # then we can convert false predicates to identity ops.
-                    pass
-            else:
-                return False
+@fold_numeric_expression.register
+def _(expr: ir.Constant):
+    return expr
 
 
 def expand_inplace_op(expr):
@@ -282,15 +176,6 @@ def try_replace_unary_binary(expr):
     return expr
 
 
-def make_noop(expr, predicate):
-    if isinstance(expr, ir.BinOp):
-        if expr.in_place:
-            expr = expand_inplace_op(expr)
-
-    elif isinstance(expr, ir.UnaryOp):
-        op = expr.op
-
-
 def make_constant_like(expr, types, value):
     t = types[expr]
     if t == int:  # Todo: this won't capture all, maybe an issubclass?
@@ -300,25 +185,6 @@ def make_constant_like(expr, types, value):
     else:
         raise TypeError
 
-# Todo: These stubs will replace varying to noop, based on other work.from
-#       We have to distinguish ternary assign for cases where the op is not nested
-#       and one of the resulting assignments is equivalent to an identity operation.
-
-
-def simplify_ternary_assign(assign, symbols, predicate, types):
-    """
-    Simplify an assignment statement where the right hand side is a ternary operation.
-
-    """
-    pass
-
-
-def simplify_ternary_op(expr, symbols, predicate, types):
-    """
-    Simplify a ternary op that may not be directly assigned.
-    """
-    pass
-
 
 def discard_unbounded(iterables):
     bounded = {it for it in iterables if not (isinstance(it, ir.Counter) and it.stop is None)}
@@ -326,33 +192,39 @@ def discard_unbounded(iterables):
 
 
 @singledispatch
-def make_counter(iterable, syms):
-    raise NotImplementedError
+def make_iter_counter(iterable, syms):
+    msg = f"No method to make counter for {iterable}."
+    raise NotImplementedError(msg)
 
 
-@make_counter.register
+@make_iter_counter.register
 def _(iterable: ir.Subscript, syms):
-    pass
+    value = iterable.value
+    array_type = syms.lookup(value)
+    leading_dim = array_type.dims[0]
+    if isinstance(iterable.slice, ir.Slice):
+        start = iterable.slice.start
+        stop = iterable.slice.stop
+        step = iterable.slice.step
+        if stop is None:
+            stop_expr = leading_dim
+        else:
+            stop_expr = ir.Min((iterable.slice.stop, leading_dim))
+    else:
+        pass
+    array_type = syms.lookup(value)
 
 
-@make_counter.register
+@make_iter_counter.register
+def _(iterable: ArrayType):
+    return ir.Counter(ir.IntNode(0), iterable.dims[0], ir.IntNode(1))
+
+
+@make_iter_counter.register
 def _(iterable: ir.NameRef, syms):
-    pass
-
-
-@make_counter.register
-def _(iterable: ArrayInput):
-    pass
-
-
-@make_counter.register
-def _(iterable: ir.ArrayRef):
-    pass
-
-
-@make_counter.register
-def _(iterable: ir.ViewRef):
-    pass
+    array_type = syms.lookup(iterable)
+    counter = make_iter_counter(array_type)
+    return counter
 
 
 def make_loop_counters(iterables, syms):
@@ -387,39 +259,6 @@ def make_loop_counters(iterables, syms):
     return bounds
 
 
-def numeric_max_iter_count(bound):
-    """
-    Find max iteration count for an ir.Counter object with purely numeric parameters
-
-    """
-    assert (isinstance(bound.start, ir.IntNode))
-    assert (isinstance(bound.stop, ir.IntNode))
-    assert (isinstance(bound.step, ir.IntNode))
-    start = bound.start.value
-    stop = bound.stop.value
-    step = bound.step.value
-    if step == 0:
-        raise ValueError
-    elif stop <= start:
-        if step > 0:
-            return 0
-        else:
-            interval = start - stop
-            step_mag = abs(step)
-            count = interval / step_mag
-            if interval % step_mag:
-                count += 1
-    else:
-        if step < 0:
-            # malformed expression, counts backwards away from stop
-            raise ValueError
-        interval = stop - start
-        count = interval / step
-        if interval % step:
-            count += 1
-    return count
-
-
 def combine_numeric_checks(bounds: typing.List[ir.Counter]):
     numeric = {b for b in bounds if all(isinstance(param, ir.IntNode) for param in b.subexprs)}
     # Check for unbounded
@@ -442,87 +281,6 @@ def make_min_sliced_len_expr(slices, leading_dim_expr):
         b = leading_dim_expr if (s.stop is None or s.start == ir.IntNode(0)) else ir.BinOp(s.stop, s.start, "-")
         bound = ir.IfExpr(ir.BinOp(bound, b, "<"), bound, b)
     return bound
-
-
-def make_min_integer_expr(exprs):
-    if not exprs:
-        raise ValueError
-    params = set()
-    constants = set()
-    for expr in exprs:
-        if expr.constant:
-            constants.add(expr)
-        else:
-            params.add(expr)
-    if constants:
-        assert all(isinstance(c, ir.IntNode) for c in constants)
-        min_value = min(c.value for c in constants)
-        params.add(ir.IntNode(c))
-    if len(params) == 1:
-        min_expr = params.pop()
-    else:
-        min_expr = ir.Min(tuple(params))
-    return min_expr
-
-
-def make_max_integer_expr(exprs):
-    if not exprs:
-        raise ValueError
-    params = set()
-    constants = set()
-    for expr in exprs:
-        if expr.constant:
-            constants.add(expr)
-        else:
-            params.add(expr)
-    if constants:
-        assert all(isinstance(c, ir.IntNode) for c in constants)
-        max_value = max(c.value for c in constants)
-        params.add(ir.IntNode(c))
-    if len(params) == 1:
-        max_expr = params.pop()
-    else:
-        max_expr = ir.Max(tuple(params))
-    return max_expr
-
-
-def uniform_counter_params(counters):
-    if not counters:
-        raise ValueError("No counters were provided")
-    counters_iter = iter(counters)
-    first_counter = next(counters_iter)
-    first_start = first_counter.start
-    first_top = first_bound.stop
-    first_step = first_bound.step
-    uniform_start = True
-    uniform_stop = True
-    uniform_step = True
-    for counter in counters_iter:
-        uniform_start &= (first_start == counter.start)
-        uniform_stop &= (first_stop == counter.stop)
-        uniform_step &= (first_step == counter.step)
-    return uniform_start, uniform_stop, uniform_step
-
-
-def group_by_start_stop(counters):
-    grouped = defaultdict(set)
-    for counter in counters:
-        grouped[(counter.start, counter.stop)].add(counter)
-    return grouped
-
-
-def group_by_start_step(counters):
-    grouped = defaultdict(set)
-    for counter in counters:
-        grouped[(counter.start, counter.step)].add(counter)
-    return grouped
-
-
-def group_by_stop_step(counters):
-    grouped = defaultdict(set)
-    for counter in counters:
-        grouped[(counter.stop, counter.step)].add(counter)
-    return grouped
 
 
 def make_explicit_iter_count(counter):
@@ -554,50 +312,28 @@ def merge_loop_counters(counters, syms, index_name):
     """
 
     # enumerate constructs lower to unbounded counters
-    bounded = {c for c in counters if c.stop is not None}
-    reduced_bounds = combine_numeric_checks(bounded)
-    # optimize for the case where we have a single delinearized step size
-    if len(reduced_bounds) == 1:
-        # uniform parameters
-        intervals = reduced_bounds
-    else:
-        by_start_stop = group_by_start_stop(reduced_bounds)
-        by_start_step = group_by_start_step(reduced_bounds)
-        by_stop_step = group_by_stop_step(reduced_bounds)
+    bounds = {c for c in counters if c.stop is not None}
+    if len(bounds) == 1:
+        counter, = bounds
+        return counter
 
-        start_stop_count = len(by_start_stop)
-        start_step_count = len(by_start_step)
-        stop_step_count = len(by_stop_step)
-        min_count = min(start_stop_count, start_step_count, stop_step_count)
-        # Here we're optimizing based on step > 0. Counters pertaining to negative
-        # items should be converted for simplicity. It's not possible to do these things
-        # efficiently if any array could be iterate forward or backwards on any call.
-        if start_stop_count == min_count:
-            intervals = []
-            for (start, stop), group in by_start_stop.items():
-                step = make_max_expr((g.step for g in group))
-                intervals.append(ir.Counter(start, stop, step))
-        elif start_step_count == min_count:
-            intervals = []
-            for (start, step), group in by_start_step.items():
-                stop = make_min_integer_expr((g.stop for g in group))
-                intervals.append(ir.Counter(start, stop, step))
-        elif stop_step_count == min_count:
-            intervals = []
-            for (stop, step), group in by_stop_step.items():
-                start = make_max_integer_expr((g.start for g in group))
-                intervals.append(ir.Counter(start, stop, step))
-        iter_counts = []
-        for interval in intervals:
-            on_false = ir.BinOp(interval.stop, interval.start, "-")
-            # avoid cost of integer division
-            test = ir.BinOp(on_false, interval.step, "&")
-            on_true = ir.BinOp(on_false, ir.IntNode(1), "+")
-            iter_counts.append(ir.IfExpr(test, on_true, on_false))
-        if len(iter_counts) == 1:
-            counter = iter_counts.pop()
-        else:
-            counter = ir.Counter(ir.IntNode(0), ir.Min(tuple(it for it in iter_counts)), ir.IntNode(1))
+    diffs = defaultdict(set)
+    for b in bounds:
+        start = b.start
+        stop = b.stop
+        step = b.step
+        if start.constant and stop.constant:
+            pass
+        diffs[step].add(ir.BinOp(b.stop, b.start, "-"))
+
+    for step, intervals in diffs.items():
+        pass
+
+    # for now, just declare this as min
+    # for bound in bounds:
+    #    if
+
+    # optimize for the case where we have a single delinearized step size
 
     return counter
 
@@ -627,6 +363,7 @@ def _(base: ir.NameRef, syms):
     # this is delinearized, so not a direct access func
     counter = ir.Counter(ir.IntNode(0), leading, ir.IntNode(1))
     return counter
+
 
 @make_counter.register
 def _(base: ir.Subscript, syms):

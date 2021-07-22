@@ -7,25 +7,32 @@ import ir
 
 
 @dataclass(frozen=True)
-class ScalarType:
-    """
-    Basic numeric type.
-    This uses boolean as a flag to allow declaration of fixed width typed predicates.
-
-    Note: bitwidth is required. This presents an issue with initializations of the form "value = 0" or similar.
-    Since they're commonly assigned this way for both integer and floating point values, we should just assume
-    these do not add numeric type constraints and initially record only the assignment.
-
-    """
-    integral: bool
-    boolean: bool
+class IntType:
     bitwidth: int
     is_array: typing.ClassVar[bool] = False
-    is_view: typing.ClassVar[bool] = False
+    is_integral: typing.ClassVar[bool] = True
 
 
 @dataclass(frozen=True)
-class ArrayInput:
+class FloatType:
+    bitwidth: int
+    is_array: typing.ClassVar[bool] = False
+    is_integral: typing.ClassVar[bool] = False
+
+
+# unfortunately this has to be tracked for lowering to C, where
+# intrinsics must sometimes explicitly cast a predicate.
+
+@dataclass(frozen=True)
+class PredicateType:
+    bitwidth: int
+    is_array: typing.ClassVar[bool] = False
+    # Treat predicates as integral by default, since they may be subjected to bit manipulation.
+    is_integral: typing.ClassVar[bool] = True
+
+
+@dataclass(frozen=True)
+class ArrayType:
     """
     Array type descriptor.
 
@@ -35,8 +42,10 @@ class ArrayInput:
 
     """
     dims: typing.Tuple[typing.Union[str, int, ir.NameRef, ir.IntNode], ...]
-    dtype: typing.Union[type, ScalarType]
+    dtype: typing.Union[type, IntType, FloatType, PredicateType]
     stride: typing.Optional[typing.Union[int, ir.IntNode]] = None  # inter procedural stride, used for packeting
+    is_array: typing.ClassVar[bool] = False
+    is_view: typing.ClassVar[bool] = False
 
     @property
     def ndims(self):
@@ -54,8 +63,10 @@ class ViewType:
 
     """
 
-    base: typing.Union[ArrayInput, ViewType]
+    base: typing.Union[ArrayType, ViewType]
     subscript: ir.Slice
+    is_array: typing.ClassVar[bool] = False
+    is_view: typing.ClassVar[bool] = True
 
     @property
     def dtype(self):
@@ -64,6 +75,9 @@ class ViewType:
     @property
     def stride(self):
         return self.base.stride
+
+
+
 
 
 # This could be part of the symbol table, since it requires internal access anyway.

@@ -2,8 +2,8 @@ import os.path
 
 from ASTTransform import build_module_ir
 from Canonicalize import RemoveContinues, MergePaths
-from folding import fold_constant_expressions
 from reachingcheck import ReachingCheck
+from printing import printtree
 
 
 def run_tree_pipeline(pth, types):
@@ -16,13 +16,24 @@ def run_tree_pipeline(pth, types):
     filename = os.path.basename(pth)
     mod = build_module_ir(r, filename, types)
     repl = []
+    P = printtree()
     for func in mod.funcs:
-        func = merge_paths(func)
-        func = fold_constant_expressions(func)
-        func = merge_paths(func)
-        func = fold_constant_expressions(func)
-        func = remove_continues(func)
-        repl.append(func)
+        P(func)
+        print("\n\n")
+        # func = merge_paths(func)
+        # P(func)
+        # print("\n\n")
+        # func = fold_constant_expressions(func)
+        # P(func)
+        # print("\n\n")
+        # func = merge_paths(func)
+        # P(func)
+        # print("\n\n")
+        # func = fold_constant_expressions(func)
+        # P(func)
+        # print("\n\n")
+        # func = remove_continues(func)
+        # repl.append(func)
 
     mod.funcs = repl
     unbound = []
