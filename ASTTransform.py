@@ -356,7 +356,7 @@ class TreeBuilder(ast.NodeVisitor):
             # make a unique loop index name, which cannot escape the current scope
             if prefix is None:
                 prefix = "i"
-            loop_index = self.symbols.add_var(prefix, self.symbols.default_int, is_added=True)
+            loop_index = self.symbols.add_var(prefix, self.symbols.default_int, added=True)
             loop_counter = make_loop_interval(targets, iterables, self.symbols, loop_index)
 
             for stmt in node.body:

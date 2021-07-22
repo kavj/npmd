@@ -19,6 +19,33 @@ reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
 internal_scalar_type = (ir.IntType, ir.FloatType, ir.PredicateType)
 
 
+def wrap_name(name):
+    if isinstance(name, ir.NameRef):
+        return name
+    elif isinstance(name, str):
+        return ir.NameRef(name)
+    else:
+        msg = f"{name} is not a valid key for variable type lookup."
+        raise TypeError(msg)
+
+
+def extract_name(name):
+    if not isinstance(name, (str, ir.NameRef)):
+        msg = f"Expected a variable name, received type {type(name)}."
+        raise TypeError(msg)
+    return name.name if isinstance(name, ir.NameRef) else name
+
+
+def find_subscripted_dim_reduction(ref):
+    if isinstance(ref, ir.NameRef):
+        return 0
+    elif isinstance(ref, ir.Subscript):
+        return 0 if isinstance(ref.slice, ir.Slice) else 1
+    else:
+        msg = "{ref} does not represent array view creation."
+        raise TypeError(msg)
+
+
 def wrap_constant(value):
     if isinstance(value, ir.Constant):
         return value
@@ -212,19 +239,19 @@ class symbol:
     def __init__(self, name, type_, make_unique):
         self.name = name
         self.type_ = type_
-        self.unique = make_unique
+        self.added = make_unique
 
     def __eq__(self, other):
         assert isinstance(other, symbol)
         return (self.name == other.name
                 and self.type_ == other.type_
-                and self.unique == other.unique)
+                and self.added == other.added)
 
     def __ne__(self, other):
         assert isinstance(other, symbol)
         return (self.name != other.name
                 or self.type_ != other.type_
-                or self.unique != other.unique)
+                or self.added != other.added)
 
     def __hash__(self):
         return hash(self.name)
@@ -286,30 +313,21 @@ class symboltable:
         self.type_builder = type_builder
         self.prefixes = {}  # prefix for adding enumerated variable names
 
-    def wrap_name(self, name):
-        if isinstance(name, ir.NameRef):
-            return name
-        elif isinstance(name, str):
-            return ir.NameRef(name)
-        else:
-            msg = f"{name} is not a valid key for variable type lookup."
-            raise TypeError(msg)
-
     def declares(self, name):
-        name = self.wrap_name(name)
+        name = wrap_name(name)
         return name in self.symbols
 
     def lookup(self, name):
-        name = self.wrap_name(name)
+        name = wrap_name(name)
         sym = self.symbols.get(name)
         if sym is None:
             msg = f"{name} is not a registered variable name."
             raise KeyError(msg)
         return sym
 
-    def is_added_name(self, name):
-        sym = self.lookup(name)
-        return name.unique
+    def is_added(self, name):
+        symbol = self.lookup(name)
+        return symbol.unique
 
     @property
     def default_int(self):
@@ -337,8 +355,8 @@ class symboltable:
         existing = self.lookup(ref)
         return existing == value
 
-    def make_symbol(self, name, type_, is_added):
-        name = self.wrap_name(name)
+    def make_symbol(self, name, type_, added):
+        name = wrap_name(name)
         if self.declares(name):
             if not self.matches(name, type_):
                 existing = self.lookup(name)
@@ -346,12 +364,11 @@ class symboltable:
                       f"{type_}."
                 raise KeyError(msg)
         else:
-            sym = symbol(name, type_, is_added)
+            sym = symbol(name, type_, added)
             self.symbols[name] = sym
 
     def make_unique_name(self, prefix):
-        if isinstance(prefix, ir.NameRef):
-            prefix = prefix.name
+        prefix = extract_name(prefix)
         if self.declares(prefix):
             gen = self._get_num_generator(prefix)
             name = f"{prefix}_{next(gen)}"
@@ -367,22 +384,26 @@ class symboltable:
     # In the case of is_added=False, this is the original name. Otherwise it
     # may be a unique variable name that instantiates some renaming or implementation binding.
 
-    def add_var(self, name, type_, is_added):
+    def add_var(self, name, type_, added):
+        """
+
+        """
         # run type check by default, to avoid internal array types
         # with Python or numpy types as parameters.
         type_ = self.type_builder.get_internal_type(type_)
-        if is_added:
-            name = self.make_unique_name(prefix=name)
-        else:
-            name = wrap_array_parameter(name)
-            if self.declares(name):
-                msg = f"Duplicate symbol declaration for variabl name '{name}'."
-                raise ValueError(msg)
-        self.make_symbol(name, type_, is_added)
+        name = wrap_array_parameter(name)
+        if added:
+            name = self.make_unique_name(name)
+        elif self.declares(name):
+            msg = f"Duplicate symbol declaration for variabl name '{name}'."
+            raise ValueError(msg)
+        type_ = self.type_builder.get_internal_type(type_)
+        self.make_symbol(name, type_, added)
+        # self.make_symbol(name, type_, is)
         return name
 
     @singledispatchmethod
-    def _get_view_type(self, ref, transpose, is_added):
+    def _get_view_type(self, ref, transpose, added):
         raise NotImplementedError
 
     @_get_view_type.register
@@ -428,6 +449,7 @@ class symboltable:
                 msg = f"Floating point types are not supported as part of a subscript expression. Encountered " \
                       f"{str(subexpr)}"
                 raise ValueError(msg)
+
         dims = base.dims
 
 
@@ -458,7 +480,7 @@ def symbol_table_from_func(func, type_map, type_builder, filename):
         raise ValueError(msg)
     table = symboltable(type_builder)
     for name, type_ in type_map.items():
-        table.add_var(name, type_, is_added=False)
+        table.add_var(name, type_, added=False)
     return table
 
 

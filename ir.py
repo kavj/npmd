@@ -8,7 +8,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
 
-import ir
 
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
 inplace_ops = frozenset({"+=", "-=", "*=", "/=", "//=", "%=", "**=", "<<=", ">>=", "|=", "^=", "&=", "@="})
