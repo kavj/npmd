@@ -36,14 +36,6 @@ class prettystringify:
         return node.name
 
     @visit.register
-    def _(self, node: ir.ShapeRef):
-        if node.dim is None:
-            return self.visit(node.array)
-        else:
-            arr = self.visit(node.array)
-            return f"{arr}.shape[{self.visit(node.dim)}]"
-
-    @visit.register
     def _(self, node: ir.Min):
         args = ", ".join(self.visit(arg) for arg in node.subexprs)
         return f"min({args})"

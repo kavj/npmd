@@ -436,14 +436,6 @@ def ZipBuilder(node: ir.Call):
     return ir.Zip(tuple(arg for arg in node.args))
 
 
-def LenBuilder(mapping):
-    """
-    Stub to merge len() and .shape
-
-    """
-    return ir.ShapeRef(mapping["obj"], ir.IntNode(0))
-
-
 def RangeBuilder(node: ir.Call):
     """
     Range is a special case and handled separately from other call signatures,
@@ -489,11 +481,12 @@ builders = {"enumerate": CallSpecialize(name="enumerate",
                                    defaults={},
                                    allows_keywords=False),
 
-            "len": CallSpecialize(name="len",
-                                  args=("obj",),
-                                  repl=LenBuilder,
-                                  defaults={},
-                                  allows_keywords=False),
+            # Todo: orphaned
+            # "len": CallSpecialize(name="len",
+            #                      args=("obj",),
+            #                      repl=LenBuilder,
+            #                      defaults={},
+            #                      allows_keywords=False),
 
             "range": RangeBuilder,
 

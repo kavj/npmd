@@ -251,9 +251,7 @@ class TreeBuilder(ast.NodeVisitor):
 
     def visit_Attribute(self, node: ast.Attribute) -> ir.AttributeRef:
         value = self.visit(node.value)
-        if node.attr == "shape":
-            value = ir.ShapeRef(value)
-        elif isinstance(value, ir.AttributeRef):
+        if isinstance(value, ir.AttributeRef):
             value = ir.AttributeRef(value.value, value.attr + node.attr)
         else:
             value = ir.AttributeRef(value, node.attr)

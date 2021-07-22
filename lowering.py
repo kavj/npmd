@@ -135,28 +135,62 @@ def wrap_constant(value):
 
 
 @singledispatch
-def fold_numeric_expression(expr):
+def fold_if_numeric(expr):
     msg = f"fold expression not implemented for "
     raise NotImplementedError
 
 
-@fold_numeric_expression.register
+@fold_if_numeric.register
+def _(expr: ir.Constant):
+    return expr
+
+
+@fold_if_numeric.register
+def _(expr: ir.NameRef):
+    return expr
+
+
+@fold_if_numeric.register
+def _(expr: ir.Slice):
+    start = fold_if_numeric(expr.start)
+    stop = expr.stop
+    if stop is not None:
+        stop = fold_if_numeric(stop)
+    step = fold_if_numeric(expr.step)
+    slice_ = ir.Slice(start, stop, step)
+    return slice_
+
+
+@fold_if_numeric.register
 def _(expr: ir.BinOp):
-    oper = binops[expr.op]
-    res = oper(expr.left, expr.right)
+    left = fold_if_numeric(expr.left)
+    right = fold_if_numeric(expr.right)
+    if left.constant and right.constant:
+        oper = binops[expr.op]
+        res = oper(left.value, right.value)
+        res = wrap_constant(res)
+    else:
+        res = ir.BinOp(left, right, expr.op)
     return res
 
 
-@fold_numeric_expression.register
+@fold_if_numeric.register
 def _(expr: ir.UnaryOp):
     value = try_fold_expression(expr.value)
     if value.constant:
-        pass
+        oper = unaryops[expr.op]
+        repl = wrap_constant(oper(value))
+    else:
+        repl = ir.UnaryOp(value, expr.op)
+    return repl
 
 
-@fold_numeric_expression.register
-def _(expr: ir.Constant):
-    return expr
+@fold_if_numeric.register
+def _(expr: ir.Subscript):
+    value = expr.value
+    slice_ = fold_if_numeric(expr.slice)
+    repl = ir.Subscript(value, slice_)
+    return repl
 
 
 def expand_inplace_op(expr):
@@ -176,16 +210,6 @@ def try_replace_unary_binary(expr):
     return expr
 
 
-def make_constant_like(expr, types, value):
-    t = types[expr]
-    if t == int:  # Todo: this won't capture all, maybe an issubclass?
-        value = ir.IntNode(value)
-    elif t == float:
-        value = ir.FloatNode(value)
-    else:
-        raise TypeError
-
-
 def discard_unbounded(iterables):
     bounded = {it for it in iterables if not (isinstance(it, ir.Counter) and it.stop is None)}
     return bounded
@@ -201,18 +225,21 @@ def make_iter_counter(iterable, syms):
 def _(iterable: ir.Subscript, syms):
     value = iterable.value
     array_type = syms.lookup(value)
-    leading_dim = array_type.dims[0]
-    if isinstance(iterable.slice, ir.Slice):
-        start = iterable.slice.start
-        stop = iterable.slice.stop
-        step = iterable.slice.step
-        if stop is None:
-            stop_expr = leading_dim
+    slice_ = fold_if_numeric(iterable.slice)
+    if isinstance(slice_, ir.Slice):
+        if slice_.stop is None:
+            stop = array_type.dims[0]
         else:
-            stop_expr = ir.Min((iterable.slice.stop, leading_dim))
+            stop = ir.Min(leading_dim, slice_.stop)
+        counter = ir.Counter(slice_.start, stop, slice_.step)
     else:
-        pass
-    array_type = syms.lookup(value)
+        # iterating over a single index subscript means iteration is bounded by
+        # the second dimension.
+        if array_type.ndims < 2:
+            msg = f"Cannot iterate over a scalar reference {iterable}."
+            raise ValueError(msg)
+        counter = ir.Counter(ir.IntNode(0), array_type.dims[1], ir.Counter(1))
+    return counter
 
 
 @make_iter_counter.register
@@ -326,7 +353,12 @@ def merge_loop_counters(counters, syms, index_name):
             pass
         diffs[step].add(ir.BinOp(b.stop, b.start, "-"))
 
+
     for step, intervals in diffs.items():
+        for interval in intervals:
+
+            pass
+            # interval = try
         pass
 
     # for now, just declare this as min
@@ -334,6 +366,8 @@ def merge_loop_counters(counters, syms, index_name):
     #    if
 
     # optimize for the case where we have a single delinearized step size
+
+    # Check if we can
 
     return counter
 
