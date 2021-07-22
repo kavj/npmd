@@ -315,11 +315,11 @@ class TransformBase:
         return ir.AffineSeq(start, stop, step)
 
     @visit.register
-    def _(self, node: ir.IfExpr):
+    def _(self, node: ir.Ternary):
         test = self.visit(node.test)
         if_expr = self.visit(node.if_expr)
         else_expr = self.visit(node.else_expr)
-        repl = ir.IfExpr(test, if_expr, else_expr)
+        repl = ir.Ternary(test, if_expr, else_expr)
         return repl
 
     @visit.register

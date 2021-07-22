@@ -306,7 +306,7 @@ def make_min_sliced_len_expr(slices, leading_dim_expr):
     bound = leading_dim_expr if (s.stop is None or s.start == ir.IntNode(0)) else ir.BinOp(s.stop, s.start, "-")
     for s in slices[1:]:
         b = leading_dim_expr if (s.stop is None or s.start == ir.IntNode(0)) else ir.BinOp(s.stop, s.start, "-")
-        bound = ir.IfExpr(ir.BinOp(bound, b, "<"), bound, b)
+        bound = ir.Ternary(ir.BinOp(bound, b, "<"), bound, b)
     return bound
 
 
@@ -320,7 +320,7 @@ def make_explicit_iter_count(counter):
         # avoid integer division
         test = ir.BinOp(interval, counter.step, "&")
         on_true = ir.BinOp(on_false, ir.IntNode(1), "+")
-        count = ir.IfExpr(test, on_true, on_false)
+        count = ir.Ternary(test, on_true, on_false)
     return count
 
 

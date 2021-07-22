@@ -221,11 +221,11 @@ class TreeBuilder(ast.NodeVisitor):
         func = replace_builtin_call(call_)
         return func
 
-    def visit_IfExp(self, node: ast.IfExp) -> ir.IfExpr:
+    def visit_IfExp(self, node: ast.IfExp) -> ir.Ternary:
         test = self.visit(node.test)
         on_true = self.visit(node.body)
         on_false = self.visit(node.orelse)
-        return ir.IfExpr(test, on_true, on_false)
+        return ir.Ternary(test, on_true, on_false)
 
     def visit_Subscript(self, node: ast.Subscript) -> ir.Subscript:
         target = self.visit(node.value)

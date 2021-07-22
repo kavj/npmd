@@ -50,7 +50,7 @@ class prettystringify:
             return f"{target} = {value}"
 
     @visit.register
-    def _(self, node: ir.IfExpr):
+    def _(self, node: ir.Ternary):
         s = f"{self.visit(node.if_expr)} if {self.visit(node.test)}"
         if node.else_expr is not None:
             s += f" {self.visit(node.else_expr)}"

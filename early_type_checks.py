@@ -140,7 +140,7 @@ class EarlyTypeVerifier(VisitorBase):
         return output_type
 
     @visit.register
-    def _(self, node: ir.IfExpr):
+    def _(self, node: ir.Ternary):
         test_type = self.visit(node.test)
         if test_type is None:
             return

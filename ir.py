@@ -400,7 +400,7 @@ class AffineSeq(ValueRef):
 
 
 @dataclass(frozen=True)
-class IfExpr(ValueRef):
+class Ternary(ValueRef):
     """
     A Python if expression.
     

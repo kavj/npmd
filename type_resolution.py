@@ -359,7 +359,7 @@ class TypeChecker(VisitorBase):
         self.visit(node.else_branch)
 
     @visit.register
-    def _(self, node: ir.IfExpr):
+    def _(self, node: ir.Ternary):
         self.visit(node.test)
         t = self.lookup_type(node.test)
         if isinstance(t, ir.ArrayRef):
