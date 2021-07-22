@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
 
+import ir
 
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
 inplace_ops = frozenset({"+=", "-=", "*=", "/=", "//=", "%=", "**=", "<<=", ">>=", "|=", "^=", "&=", "@="})
@@ -28,6 +29,31 @@ class Position:
 
 
 clscond = typing.ClassVar[bool]
+
+
+@dataclass(frozen=True)
+class IntType:
+    bitwidth: int
+    is_array: typing.ClassVar[bool] = False
+    is_integral: typing.ClassVar[bool] = True
+
+
+@dataclass(frozen=True)
+class FloatType:
+    bitwidth: int
+    is_array: typing.ClassVar[bool] = False
+    is_integral: typing.ClassVar[bool] = False
+
+
+# unfortunately this has to be tracked for lowering to C, where
+# intrinsics must sometimes explicitly cast a predicate.
+
+@dataclass(frozen=True)
+class PredicateType:
+    bitwidth: int
+    is_array: typing.ClassVar[bool] = False
+    # Treat predicates as integral by default, since they may be subjected to bit manipulation.
+    is_integral: typing.ClassVar[bool] = True
 
 
 class StmtBase:
@@ -128,9 +154,55 @@ class NameRef(ValueRef):
 
 
 @dataclass(frozen=True)
+class ArrayType:
+    """
+    Array type descriptor.
+
+    dtype: scalar type used by this array
+    dims: tuple(str or int,...)
+    stride: input stride
+
+    """
+    dims: typing.Tuple[typing.Union[str, int, NameRef, IntNode], ...]
+    dtype: typing.Union[type, IntType, FloatType, PredicateType]
+    stride: typing.Optional[typing.Union[int, IntNode]] = None  # inter procedural stride, used for packeting
+    is_array: typing.ClassVar[bool] = False
+    is_view: typing.ClassVar[bool] = False
+
+    @property
+    def ndims(self):
+        return len(self.dims)
+
+    def __post_init__(self):
+        # Zero dimensions must be treated as a scalar, not an array.
+        assert len(self.dims) > 0
+
+
+@dataclass(frozen=True)
+class ViewType:
+    """
+    This is used to defer generation of unique array parameters for a particular view.
+
+    """
+
+    base: typing.Union[ArrayType, ViewType]
+    subscript: Slice
+    is_array: typing.ClassVar[bool] = False
+    is_view: typing.ClassVar[bool] = True
+
+    @property
+    def dtype(self):
+        return self.base.dtype
+
+    @property
+    def stride(self):
+        return self.base.stride
+
+
+@dataclass(frozen=True)
 class ArrayRef(ValueRef):
-    dims: typing.Tuple[typing.Union[int, str], ...]
-    dtype: type
+    name: NameRef
+    array_type: ArrayType
     constant: clscond = False
 
     @property
@@ -139,7 +211,7 @@ class ArrayRef(ValueRef):
 
     @property
     def ndims(self):
-        return len(self.dims)
+        return self.array_type.ndims
 
     @property
     def subexprs(self):
@@ -148,8 +220,10 @@ class ArrayRef(ValueRef):
 
 @dataclass(frozen=True)
 class ViewRef:
+    name: NameRef
     derived_from: typing.Union[ArrayRef, ViewRef]
     subscript: typing.Optional[typing.Union[IntNode, Slice, NameRef, BinOp, UnaryOp]]
+    array_type: ViewType
     transposed: bool = False
     constant: clscond = False
 
@@ -170,19 +244,10 @@ class ViewRef:
 
     @cached_property
     def ndims(self):
-        d = self.derived_from
-        seen = {self}
-        reduce_by = 1 if isinstance(self.subscript, (NameRef, IntNode)) else 0
-        while isinstance(d, ViewRef):
-            if d in seen:
-                raise ValueError("contains view cycles")
-            # this may need work
-            if isinstance(d.subscript, (NameRef, IntNode)):
-                reduce_by += 1
-            seen.add(d)
-            d = d.derived_from
-        # negative if the array is over-subscripted
-        return d.ndims - reduce_by
+        d = self.derived_from.ndims
+        if not isinstance(self.subscript, Slice):
+            d -= 1
+        return d
 
     @cached_property
     def name(self):

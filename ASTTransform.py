@@ -9,7 +9,6 @@ import ir
 from symbols import create_symbol_tables
 from Canonicalize import replace_builtin_call
 from lowering import make_loop_interval
-from visitor import VisitorBase
 
 binaryops = {ast.Add: "+",
              ast.Sub: "-",
@@ -103,25 +102,46 @@ def extract_positional_info(node):
                        col_end=node.end_col_offset)
 
 
+def extract_loop_indexer(node: ast.For):
+    """
+    Find cases of
+
+    for index_name, values in enumerate(...):
+        ...
+
+    Here we can reuse index_name as a loop index prefix, regardless
+    of clobbering.
+
+    """
+
+    target = node.target
+    iterable = node.iter
+    if isinstance(target, ast.Name) and isinstance(iterable, ast.Call):
+        if isinstance(iterable.func, ast.Name):
+            if iterable.func.id == "enumerate":
+                return target.id
+
+
 class TreeBuilder(ast.NodeVisitor):
 
     def __init__(self):
         self.body = None
+        self.line = None
         self.entry = None
         self.enclosing_loop = None
-        self.syms = None
+        self.symbols = None
 
-    def __call__(self, entry: ast.FunctionDef, syms):
+    def __call__(self, entry: ast.FunctionDef, symbols):
         self.enclosing_loop = None
         self.entry = entry
-        self.syms = syms
+        self.symbols = symbols
         self.body = []
         func = self.visit(entry)
         assert self.enclosing_loop is None
         return func
 
     @contextmanager
-    def loop_context(self, header):
+    def loop_region(self, header):
         stashed = self.body
         enclosing = self.enclosing_loop
         self.body = []
@@ -131,11 +151,15 @@ class TreeBuilder(ast.NodeVisitor):
         self.body = stashed
 
     @contextmanager
-    def flow_context(self):
+    def flow_region(self):
         stashed = self.body
         self.body = []
         yield
         self.body = stashed
+
+    def set_line(self, line):
+        assert isinstance(line, int)
+        self.line = line
 
     def visit_Attribute(self, node: ast.Attribute) -> ir.AttributeRef:
         value = self.visit(node.value)
@@ -284,11 +308,11 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_If(self, node: ast.If):
         pos = extract_positional_info(node)
         compare = self.visit(node.test)
-        with self.flow_context():
+        with self.flow_region():
             for stmt in node.body:
                 self.visit(stmt)
             on_true = self.body
-        with self.flow_context():
+        with self.flow_region():
             for stmt in node.orelse:
                 self.visit(stmt)
             on_false = self.body
@@ -303,12 +327,20 @@ class TreeBuilder(ast.NodeVisitor):
         pos = extract_positional_info(node)
         targets = []
         iterables = []
-        prefix = None
-        # If the first target unpacked corresponds to enumerate, use it as a prefix
+        prefix = extract_loop_indexer(node)
+        if prefix is None:
+            # common generic loop index
+            prefix = "i"
+        for target, iterable in unpack_iterated(target_node, iter_node, pos):
+            targets.append(target)
+            iterables.append(iterable)
+        loop_index = self.symbols.make_unique_name(prefix)
+        make_loop_interval(targets, iterables, self.symbols, loop_index)
 
-        # Construct the actual loop header, using a single induction variable.
-        with self.loop_context(node):
+        with self.loop_region(node):
             for target, iterable in unpack_iterated(target_node, iter_node, pos):
+                # map each assignment with respect to
+
                 if prefix is None and isinstance(iterable, ir.AffineSeq):
                     if iterable.stop is None:
                         # first enumerate encountered
@@ -324,8 +356,8 @@ class TreeBuilder(ast.NodeVisitor):
             # make a unique loop index name, which cannot escape the current scope
             if prefix is None:
                 prefix = "i"
-            loop_index = self.syms.add_var(prefix, self.syms.default_int, is_added=True)
-            loop_counter = make_loop_interval(targets, iterables, self.syms, loop_index)
+            loop_index = self.symbols.add_var(prefix, self.symbols.default_int, is_added=True)
+            loop_counter = make_loop_interval(targets, iterables, self.symbols, loop_index)
 
             for stmt in node.body:
                 self.visit(stmt)
@@ -340,7 +372,7 @@ class TreeBuilder(ast.NodeVisitor):
             raise ValueError("or else clause not supported for for statements")
         test = self.visit(node.test)
         pos = extract_positional_info(node)
-        with self.make_flow_region(node):
+        with self.loop_region(node):
             for stmt in node.body:
                 self.visit(stmt)
             loop = ir.WhileLoop(test, self.body, pos)

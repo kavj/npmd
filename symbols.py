@@ -13,11 +13,10 @@ from symtable import symtable
 import ir
 
 from visitor import walk_expr
-from TypeInterface import ArrayType, FloatType, IntType, PredicateType
 
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
 
-internal_scalar_type = (IntType, FloatType, PredicateType)
+internal_scalar_type = (ir.IntType, ir.FloatType, ir.PredicateType)
 
 
 def wrap_constant(value):
@@ -49,12 +48,12 @@ class TypeLookup:
         # Predicates don't really differ between integral and floating point representations,
         # but AVX intrinsics distinguish between the two, based on the operand types that generated
         # the predicate mask and how it is used.
-        self.types = {"int32": IntType(bitwidth=32),
-                      "int64": IntType(bitwidth=64),
-                      "float32": FloatType(bitwidth=32),
-                      "float64": FloatType(bitwidth=64),
-                      "pred32": PredicateType(bitwidth=32),
-                      "pred64": PredicateType(bitwidth=64),
+        self.types = {"int32": ir.IntType(bitwidth=32),
+                      "int64": ir.IntType(bitwidth=64),
+                      "float32": ir.FloatType(bitwidth=32),
+                      "float64": ir.FloatType(bitwidth=64),
+                      "pred32": ir.PredicateType(bitwidth=32),
+                      "pred64": ir.PredicateType(bitwidth=64),
                       }
 
     def lookup(self, type_):
@@ -114,12 +113,12 @@ class TypeBuilder:
     # Predicates don't really differ between integral and floating point representations,
     # but AVX intrinsics distinguish between the two, based on the operand types that generated
     # the predicate mask and how it is used.
-    _internal_types = {"int32": IntType(bitwidth=32),
-                       "int64": IntType(bitwidth=64),
-                       "float32": FloatType(bitwidth=32),
-                       "float64": FloatType(bitwidth=64),
-                       "pred32": PredicateType(bitwidth=32),
-                       "pred64": PredicateType(bitwidth=64)}
+    _internal_types = {"int32": ir.IntType(bitwidth=32),
+                       "int64": ir.IntType(bitwidth=64),
+                       "float32": ir.FloatType(bitwidth=32),
+                       "float64": ir.FloatType(bitwidth=64),
+                       "pred32": ir.PredicateType(bitwidth=32),
+                       "pred64": ir.PredicateType(bitwidth=64)}
 
     # These are only used for interface lookups, since we
     # don't distinguish numpy specific types internally.
@@ -142,7 +141,7 @@ class TypeBuilder:
     def get_internal_type(self, item):
         # is_array = isinstance(item, ArrayType)
         # is_internal_scalar_type = isinstance(item, internal_scalar_type)
-        if isinstance(item, ArrayType):
+        if isinstance(item, ir.ArrayType):
             input_scalar_type = item.dtype
             if isinstance(input_scalar_type, internal_scalar_type):
                 dtype = item.dtype
@@ -153,7 +152,7 @@ class TypeBuilder:
                 raise KeyError(msg)
             dims = tuple(wrap_array_parameter(d) for d in item.dims)
             stride = wrap_array_parameter(item.stride)
-            internal_type = ArrayType(dims, dtype, stride)
+            internal_type = ir.ArrayType(dims, dtype, stride)
         else:
             if isinstance(item, internal_scalar_type):
                 internal_type = item
@@ -232,11 +231,11 @@ class symbol:
 
     @property
     def is_array(self):
-        return isinstance(self.type_, ArrayType)
+        return isinstance(self.type_, ir.ArrayType)
 
     @property
     def is_integer(self):
-        if isinstance(self.type_, ArrayType):
+        if isinstance(self.type_, ir.ArrayType):
             return False
         return self.type_.integral
 
@@ -244,7 +243,7 @@ class symbol:
 # array creation nodes
 
 def make_numpy_call(node: ir.Call):
-    name = node.funcname
+    name = node.func
     if name == "numpy.ones":
         fill_value = ir.IntNode(1)
     elif name == "numpy.zeros":

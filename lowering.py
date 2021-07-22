@@ -8,7 +8,6 @@ from functools import singledispatch, singledispatchmethod
 import ir
 import symbols
 
-from TypeInterface import ArrayType
 from visitor import VisitorBase, walk, walk_branches
 
 
@@ -135,36 +134,36 @@ def wrap_constant(value):
 
 
 @singledispatch
-def fold_if_numeric(expr):
+def fold_if_constant(expr):
     msg = f"fold expression not implemented for "
     raise NotImplementedError
 
 
-@fold_if_numeric.register
+@fold_if_constant.register
 def _(expr: ir.Constant):
     return expr
 
 
-@fold_if_numeric.register
+@fold_if_constant.register
 def _(expr: ir.NameRef):
     return expr
 
 
-@fold_if_numeric.register
+@fold_if_constant.register
 def _(expr: ir.Slice):
-    start = fold_if_numeric(expr.start)
+    start = fold_if_constant(expr.start)
     stop = expr.stop
     if stop is not None:
-        stop = fold_if_numeric(stop)
-    step = fold_if_numeric(expr.step)
+        stop = fold_if_constant(stop)
+    step = fold_if_constant(expr.step)
     slice_ = ir.Slice(start, stop, step)
     return slice_
 
 
-@fold_if_numeric.register
+@fold_if_constant.register
 def _(expr: ir.BinOp):
-    left = fold_if_numeric(expr.left)
-    right = fold_if_numeric(expr.right)
+    left = fold_if_constant(expr.left)
+    right = fold_if_constant(expr.right)
     if left.constant and right.constant:
         oper = binops[expr.op]
         res = oper(left.value, right.value)
@@ -174,7 +173,7 @@ def _(expr: ir.BinOp):
     return res
 
 
-@fold_if_numeric.register
+@fold_if_constant.register
 def _(expr: ir.UnaryOp):
     value = try_fold_expression(expr.value)
     if value.constant:
@@ -185,10 +184,10 @@ def _(expr: ir.UnaryOp):
     return repl
 
 
-@fold_if_numeric.register
+@fold_if_constant.register
 def _(expr: ir.Subscript):
     value = expr.value
-    slice_ = fold_if_numeric(expr.slice)
+    slice_ = fold_if_constant(expr.slice)
     repl = ir.Subscript(value, slice_)
     return repl
 
@@ -216,16 +215,15 @@ def discard_unbounded(iterables):
 
 
 @singledispatch
-def make_iter_counter(iterable, syms):
+def make_affine_counter(iterable, symbols):
     msg = f"No method to make counter for {iterable}."
     raise NotImplementedError(msg)
 
 
-@make_iter_counter.register
-def _(iterable: ir.Subscript, syms):
+@make_affine_counter.register
+def _(iterable: ir.Subscript, symbols):
     value = iterable.value
-    array_type = syms.lookup(value)
-    slice_ = fold_if_numeric(iterable.slice)
+    slice_ = fold_if_constant(iterable.slice)
     if isinstance(slice_, ir.Slice):
         if slice_.stop is None:
             stop = array_type.dims[0]
@@ -235,23 +233,37 @@ def _(iterable: ir.Subscript, syms):
     else:
         # iterating over a single index subscript means iteration is bounded by
         # the second dimension.
-        if array_type.ndims < 2:
+        if symbols.lookup(value).ndims < 2:
             msg = f"Cannot iterate over a scalar reference {iterable}."
             raise ValueError(msg)
         counter = ir.AffineSeq(ir.IntNode(0), array_type.dims[1], ir.AffineSeq(1))
     return counter
 
 
-@make_iter_counter.register
-def _(iterable: ArrayType):
+@make_affine_counter.register
+def _(iterable: ir.ArrayType):
     return ir.AffineSeq(ir.IntNode(0), iterable.dims[0], ir.IntNode(1))
 
 
-@make_iter_counter.register
+@make_affine_counter.register
 def _(iterable: ir.NameRef, syms):
     array_type = syms.lookup(iterable)
-    counter = make_iter_counter(array_type)
+    counter = make_affine_counter(array_type)
     return counter
+
+
+def get_sequence_step(iterable):
+    if isinstance(iterable, ir.Subscript):
+        if isinstance(iterable.slice, ir.Slice):
+            return iterable.slice.step
+    elif isinstance(iterable, ir.AffineSeq):
+        return iterable.step
+    return ir.IntNode(1)
+
+
+def make_single_step_loop_interval(counters, step, index):
+    assigns = []
+
 
 
 def make_loop_counters(iterables, syms):
@@ -263,7 +275,10 @@ def make_loop_counters(iterables, syms):
     index into the array at each step, which should be taken by the iterator at runtime.
 
     """
-    # Make counters for access functions
+    # If we have a provably unique sequence step, we can avoid explicitly computing iteration count
+    # by taking the range max(start_value) : max(start_value) + min({end_value - start_value...})
+    # clamping each at 0. Otherwise we need to computer iteration counts.
+    unique_steps = {get_sequence_step(iterable) for iterable in iterables}
     bounded = discard_unbounded(iterables)
     bounds = set()
     for iterable in bounded:
@@ -415,10 +430,11 @@ def _(base: ir.Subscript, syms):
     return counter
 
 
-def make_loop_interval(targets, iterables, syms, loop_index):
-    counters = []
-    for target, iterable in zip(targets, iterables):
-        c = make_counter(iterable, syms)
-        counters.append(c)
+def make_loop_interval(targets, iterables, symbols, loop_index):
+    counters = {make_counter(iterable, symbols) for iterable in iterables}
+    # This has the annoying effect of dragging around the symbol table.
+    # Since we need to be able to reach an array definition along each path
+    # and array names are not meant to be reassigned, we should be passing an array
+    # reference here.
     counter = merge_loop_counters(counters, syms, loop_index)
     return counters
