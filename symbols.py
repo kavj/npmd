@@ -19,16 +19,6 @@ reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
 internal_scalar_type = (ir.IntType, ir.FloatType, ir.PredicateType)
 
 
-def wrap_name(name):
-    if isinstance(name, ir.NameRef):
-        return name
-    elif isinstance(name, str):
-        return ir.NameRef(name)
-    else:
-        msg = f"{name} is not a valid key for variable type lookup."
-        raise TypeError(msg)
-
-
 def extract_name(name):
     if not isinstance(name, (str, ir.NameRef)):
         msg = f"Expected a variable name, received type {type(name)}."
@@ -46,93 +36,48 @@ def find_subscripted_dim_reduction(ref):
         raise TypeError(msg)
 
 
-def wrap_constant(value):
-    if isinstance(value, ir.Constant):
-        return value
-    if isinstance(value, bool):
-        return ir.BoolNode(value)
-    elif isinstance(value, numbers.Integral):
-        # needed for numpy compatibility
-        return ir.IntNode(value)
-    elif isinstance(value, numbers.Real):
-        # needed for numpy compatibility
-        return ir.FloatNode(value)
-    else:
-        msg = f"{value} of type {type(value)} is not recognized as a constant."
-        raise TypeError(msg)
-
-
-class ArrayCreationInitializer:
-    def __init__(self, dims, dtype, fill_value):
-        self.dims = dims
-        self.dtype = dtype
-        self.fill_value = fill_value
-
-
-class TypeLookup:
-    def __init__(self):
-        # partly intern basic types
-        # Predicates don't really differ between integral and floating point representations,
-        # but AVX intrinsics distinguish between the two, based on the operand types that generated
-        # the predicate mask and how it is used.
-        self.types = {"int32": ir.IntType(bitwidth=32),
-                      "int64": ir.IntType(bitwidth=64),
-                      "float32": ir.FloatType(bitwidth=32),
-                      "float64": ir.FloatType(bitwidth=64),
-                      "pred32": ir.PredicateType(bitwidth=32),
-                      "pred64": ir.PredicateType(bitwidth=64),
-                      }
-
-    def lookup(self, type_):
-        t = self.types.get(type_)
-        if t is None:
-            msg = f"No internal type matches name type name {type_}."
-            raise KeyError(msg)
-        return t
-
-
 @singledispatch
-def wrap_variable_name(name):
-    msg = f"{name} cannot be used as an internal variable name. Expected a unicode string or internal name type."
-    raise TypeError(msg)
+def wrap_input(input):
+    msg = f"No method to wrap {input} of type {type(input)}."
+    raise NotImplementedError(msg)
 
 
-@wrap_variable_name.register
-def _(name: str):
-    if name in reserved_names:
-        msg = f"'{name}' is used by the Python language and may not be used as a local variable."
+@wrap_input.register
+def _(input: str):
+    if not input.isidentifier():
+        msg = f"{input} is not a valid variable name."
         raise ValueError(msg)
-    return ir.NameRef(name)
+    return ir.NameRef(input)
 
 
-@singledispatch
-def wrap_array_parameter(param):
-    if param is not None:
-        msg = f"{param} cannot be coerced to a suitable array parameter type."
-        raise TypeError(msg)
+@wrap_input.register
+def _(input: ir.NameRef):
+    return input
 
 
-# return argument if already suitable wrapped
-@wrap_array_parameter.register
-def _(param: ir.NameRef):
-    return param
+@wrap_input.register
+def _(input: ir.Constant):
+    return input
 
 
-@wrap_array_parameter.register
-def _(param: ir.IntNode):
-    return param
+@wrap_input.register
+def _(input: int):
+    return ir.IntNode(input)
 
 
-@wrap_array_parameter.register
-def _(param: str):
-    return wrap_variable_name(param)
+@wrap_input.register
+def _(input: bool):
+    return ir.BoolNode(input)
 
 
-@wrap_array_parameter.register
-def _(param: numbers.Integral):
-    # numbers.Integral catches numpy integral types
-    # which are not caught by int
-    return ir.IntNode(param)
+@wrap_input.register
+def _(input: numbers.Integral):
+    return ir.IntNode(input)
+
+
+@wrap_input.register
+def _(input: numbers.Real):
+    return ir.FloatNode(input)
 
 
 class TypeBuilder:
@@ -166,8 +111,6 @@ class TypeBuilder:
             self.lookup[int] = self._internal_types["int32"]
 
     def get_internal_type(self, item):
-        # is_array = isinstance(item, ArrayType)
-        # is_internal_scalar_type = isinstance(item, internal_scalar_type)
         if isinstance(item, ir.ArrayType):
             input_scalar_type = item.dtype
             if isinstance(input_scalar_type, internal_scalar_type):
@@ -177,8 +120,8 @@ class TypeBuilder:
             if dtype is None:
                 msg = f"Cannot map array data type {input_scalar_type} to an internal type."
                 raise KeyError(msg)
-            dims = tuple(wrap_array_parameter(d) for d in item.dims)
-            stride = wrap_array_parameter(item.stride)
+            dims = tuple(wrap_input(d) for d in item.dims)
+            stride = wrap_input(item.stride)
             internal_type = ir.ArrayType(dims, dtype, stride)
         else:
             if isinstance(item, internal_scalar_type):
@@ -292,18 +235,9 @@ def make_numpy_call(node: ir.Call):
         params[key] = value
     shape = params["shape"]
     dtype = params.get("dtype", np.float64)
-    array_init = ArrayCreationInitializer(shape, dtype, fill_value)
+    # Todo: initializer didn't match the rest of this module. Rewrite later.
+    array_init = ()
     return array_init
-
-
-def _make_reduce_dim_expr(expr, reduce_by):
-    if expr.constant:
-        value = expr.value - reduce_by
-        reduced = wrap_constant(value)
-    else:
-        reduce_by = wrap_constant(reduce_by)
-        reduced = ir.BinOp(expr, reduce_by, "-")
-    return reduced
 
 
 class symboltable:
@@ -314,11 +248,11 @@ class symboltable:
         self.prefixes = {}  # prefix for adding enumerated variable names
 
     def declares(self, name):
-        name = wrap_name(name)
+        name = wrap_input(name)
         return name in self.symbols
 
     def lookup(self, name):
-        name = wrap_name(name)
+        name = wrap_input(name)
         sym = self.symbols.get(name)
         if sym is None:
             msg = f"{name} is not a registered variable name."
@@ -356,7 +290,7 @@ class symboltable:
         return existing == value
 
     def make_symbol(self, name, type_, added):
-        name = wrap_name(name)
+        name = wrap_input(name)
         if self.declares(name):
             if not self.matches(name, type_):
                 existing = self.lookup(name)
@@ -391,7 +325,7 @@ class symboltable:
         # run type check by default, to avoid internal array types
         # with Python or numpy types as parameters.
         type_ = self.type_builder.get_internal_type(type_)
-        name = wrap_array_parameter(name)
+        name = wrap_input(name)
         if added:
             name = self.make_unique_name(name)
         elif self.declares(name):
