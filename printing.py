@@ -15,7 +15,7 @@ class prettystringify:
         return self.visit(node)
 
     def parenthesize_expr(self, node):
-        if isinstance(node, ir.Expression):
+        if isinstance(node, ir.ValueRef):
             return f"({self.visit(node)})"
         else:
             return self.visit(node)

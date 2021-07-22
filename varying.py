@@ -74,7 +74,7 @@ class MapDependentExprs(VisitorBase):
         return super().visit(node)
 
     @visit.register
-    def _(self, node: ir.Expression):
+    def _(self, node: ir.ValueRef):
         expr_deps = set()
         for subexpr in node.subexprs:
             self.visit(subexpr)

@@ -8,7 +8,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
 
-import ir
 
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
 inplace_ops = frozenset({"+=", "-=", "*=", "/=", "//=", "%=", "**=", "<<=", ">>=", "|=", "^=", "&=", "@="})
@@ -38,7 +37,7 @@ class StmtBase:
 Statement = typing.TypeVar('Statement', bound=StmtBase)
 
 
-class Expression(ABC):
+class ValueRef(ABC):
     """
     This is the start of a base class for expressions.
     
@@ -60,17 +59,20 @@ class Expression(ABC):
         return all(se.constant for se in self.subexprs)
 
 
-class Constant:
+class Constant(ValueRef):
     """
     Base class for anything that can be the target of an assignment. 
 
     """
     value: clscond = None
     constant: clscond = True
-    is_expr: clscond = False
 
     def __bool__(self):
         return operator.truth(self.value)
+
+    @property
+    def subexprs(self):
+        yield from ()
 
 
 @dataclass(frozen=True)
@@ -113,14 +115,20 @@ class StringNode(Constant):
 
 
 @dataclass(frozen=True)
-class NameRef:
+class NameRef(ValueRef):
     # variable name ref
-    name: typing.Union[str, AttributeRef]
+    name: str
     constant: clscond = False
+
+    # empty generator to avoid checking
+    # if something is an expression
+    @property
+    def subexprs(self):
+        yield from ()
 
 
 @dataclass(frozen=True)
-class ArrayRef:
+class ArrayRef(ValueRef):
     dims: typing.Tuple[typing.Union[int, str], ...]
     dtype: type
     constant: clscond = False
@@ -132,6 +140,10 @@ class ArrayRef:
     @property
     def ndims(self):
         return len(self.dims)
+
+    @property
+    def subexprs(self):
+        yield from ()
 
 
 @dataclass(frozen=True)
@@ -176,12 +188,13 @@ class ViewRef:
     def name(self):
         return self.base.name
 
-
-ValueRef = typing.TypeVar('ValueRef', Expression, Constant, NameRef, AttributeRef, ArrayRef, ViewRef)
+    @property
+    def subexprs(self):
+        yield from ()
 
 
 @dataclass(frozen=True)
-class Length(Expression):
+class Length(ValueRef):
     value: ValueRef
     constant: clscond = False
 
@@ -191,7 +204,7 @@ class Length(Expression):
 
 
 @dataclass(frozen=True)
-class Subscript(Expression):
+class Subscript(ValueRef):
     value: ValueRef
     slice: ValueRef
     constant: clscond = False
@@ -202,7 +215,7 @@ class Subscript(Expression):
         yield self.slice
 
 
-class Len(Expression):
+class Len(ValueRef):
     value: ValueRef
 
     @property
@@ -211,7 +224,7 @@ class Len(Expression):
 
 
 @dataclass(frozen=True)
-class Min(Expression):
+class Min(ValueRef):
     """
     Min iteration count over a number of counters
     """
@@ -224,7 +237,7 @@ class Min(Expression):
 
 
 @dataclass(frozen=True)
-class Max(Expression):
+class Max(ValueRef):
     """
     Max iteration count over a number of counters
     """
@@ -255,7 +268,7 @@ class Module:
 
 
 @dataclass(frozen=True)
-class Slice(Expression):
+class Slice(ValueRef):
     """
     IR representation of a slice.
 
@@ -275,7 +288,7 @@ class Slice(Expression):
 
 
 @dataclass(frozen=True)
-class Tuple(Expression):
+class Tuple(ValueRef):
     """
     High level sentinel matching a tuple.
     These cannot be directly assigned but may be unpacked as they enter scope.
@@ -312,7 +325,7 @@ Targetable = typing.TypeVar('Targetable', NameRef, Subscript, Tuple)
 
 
 @dataclass(frozen=True)
-class BinOp(Expression):
+class BinOp(ValueRef):
     left: ValueRef
     right: ValueRef
     op: str
@@ -335,7 +348,7 @@ class BinOp(Expression):
 
 
 @dataclass(frozen=True)
-class BoolOp(Expression):
+class BoolOp(ValueRef):
     """
     Boolean operation using a single logical operation and an arbitrary
     number of operands. 
@@ -358,7 +371,7 @@ class BoolOp(Expression):
 
 
 @dataclass(frozen=True)
-class Call(Expression):
+class Call(ValueRef):
     """
     An arbitrary call node. This can be replaced
     in cases where it matches an optimizable built in.
@@ -391,7 +404,7 @@ class Call(Expression):
 
 
 @dataclass(frozen=True)
-class Counter(Expression):
+class Counter(ValueRef):
     start: ValueRef
     stop: typing.Optional[ValueRef]
     step: ValueRef
@@ -409,7 +422,7 @@ class Counter(Expression):
 
 
 @dataclass(frozen=True)
-class IfExpr(Expression):
+class IfExpr(ValueRef):
     """
     A Python if expression.
     
@@ -427,7 +440,7 @@ class IfExpr(Expression):
 
 
 @dataclass(frozen=True)
-class Reversed(Expression):
+class Reversed(ValueRef):
     """
     Sentinel for a "reversed" object
 
@@ -441,7 +454,7 @@ class Reversed(Expression):
 
 
 @dataclass(frozen=True)
-class UnaryOp(Expression):
+class UnaryOp(ValueRef):
     operand: ValueRef
     op: str
 
@@ -454,7 +467,7 @@ class UnaryOp(Expression):
 
 
 @dataclass(frozen=True)
-class Zip(Expression):
+class Zip(ValueRef):
     """
     High level sentinel representing a zip object. This is the only unpackable iterator type in this IR.
     Enumerate(object) is handled by Zip(Counter, object).
@@ -555,8 +568,8 @@ class WhileLoop(StmtBase):
 # utility nodes
 
 @dataclass(frozen=True)
-class Max(Expression):
-    exprs: typing.Tuple[typing.Union[NameRef, Expression], ...]
+class Max(ValueRef):
+    exprs: typing.Tuple[typing.Union[NameRef, ValueRef], ...]
 
     def subexprs(self):
         for subexpr in self.exprs:
@@ -564,8 +577,8 @@ class Max(Expression):
 
 
 @dataclass(frozen=True)
-class Min(Expression):
-    exprs: typing.Tuple[typing.Union[NameRef, Expression], ...]
+class Min(ValueRef):
+    exprs: typing.Tuple[typing.Union[NameRef, ValueRef], ...]
 
     @property
     def subexprs(self):
@@ -597,7 +610,7 @@ class FloatType:
 
 
 @dataclass(frozen=True)
-class Cast(Expression):
+class Cast(ValueRef):
     expr: ValueRef
     as_type: type
 
@@ -616,7 +629,7 @@ class Cast(Expression):
 
 @dataclass
 class CascadeIf(StmtBase):
-    tests: typing.List[typing.Union[Constant, NameRef, Expression], ...]
+    tests: typing.List[typing.Union[Constant, NameRef, ValueRef], ...]
     if_branches: typing.List[list, ...]
     else_branch: list
 

@@ -36,7 +36,7 @@ class ReachingCheck(VisitorBase):
         return True
 
     def mark_reference(self, node, stmt=None):
-        if isinstance(node, ir.Expression):
+        if isinstance(node, ir.ValueRef):
             for e in node.subexprs:
                 self.mark_reference(e, stmt)
         elif self.may_be_unbound(node):
@@ -46,7 +46,7 @@ class ReachingCheck(VisitorBase):
             self.raw.add(node)
 
     def mark_assignment(self, target, stmt):
-        if isinstance(target, ir.Expression):
+        if isinstance(target, ir.ValueRef):
             self.mark_reference(target, stmt)
         else:
             if target in self.seen:
@@ -86,7 +86,7 @@ class ReachingCheck(VisitorBase):
         self.mark_reference(node)
 
     @visit.register
-    def _(self, node: ir.Expression):
+    def _(self, node: ir.ValueRef):
         self.mark_reference(node)
 
 
@@ -172,7 +172,7 @@ class VarScopeCheck(VisitorBase):
 
     @visit.register
     def _(self, node: ir.Assign):
-        if not isinstance(node.target, ir.Expression) and self.unseen(node.target):
+        if not isinstance(node.target, ir.ValueRef) and self.unseen(node.target):
             self.bound.add(node.target)
 
     @visit.register
@@ -190,7 +190,7 @@ class VarScopeCheck(VisitorBase):
             self.enclosing.update(self.bound)
             self.bound = set()
         target = node.target
-        if not isinstance(target, ir.Expression) and self.unseen(target):
+        if not isinstance(target, ir.ValueRef) and self.unseen(target):
             self.bound.add(target)
         self.visit(node.body)
         if node is not self.entry:
@@ -229,7 +229,7 @@ class UsedCheck(VisitorBase):
 
     @visit.register
     def _(self, node: ir.Assign):
-        if isinstance(node.target, ir.Expression):
+        if isinstance(node.target, ir.ValueRef):
             self.visit(node.target)
         self.visit(node.value)
 
@@ -241,6 +241,6 @@ class UsedCheck(VisitorBase):
     def _(self, node: ir.ForLoop):
         target = node.target
         value = node.iterable
-        if isinstance(target, ir.Expression):
+        if isinstance(target, ir.ValueRef):
             self.used.add(target)
         self.used.add(value)

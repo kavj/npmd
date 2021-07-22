@@ -25,7 +25,7 @@ def walk_expr_params(node):
     Walk an expression, yielding only sub-expressions that are not expressions themselves.
 
     """
-    if not isinstance(node, ir.Expression):
+    if not isinstance(node, ir.ValueRef):
         assert not isinstance(node, ir.StmtBase)
         yield node
     else:
@@ -37,7 +37,7 @@ def walk_expr_params(node):
                 continue
             else:
                 seen.add(expr)
-                if isinstance(expr, ir.Expression):
+                if isinstance(expr, ir.ValueRef):
                     queued.extend(expr.subexprs)
                 else:
                     yield expr
@@ -51,7 +51,7 @@ def walk_expr(node):
     bind to names.
     """
 
-    if not isinstance(node, ir.Expression):
+    if not isinstance(node, ir.ValueRef):
         assert not isinstance(node, ir.StmtBase)
         yield node
     else:
@@ -66,7 +66,7 @@ def walk_expr(node):
                     yield expr
             else:
                 seen.add(expr)
-                if isinstance(expr, ir.Expression):
+                if isinstance(expr, ir.ValueRef):
                     queued.append(expr)
                     queued.extend(expr.subexprs)
                 else:
@@ -171,7 +171,7 @@ class VisitorBase:
         pass
 
     @visit.register
-    def _(self, node: ir.Expression):
+    def _(self, node: ir.ValueRef):
         for subexpr in node.subexprs:
             self.visit(subexpr)
 
@@ -267,7 +267,7 @@ class TransformBase:
         return ir.Return(value, node.pos)
 
     @visit.register
-    def _(self, node: ir.Expression):
+    def _(self, node: ir.ValueRef):
         return node
 
     @visit.register

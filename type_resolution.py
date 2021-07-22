@@ -284,7 +284,7 @@ class TypeChecker(VisitorBase):
     @visit.register
     def _(self, node: ir.Assign):
         self.visit(node.value)
-        if isinstance(node.target, ir.Expression):
+        if isinstance(node.target, ir.ValueRef):
             self.visit(node.target)
         else:
             assigned_type = self.visit(node.target)

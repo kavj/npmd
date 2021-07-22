@@ -320,7 +320,7 @@ class TreeBuilder(ast.NodeVisitor):
             compares.append(ir.BinOp(left, right, op))
         return ir.BoolOp(tuple(compares), "and")
 
-    def visit_Call(self, node: ast.Call) -> typing.Union[ir.Expression, ir.NameRef]:
+    def visit_Call(self, node: ast.Call) -> typing.Union[ir.ValueRef, ir.NameRef]:
         if isinstance(node.func, ast.Name):
             funcname = node.func.id
         else:
@@ -345,7 +345,7 @@ class TreeBuilder(ast.NodeVisitor):
         value = ir.Subscript(target, s)
         return value
 
-    def visit_Index(self, node: ast.Index) -> typing.Union[ir.Expression, ir.NameRef, ir.Constant]:
+    def visit_Index(self, node: ast.Index) -> typing.Union[ir.ValueRef, ir.NameRef, ir.Constant]:
         return self.visit(node.value)
 
     def visit_Slice(self, node: ast.Slice) -> ir.Slice:

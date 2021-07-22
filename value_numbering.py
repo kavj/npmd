@@ -43,7 +43,7 @@ class scoped:
         self.constants.add(target)
 
     @register_read.register
-    def _(self, target: ir.Expression):
+    def _(self, target: ir.ValueRef):
         for subexpr in walk_expr_params(target):
             self.register_read(subexpr)
 

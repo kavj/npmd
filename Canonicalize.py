@@ -41,7 +41,7 @@ def unreachable_branches(node: ir.IfElse):
     """
     if not node.test.constant:
         return False, False
-    if isinstance(node.test, ir.Expression):
+    if isinstance(node.test, ir.ValueRef):
         raise NotImplementedError("constant expression folding isn't yet implemented")
     branch_cond = operator.truth(node.test)
     return (False, True) if operator.truth(branch_cond) else (True, False)
