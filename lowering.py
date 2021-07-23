@@ -245,6 +245,13 @@ def make_single_step_loop_interval(counters, step, index):
     assigns = []
 
 
+def make_single_step_iterator(iterables, step):
+    pass
+
+
+def compute_step_count(counter):
+    pass
+
 
 def make_loop_counters(iterables, syms):
     """
@@ -255,10 +262,23 @@ def make_loop_counters(iterables, syms):
     index into the array at each step, which should be taken by the iterator at runtime.
 
     """
-    # If we have a provably unique sequence step, we can avoid explicitly computing iteration count
-    # by taking the range max(start_value) : max(start_value) + min({end_value - start_value...})
-    # clamping each at 0. Otherwise we need to computer iteration counts.
+
     unique_steps = {get_sequence_step(iterable) for iterable in iterables}
+    by_step = defaultdict(set)
+    for iterable in iterables:
+        step = get_sequence_step(iterable)
+        by_step[step].add(iterable)
+
+    # If we have a single step size,
+    # then it becomes the induction step
+    if len(by_step) == 1:
+        pass
+    else:
+        pass
+
+    bounded = discard_unbounded(iterables)
+
+
     bounded = discard_unbounded(iterables)
     bounds = set()
     for iterable in bounded:

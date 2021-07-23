@@ -7,8 +7,7 @@ from contextlib import ContextDecorator
 from functools import singledispatchmethod
 
 import ir
-from lowering import extract_name
-from visitor import VisitorBase
+from visitor import StmtVisitor
 
 """
 
@@ -173,7 +172,7 @@ class scope_entry(ContextDecorator):
         pass
 
 
-class LoweringBuilder(VisitorBase):
+class LoweringBuilder(StmtVisitor):
 
     def __call__(self, entry, ctx_):
         self.context = ctx_

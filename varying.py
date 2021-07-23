@@ -2,7 +2,7 @@ from collections import defaultdict
 from functools import singledispatchmethod
 
 import ir
-from visitor import VisitorBase, walk
+from visitor import StmtVisitor, walk
 
 """
 Very conservative varying checks. These determine uniformity at a variable name level, ignoring local dataflow
@@ -18,7 +18,7 @@ def if_convert_branch(node: ir.IfElse):
     pass
 
 
-class MarkVaryingVisitor(VisitorBase):
+class MarkVaryingVisitor(StmtVisitor):
 
     def __init__(self):
         self.varying = None
@@ -32,7 +32,7 @@ class MarkVaryingVisitor(VisitorBase):
         pass
 
 
-class VaryingApproximate(VisitorBase):
+class VaryingApproximate(StmtVisitor):
 
     def __init__(self):
         self.varying = None
@@ -57,7 +57,7 @@ class VaryingApproximate(VisitorBase):
         pass
 
 
-class MapDependentExprs(VisitorBase):
+class MapDependentExprs(StmtVisitor):
 
     def __init__(self):
         self.deps = None
@@ -90,7 +90,7 @@ class AssignmentRef:
         self.iterated = iterated
 
 
-class MapTargets(VisitorBase):
+class MapTargets(StmtVisitor):
 
     def __init__(self):
         self.targets = None

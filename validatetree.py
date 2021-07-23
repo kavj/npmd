@@ -5,7 +5,7 @@ from functools import singledispatchmethod
 
 import ir
 
-from visitor import VisitorBase
+from visitor import StmtVisitor
 
 keywords = frozenset(set(keyword.kwlist))
 builtin_names = frozenset(set(dir(builtins)))
@@ -15,7 +15,7 @@ def shadows_builtin_name(name):
     return name in keywords or name in builtin_names
 
 
-class TreeValidator(VisitorBase):
+class TreeValidator(StmtVisitor):
     """
     A visitor to perform early checks for common errors
 

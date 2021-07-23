@@ -5,7 +5,7 @@ from functools import singledispatchmethod
 
 import ir
 
-from visitor import VisitorBase
+from visitor import StmtVisitor
 
 
 class TypeCanonicalizer:
@@ -71,7 +71,7 @@ class TypeErrors:
 type_checkable = typing.Optional[typing.Union[ir.ScalarType, ir.ArrayRef]]
 
 
-class EarlyTypeVerifier(VisitorBase):
+class EarlyTypeVerifier(StmtVisitor):
 
     def __call__(self, entry, type_info):
         self.entry = entry

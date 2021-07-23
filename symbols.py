@@ -345,11 +345,11 @@ class symboltable:
         if is_added:
             name = self.make_unique_name(prefix=name)
         if isinstance(base.slice, ir.Slice):
-            step = base.slice.step
-            strided = (step != ir.IntNode(0) and step != ir.IntNode(1)) or base_type.strided
+            vt = ir.ViewRef(base_type.array_type, transposed)
         else:
-            strided = False
-        vt = ir.ViewType(base_type.array_type, transposed, strided)
+            # single index reduces dims
+
+            vt = ()
         self.make_symbol(name, vt, is_added)
         return name
 

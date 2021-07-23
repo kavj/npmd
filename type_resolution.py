@@ -5,7 +5,7 @@ from collections import defaultdict
 from functools import singledispatchmethod
 
 import ir
-from visitor import VisitorBase
+from visitor import StmtVisitor
 
 # Todo: At the tree layer, this should be much with fine grained tests moving to dataflow layer.
 #       In particular, just check for bad use of division and truth testing of arrays
@@ -239,7 +239,7 @@ dispatch = {
 }
 
 
-class TypeChecker(VisitorBase):
+class TypeChecker(StmtVisitor):
     """
     This only enforces types on explicit assignment. Compound expressions take on monomorphic types
     based on expression evaluation. Casts are only applied on explicit assignment.

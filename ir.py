@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
 
+import ir
 
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
 inplace_ops = frozenset({"+=", "-=", "*=", "/=", "//=", "%=", "**=", "<<=", ">>=", "|=", "^=", "&=", "@="})
@@ -65,9 +66,9 @@ Statement = typing.TypeVar('Statement', bound=StmtBase)
 class ValueRef(ABC):
     """
     This is the start of a base class for expressions.
-    
-    For our purposes, we distinguish an expression from a value by asking whether it can be 
-    an assignment target. 
+
+    For our purposes, we distinguish an expression from a value by asking whether it can be
+    an assignment target.
 
     The term 'expression_like' is used elsewhere in the code to include mutable targets, where
     assignment alters a data structure as opposed to simply binding a value to a name.
@@ -81,7 +82,7 @@ class ValueRef(ABC):
 
     @property
     def constant(self):
-        return all(se.constant for se in self.subexprs)
+        raise NotImplementedError
 
 
 class Constant(ValueRef):
@@ -168,6 +169,25 @@ class NameRef(ValueRef):
 @dataclass(frozen=True)
 class ArrayType:
     """
+    descriptor for array inputs,
+    This is necessary in order to describe array parameters on input without ambiguity.
+    """
+
+    ndims: typing.Union[ir.IntNode]
+    dtype: typing.Union[type, IntType, FloatType, PredicateType]
+
+    @property
+    def array_type(self):
+        return self
+
+    def __post_init__(self):
+        # Zero dimensions must be treated as a scalar, not an array.
+        assert operator.gt(self.ndims.value, 0)
+
+
+@dataclass(frozen=True)
+class ArrayArgType:
+    """
     Array type descriptor.
 
     dtype: scalar type used by this array
@@ -213,7 +233,7 @@ class ArrayRef(ValueRef):
 @dataclass(frozen=True)
 class ViewRef:
     derived_from: typing.Union[ArrayRef, ViewRef]
-    subscript: typing.Optional[typing.Union[IntNode, Slice, NameRef, BinOp, UnaryOp]]
+    slice: typing.Optional[typing.Union[IntNode, Slice, NameRef, BinOp, UnaryOp]]
     array_type: ArrayType
     name: NameRef
     transposed: bool = False
