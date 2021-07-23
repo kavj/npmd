@@ -4,7 +4,7 @@ import typing
 from functools import singledispatch, singledispatchmethod
 
 import ir
-from visitor import TransformBase, walk_branches
+from visitor import StmtTransformer, walk_branches
 
 
 def negate_condition(node):
@@ -71,8 +71,7 @@ def contains_break(entry):
 
 @singledispatch
 def terminates_control_flow(node):
-    msg = f"No method to test whether control flow may pass through node of type {type(node)}"
-    raise TypeError(msg)
+    return False
 
 
 @terminates_control_flow.register
@@ -88,11 +87,6 @@ def _(node: ir.Return):
 @terminates_control_flow.register
 def _(node: ir.Break):
     return True
-
-
-@terminates_control_flow.register
-def _(node: ir.StmtBase):
-    return False
 
 
 @terminates_control_flow.register
@@ -185,7 +179,7 @@ def remove_trailing_continues(node: typing.Union[list, ir.IfElse]) -> typing.Uni
     return node
 
 
-class RemoveContinues(TransformBase):
+class RemoveContinues(StmtTransformer):
 
     def __call__(self, entry):
         return self.visit(entry)
@@ -222,7 +216,7 @@ class RemoveContinues(TransformBase):
         return ir.WhileLoop(node.test, repl, node.pos)
 
 
-class MergePaths(TransformBase):
+class MergePaths(StmtTransformer):
     """
 
     At any branch point, corresponding to an if else condition, where one branch is terminated by break, continue,

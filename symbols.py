@@ -12,7 +12,6 @@ from symtable import symtable
 
 import ir
 
-from visitor import walk_expr
 
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
 
@@ -121,8 +120,7 @@ class TypeBuilder:
                 msg = f"Cannot map array data type {input_scalar_type} to an internal type."
                 raise KeyError(msg)
             dims = tuple(wrap_input(d) for d in item.dims)
-            stride = wrap_input(item.stride)
-            internal_type = ir.ArrayType(dims, dtype, stride)
+            internal_type = ir.ArrayType(dims, dtype)
         else:
             if isinstance(item, internal_scalar_type):
                 internal_type = item

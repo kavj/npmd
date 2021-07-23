@@ -8,7 +8,7 @@ from functools import singledispatch, singledispatchmethod
 import ir
 import symbols
 
-from visitor import VisitorBase, walk, walk_branches
+from visitor import StmtVisitor, walk, walk_branches
 
 
 unaryops = {"+": operator.pos,
@@ -107,10 +107,6 @@ def simplify_binop(left, right, op):
             if op in ("**", "*=") and right.value in (0, 1, 2, 0.5):
                 return simplify_pow(left, right, op == "**=")
         return ir.BinOp(left, right, op)
-
-
-def is_innermost(header):
-    return not any(stmt.is_loop_entry for stmt in walk_branches(header))
 
 
 def unwrap_loop_body(node):
@@ -408,13 +404,15 @@ def _(base: ir.NameRef, syms):
 
 @make_counter.register
 def _(base: ir.Subscript, syms):
-    arr = syms.arrays[base.value]
+    array_ = syms.lookup(base.value)
     # avoid linearizing
     sl = base.slice
     if isinstance(sl, ir.Slice):
-        start = wrap_constant(sl.start)
+        start = sl.start
         stop = arr.dims[0]
-        if sl.stop is not None:
+        if sl.stop is None:
+            stop = sl.stop
+        else:
             stop = ir.Min(stop, sl.stop)
         step = sl.step
         counter = ir.AffineSeq(start, stop, step)

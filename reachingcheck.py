@@ -1,10 +1,10 @@
 from functools import singledispatchmethod
 
 import ir
-from visitor import VisitorBase
+from visitor import StmtVisitor
 
 
-class ReachingCheck(VisitorBase):
+class ReachingCheck(StmtVisitor):
     """
     This is meant to check for statments that could result in unbound local errors. 
     It also tracks cases where a write must follow a read or a read follows a write.
@@ -141,7 +141,7 @@ class ReachingCheck(VisitorBase):
         self.seen.update(seen_ifelse)
 
 
-class VarScopeCheck(VisitorBase):
+class VarScopeCheck(StmtVisitor):
     """
     Checks what variable declarations may be move inside loops.
     This also allows for slightly more aggressive optimization of loop indices.
@@ -211,7 +211,7 @@ class VarScopeCheck(VisitorBase):
             self.bound = prev_bound
 
 
-class UsedCheck(VisitorBase):
+class UsedCheck(StmtVisitor):
     """
     Tests what variables are actually read for purposes other than inplace updates
     """

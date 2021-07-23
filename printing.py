@@ -69,10 +69,6 @@ class prettystringify:
         return str(node.value)
 
     @visit.register
-    def _(self, node: ir.StringNode):
-        return f"\"{node.value}\""
-
-    @visit.register
     def _(self, node: ir.NameRef):
         return node.name
 

@@ -340,7 +340,6 @@ class TreeBuilder(ast.NodeVisitor):
         with self.loop_region(node):
             for target, iterable in unpack_iterated(target_node, iter_node, pos):
                 # map each assignment with respect to
-
                 if prefix is None and isinstance(iterable, ir.AffineSeq):
                     if iterable.stop is None:
                         # first enumerate encountered

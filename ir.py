@@ -97,7 +97,8 @@ class Constant(ValueRef):
 
     @property
     def subexprs(self):
-        yield from ()
+        return
+        yield
 
 
 @dataclass(frozen=True)
@@ -115,6 +116,11 @@ class AttributeRef:
 class BoolNode(Constant):
     value: bool
 
+    @property
+    def subexprs(self):
+        return
+        yield
+
 
 @dataclass(frozen=True)
 class EllipsisNode(Constant):
@@ -126,15 +132,21 @@ class EllipsisNode(Constant):
 class FloatNode(Constant):
     value: numbers.Real
 
+    @property
+    def subexprs(self):
+        return
+        yield
+
 
 @dataclass(frozen=True)
 class IntNode(Constant):
     value: numbers.Integral
 
+    @property
+    def subexprs(self):
+        return
+        yield
 
-@dataclass(frozen=True)
-class StringNode(Constant):
-    value: str
 
 # Top Level
 
@@ -149,7 +161,8 @@ class NameRef(ValueRef):
     # if something is an expression
     @property
     def subexprs(self):
-        yield from ()
+        return
+        yield
 
 
 @dataclass(frozen=True)
@@ -164,11 +177,7 @@ class ArrayType:
     """
     dims: typing.Tuple[typing.Union[str, int, NameRef, IntNode], ...]
     dtype: typing.Union[type, IntType, FloatType, PredicateType]
-    is_view: typing.ClassVar[bool] = False
-    strided: typing.ClassVar[bool] = False
-    transposed: typing.ClassVar[bool] = False
 
-    #
     @property
     def array_type(self):
         return self
@@ -180,27 +189,6 @@ class ArrayType:
     def __post_init__(self):
         # Zero dimensions must be treated as a scalar, not an array.
         assert len(self.dims) > 0
-
-
-@dataclass(frozen=True)
-class ViewType:
-    """
-    This is used to defer generation of unique array parameters for a particular view.
-
-    """
-
-    array_type: ArrayType
-    transposed: bool
-    strided: bool    # strided if this adds a non-unit step or includes a dimension with non-unit step.
-    is_view: typing.ClassVar[bool] = True
-
-    @property
-    def dtype(self):
-        return self.array_type.dtype
-
-    @property
-    def ndims(self):
-        return self.array_type.ndims
 
 
 @dataclass(frozen=True)
@@ -226,7 +214,7 @@ class ArrayRef(ValueRef):
 class ViewRef:
     derived_from: typing.Union[ArrayRef, ViewRef]
     subscript: typing.Optional[typing.Union[IntNode, Slice, NameRef, BinOp, UnaryOp]]
-    array_type: ViewType
+    array_type: ArrayType
     name: NameRef
     transposed: bool = False
     constant: clscond = False
@@ -256,7 +244,8 @@ class ViewRef:
 
     @property
     def subexprs(self):
-        yield from ()
+        return
+        yield
 
 
 @dataclass(frozen=True)
