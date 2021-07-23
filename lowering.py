@@ -113,22 +113,6 @@ def unwrap_loop_body(node):
     return node.body if isinstance(node, (ir.ForLoop, ir.WhileLoop)) else node
 
 
-def wrap_constant(value):
-    if isinstance(value, ir.Constant):
-        return value
-    if isinstance(value, bool):
-        return ir.BoolNode(value)
-    elif isinstance(value, numbers.Integral):
-        # needed for numpy compatibility
-        return ir.IntNode(value)
-    elif isinstance(value, numbers.Real):
-        # needed for numpy compatibility
-        return ir.FloatNode(value)
-    else:
-        msg = f"{value} of type {type(value)} is not recognized as a constant."
-        raise TypeError(msg)
-
-
 @singledispatch
 def fold_if_constant(expr):
     msg = f"fold expression not implemented for "

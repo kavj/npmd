@@ -6,7 +6,7 @@ import typing
 from contextlib import contextmanager
 
 import ir
-from symbols import create_symbol_tables
+from symbols import create_symbol_tables, wrap_input
 from Canonicalize import replace_builtin_call
 from lowering import make_loop_interval
 
@@ -171,15 +171,12 @@ class TreeBuilder(ast.NodeVisitor):
 
     def visit_Constant(self, node: ast.Constant) -> ir.Constant:
         if is_ellipsis(node.value):
-            raise TypeError
-        if isinstance(node.value, str):
-            return ir.StringNode(node.value)
-        elif isinstance(node.value, numbers.Integral):
-            return ir.IntNode(node.value)
-        elif isinstance(node.value, numbers.Real):
-            return ir.FloatNode(node.value)
-        else:
-            raise TypeError("unrecognized constant type")
+            msg = "Ellipses are not supported."
+            raise TypeError(msg)
+        elif isinstance(node.value, str):
+            msg = "String constants are not supported."
+            raise TypeError(msg)
+        return wrap_input(node.value)
 
     def visit_Tuple(self, node: ast.Tuple) -> ir.Tuple:
         # refactor seems to have gone wrong here..
@@ -234,13 +231,13 @@ class TreeBuilder(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> typing.Union[ir.ValueRef, ir.NameRef]:
         if isinstance(node.func, ast.Name):
-            funcname = node.func.id
+            func_name = node.func.id
         else:
-            funcname = self.visit(node.func)
+            func_name = self.visit(node.func)
         args = tuple(self.visit(arg) for arg in node.args)
         keywords = tuple((kw.arg, self.visit(kw.value)) for kw in node.keywords)
         # replace call should handle folding of casts
-        call_ = ir.Call(funcname, args, keywords)
+        call_ = ir.Call(func_name, args, keywords)
         # Todo: need a way to identify array creation
         func = replace_builtin_call(call_)
         return func
