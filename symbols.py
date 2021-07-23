@@ -26,11 +26,11 @@ def extract_name(name):
     return name.name if isinstance(name, ir.NameRef) else name
 
 
-def find_subscripted_dim_reduction(ref):
+def reduces_array_dims(ref):
     if isinstance(ref, ir.NameRef):
-        return 0
+        return False
     elif isinstance(ref, ir.Subscript):
-        return 0 if isinstance(ref.slice, ir.Slice) else 1
+        return False if isinstance(ref.slice, ir.Slice) else True
     else:
         msg = "{ref} does not represent array view creation."
         raise TypeError(msg)
@@ -337,54 +337,35 @@ class symboltable:
         return name
 
     @singledispatchmethod
-    def _get_view_type(self, ref, transpose, added):
+    def add_view(self, base, name, transpose, is_added):
         raise NotImplementedError
 
-    @_get_view_type.register
-    def _(self, ref: ir.NameRef, transpose, is_added):
-        ref_type = self.lookup(ref)
-        if ref_type.ndims == 1 and transpose:
-            msg = f"Cannot transpose scalar view of a 1D array: {ref}"
-            raise ValueError(msg)
-        dims = ref_type.dims
-        if len(dims) == 1:
-            # view_type =
-            pass
+    @add_view.register
+    def _(self, base: ir.Subscript, name, transpose, is_added):
+        base_type = self.lookup(base.value)
+        transposed = transpose and not base_type.tranposed
+        if is_added:
+            name = self.make_unique_name(prefix=name)
+        if isinstance(base.slice, ir.Slice):
+            step = base.slice.step
+            strided = (step != ir.IntNode(0) and step != ir.IntNode(1)) or base_type.strided
         else:
-            pass
+            strided = False
+        vt = ir.ViewType(base_type.array_type, transposed, strided)
+        self.make_symbol(name, vt, is_added)
+        return name
 
-    @_get_view_type.register
-    def _(self, ref: ir.Subscript, transpose, is_added):
-        if not isinstance(ref.slice, ir.Slice):
-            # single subscript. Since we don't allow binding slices to names
-            # this must project onto a single leading value, assuming a valid input parameter.
-            # Todo: This won't allow delayed evaluation of annotations, so have to unpack before this
-            # Todo: ensure integral parameter
-            raise ValueError
-        ref_type = self.lookup(ref)
+    @add_view.register
+    def _(self, base: ir.NameRef, name, transpose, is_added):
+        pass
 
-    def add_view(self, name, base, transpose, is_added):
-        base_type = self.lookup(base)
-        if not base_type.is_array:
-            msg = f"{base_type.name} is not recognized as an array or view."
-            raise TypeError(msg)
-        for subexpr in walk_expr(base):
-            if isinstance(subexpr, ir.NameRef):
-                t = self.lookup(subexpr)
-                if not t.is_integer:
-                    msg = f"Non integral parameter {subexpr} cannot be used as an index or slice parameter."
-                    raise ValueError(msg)
-            elif isinstance(subexpr, ir.BinOp):
-                if subexpr.op == "/":
-                    msg = f"True divide generates non-integer expressions and therefore cannot be used as an " \
-                          "index or slice parameter: {subexpr}."
-                    raise ValueError(msg)
-            elif isinstance(subexpr, ir.FloatNode):
-                msg = f"Floating point types are not supported as part of a subscript expression. Encountered " \
-                      f"{str(subexpr)}"
-                raise ValueError(msg)
+    @add_view.register
+    def _(self, base: ir.ArrayRef, name, transpose, is_added):
+        pass
 
-        dims = base.dims
+    @add_view.register
+    def _(self, base: ir.ViewRef, name, transpose, is_added):
+        pass
 
 
 def symbol_table_from_func(func, type_map, type_builder, filename):

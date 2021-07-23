@@ -164,9 +164,14 @@ class ArrayType:
     """
     dims: typing.Tuple[typing.Union[str, int, NameRef, IntNode], ...]
     dtype: typing.Union[type, IntType, FloatType, PredicateType]
-    stride: typing.Optional[typing.Union[int, IntNode]] = None  # inter procedural stride, used for packeting
-    is_array: typing.ClassVar[bool] = False
     is_view: typing.ClassVar[bool] = False
+    strided: typing.ClassVar[bool] = False
+    transposed: typing.ClassVar[bool] = False
+
+    #
+    @property
+    def array_type(self):
+        return self
 
     @property
     def ndims(self):
@@ -184,18 +189,18 @@ class ViewType:
 
     """
 
-    base: typing.Union[ArrayType, ViewType]
-    subscript: Slice
-    is_array: typing.ClassVar[bool] = False
+    array_type: ArrayType
+    transposed: bool
+    strided: bool    # strided if this adds a non-unit step or includes a dimension with non-unit step.
     is_view: typing.ClassVar[bool] = True
 
     @property
     def dtype(self):
-        return self.base.dtype
+        return self.array_type.dtype
 
     @property
-    def stride(self):
-        return self.base.stride
+    def ndims(self):
+        return self.array_type.ndims
 
 
 @dataclass(frozen=True)
@@ -243,10 +248,7 @@ class ViewRef:
 
     @cached_property
     def ndims(self):
-        d = self.derived_from.ndims
-        if not isinstance(self.subscript, Slice):
-            d -= 1
-        return d
+        return self.array_type.array_type.ndims
 
     @cached_property
     def name(self):
