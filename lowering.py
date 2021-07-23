@@ -55,58 +55,48 @@ binops = {"+": operator.add,
           }
 
 
-def simplify_pow(base, coeff, in_place=False):
-    if coeff.constant:
-        if not isinstance(coeff, (ir.IntNode, ir.FloatNode)):
-            msg = f"Cannot evaluate pow operation with power of type {type(coeff)}"
-            raise RuntimeError(msg)
-        if isinstance(coeff, ir.IntNode):
-            coeff = coeff.value
-            if coeff == 0:
-                return ir.IntNode(1)
-            elif coeff == 1:
-                return base
-            elif coeff == 2:
-                if base.constant:
-                    repl = wrap_constant(operator.pow(base.value, 2))
-                else:
-                    op = "*=" if in_place else "*"
-                    repl = ir.BinOp(base, base, op)
-                return repl
-        elif isinstance(coeff, ir.FloatNode):
-            if coeff.value == 0.5:
-                if base.constant:
-                    left = base.value
-                    try:
-                        left = math.sqrt(left)
-                        return wrap_constant(left)
-                    except (TypeError, ValueError):
-                        msg = f"The source code may compute a square root of {base.value}" \
-                              f"at runtime, which is invalid. We cautiously refuse to compile this."
-                        raise RuntimeError(msg)
-                else:
-                    return ir.Call("sqrt", args=(base,), keywords=())
-    return ir.BinOp(base, coeff, "**=" if in_place else "**")
+def is_pow(expr):
+    return isinstance(expr, ir.BinOp) and expr.op in ("**", "**=")
 
 
-def simplify_binop(left, right, op):
-    if right.constant:
-        if left.constant:
-            const_folder = binops.get(op)
-            if op in bitwise_binops and not isinstance(left, ir.IntNode):
-                raise RuntimeError(f"Source code contains an invalid bit field expression"
-                                   f"{op} requires integral operands, received {left}"
-                                   f"and {right}")
-            try:
-                value = const_folder(left.value, right.value)
-                return wrap_constant(value)
-            except (TypeError, ValueError):
-                raise RuntimeError(f"Extracted source expression {left} {op} {right}"
-                                   f"cannot be safely evaluated.")
-        else:
-            if op in ("**", "*=") and right.value in (0, 1, 2, 0.5):
-                return simplify_pow(left, right, op == "**=")
-        return ir.BinOp(left, right, op)
+def simplify_if_square_root(expr):
+    if is_pow(expr):
+        repl = expr
+        coeff = expr.right
+        if coeff == ir.FloatNode(0.5):
+            # Todo: needs a namespace or direct specialization
+            repl = ir.Call("sqrt", (expr.left), ())
+    return repl
+
+
+def simplify_if_is_square(expr):
+    repl = expr
+    if is_pow(expr):
+        coeff = expr.right
+        if (coeff == ir.IntNode(2)) or (coeff == ir.FloatNode(2.0)):
+            op = "*=" if expr.in_place else "*"
+            repl = ir.BinOp(expr.left, expr.left, op)
+    return repl
+
+
+def simplify_if_sign_flip(expr):
+    repl = expr
+    if isinstance(expr, ir.BinOp) and op in ("*", "*="):
+        unary_minus_equiv = ir.IntNode(-1)
+        left = expr.left
+        right = expr.right
+        if left == unary_minus_equiv:
+            repl = ir.UnaryOp(right, "-")
+        elif right == unary_minus_equiv:
+            repl = ir.UnaryOp(left, "-")
+    return repl
+
+
+def simplify_binop(expr: ir.BinOp):
+    repl = simplify_if_is_square(expr)
+    repl = simplify_if_square_root(repl)
+    repl = simplify_if_sign_flip(repl)
+    return repl
 
 
 def unwrap_loop_body(node):
@@ -146,11 +136,10 @@ def _(expr: ir.BinOp):
     right = fold_if_constant(expr.right)
     if left.constant and right.constant:
         oper = binops[expr.op]
-        res = oper(left.value, right.value)
-        res = wrap_constant(res)
+        repl = oper(left, right)
     else:
-        res = ir.BinOp(left, right, expr.op)
-    return res
+        repl = ir.BinOp(left, right, op)
+    return repl
 
 
 @fold_if_constant.register
@@ -273,6 +262,19 @@ def make_loop_counter(iterables, syms):
         counter, = counters
         return counter
 
+    # group by step
+
+    by_step = defaultdict(set)
+
+    for c in counters:
+        by_step[c.step].add((c.start, c.stop))
+
+    grouped = []
+    for step, counter_group in by_step.items():
+        # min_interval =
+        grouped.append(min_interval)
+
+
     # We can still optimize based on 1-2 uniform parameters.
     starts = set()
     stops = set()
@@ -305,18 +307,6 @@ def make_loop_counter(iterables, syms):
         pass
 
 
-def combine_numeric_checks(bounds: typing.List[ir.AffineSeq]):
-    numeric = {b for b in bounds if all(isinstance(param, ir.IntNode) for param in b.subexprs)}
-    # Check for unbounded
-    unbounded = {b for b in numeric if b.stop is None}
-    numeric.difference_update(unbounded)
-    if numeric:
-        updated = set(bounds).difference(numeric)
-        min_bound = min(numeric_max_iter_count(b) for b in numeric)
-        updated.add(ir.AffineSeq(ir.IntNode(0), ir.IntNode(min_bound), ir.IntNode(1)))
-        bounds = updated
-    return bounds
-
 
 def make_min_sliced_len_expr(slices, leading_dim_expr):
     if not slices:
@@ -342,45 +332,6 @@ def make_explicit_iter_count(counter):
         count = ir.Ternary(test, on_true, on_false)
     return count
 
-
-def merge_loop_counters(counters, syms, index_name):
-    """
-    Attempt to handle cases where we have relatively simple structured loop constraints.
-
-    counters:
-        A set of AffineSeq functions, denoting affine sequences with imposed boundary conditions.
-    syms:
-        Symbol table for lookups of array parameters
-
-    returns:        a loop index counter if a simple shared bound can be found without relying on explicit
-        counter normalization of counters with symbolic parameters, otherwise None
-
-    """
-
-    # enumerate constructs lower to unbounded counters
-    bounds = {c for c in counters if c.stop is not None}
-    if len(bounds) == 1:
-        counter, = bounds
-        return counter
-
-    diffs = defaultdict(set)
-    for b in bounds:
-        start = b.start
-        stop = b.stop
-        step = b.step
-        if start.constant and stop.constant:
-            pass
-        diffs[step].add(ir.BinOp(b.stop, b.start, "-"))
-
-
-    for step, intervals in diffs.items():
-        for interval in intervals:
-
-            pass
-            # interval = try
-        pass
-
-    return counter
 
 
 @singledispatch

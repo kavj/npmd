@@ -15,6 +15,41 @@ unaryops = frozenset({"+", "-", "~", "not"})
 boolops = frozenset({"and", "or"})
 compareops = frozenset({"==", "!=", "<", "<=", ">", ">=", "is", "isnot", "in", "notin"})
 
+
+oop_to_inplace = {
+    "+": "+=",
+    "-": "-=",
+    "*": "*=",
+    "/": "/=",
+    "//": "//=",
+    "%": "%=",
+    "**": "**=",
+    "<<": "<<=",
+    ">>": ">>=",
+    "|": "|=",
+    "^": "^=",
+    "&": "&=",
+    "@": "@=",
+}
+
+
+inplace_to_oop = {
+    "+=": "+",
+    "-=": "-",
+    "*=": "*",
+    "/=": "/",
+    "//=": "//",
+    "%=": "%",
+    "**=": "**",
+    "<<=": "<<",
+    ">>=": ">>",
+    "|=": "|",
+    "^=": "^",
+    "&=": "&",
+    "@=": "@",
+}
+
+
 supported_builtins = frozenset({'iter', 'range', 'enumerate', 'zip', 'all', 'any', 'max', 'min', 'abs', 'pow',
                                 'round', 'reversed'})
 
@@ -79,9 +114,7 @@ class ValueRef(ABC):
     def subexprs(self):
         raise NotImplementedError
 
-    @property
-    def constant(self):
-        raise NotImplementedError
+    constant: clscond = False
 
 
 class Constant(ValueRef):
@@ -120,12 +153,6 @@ class BoolNode(Constant):
     def subexprs(self):
         return
         yield
-
-
-@dataclass(frozen=True)
-class EllipsisNode(Constant):
-    # singleton class
-    value: typing.Any = Ellipsis
 
 
 @dataclass(frozen=True)
