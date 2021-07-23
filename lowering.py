@@ -99,10 +99,6 @@ def simplify_binop(expr: ir.BinOp):
     return repl
 
 
-def unwrap_loop_body(node):
-    return node.body if isinstance(node, (ir.ForLoop, ir.WhileLoop)) else node
-
-
 @singledispatch
 def fold_if_constant(expr):
     msg = f"fold expression not implemented for "
@@ -144,7 +140,7 @@ def _(expr: ir.BinOp):
 
 @fold_if_constant.register
 def _(expr: ir.UnaryOp):
-    value = try_fold_expression(expr.value)
+    value = fold_if_constant(expr.value)
     if value.constant:
         oper = unaryops[expr.op]
         repl = wrap_constant(oper(value))
@@ -159,23 +155,6 @@ def _(expr: ir.Subscript):
     slice_ = fold_if_constant(expr.slice)
     repl = ir.Subscript(value, slice_)
     return repl
-
-
-def expand_inplace_op(expr):
-    assert isinstance(expr, ir.BinOp)
-    op_conversion = {"*=": "*", "-=": "-", "/=": "/", "//=": "//", "**=": "**", "|=": "|", "&=": "&",
-                     "^=": "^", "~=": "~"}
-    op = op_conversion[expr.op]
-    return ir.BinOp(expr.left, expr.right, op)
-
-
-def try_replace_unary_binary(expr):
-    # Should fold anything like double negation first
-    # and do subexpressions first
-    if isinstance(expr, ir.UnaryOp):
-        if expr.op == "-":
-            expr = ir.BinOp(ir.IntNode(-1), expr.operand, "*")
-    return expr
 
 
 def discard_unbounded(iterables):
