@@ -8,7 +8,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
 
-import ir
 
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
 inplace_ops = frozenset({"+=", "-=", "*=", "/=", "//=", "%=", "**=", "<<=", ">>=", "|=", "^=", "&=", "@="})
@@ -173,7 +172,7 @@ class ArrayType:
     This is necessary in order to describe array parameters on input without ambiguity.
     """
 
-    ndims: typing.Union[ir.IntNode]
+    ndims: typing.Union[IntNode]
     dtype: typing.Union[type, IntType, FloatType, PredicateType]
 
     @property
@@ -186,9 +185,9 @@ class ArrayType:
 
 
 @dataclass(frozen=True)
-class ArrayArgType:
+class ArrayArg:
     """
-    Array type descriptor.
+    Array type descriptor
 
     dtype: scalar type used by this array
     dims: tuple(str or int,...)

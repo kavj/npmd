@@ -221,14 +221,29 @@ def _(iterable: ir.Subscript, symbols):
 
 
 @make_affine_counter.register
-def _(iterable: ir.ArrayType):
+def _(iterable: ir.ArrayArg):
     return ir.AffineSeq(ir.IntNode(0), iterable.dims[0], ir.IntNode(1))
 
 
 @make_affine_counter.register
-def _(iterable: ir.NameRef, syms):
-    array_type = syms.lookup(iterable)
-    counter = make_affine_counter(array_type)
+def _(iterable: ir.NameRef):
+    counter = ir.AffineSeq(ir.IntNode(0), ir.Length(iterable), ir.IntNode(1))
+    return counter
+
+
+@make_affine_counter.register
+def _(iterable: ir.Subscript):
+    if isinstance(iterable.slice, ir.Slice):
+        start = iterable.start
+        stop = ir.Length(iterable.value)
+        step = iterable.step
+        if iterable.stop is not None:
+            stop = ir.Min(stop, iterable.stop)
+    else:
+        start = ir.IntNode(0)
+        stop = ir.Length(iterable)
+        step = ir.IntNode(1)
+    counter = ir.AffineSeq(start, stop, step)
     return counter
 
 
@@ -241,19 +256,7 @@ def get_sequence_step(iterable):
     return ir.IntNode(1)
 
 
-def make_single_step_loop_interval(counters, step, index):
-    assigns = []
-
-
-def make_single_step_iterator(iterables, step):
-    pass
-
-
-def compute_step_count(counter):
-    pass
-
-
-def make_loop_counters(iterables, syms):
+def make_loop_counter(iterables, syms):
     """
     Map a combination of array iterators and range and enumerate calls to a set of counters,
     which capture the appropriate intervals.
@@ -263,42 +266,43 @@ def make_loop_counters(iterables, syms):
 
     """
 
-    unique_steps = {get_sequence_step(iterable) for iterable in iterables}
-    by_step = defaultdict(set)
-    for iterable in iterables:
-        step = get_sequence_step(iterable)
-        by_step[step].add(iterable)
+    counters = {make_affine_counter(iterable) for iterable in iterables}
 
-    # If we have a single step size,
-    # then it becomes the induction step
-    if len(by_step) == 1:
-        pass
-    else:
-        pass
+    # check for simple case first
+    if len(counters) == 1:
+        counter, = counters
+        return counter
 
-    bounded = discard_unbounded(iterables)
+    # We can still optimize based on 1-2 uniform parameters.
+    starts = set()
+    stops = set()
+    steps = set()
 
+    for c in counters:
+        starts.add(c.start)
+        stops.add(c.stop)
+        steps.add(c.step)
 
-    bounded = discard_unbounded(iterables)
-    bounds = set()
-    for iterable in bounded:
-        if isinstance(iterable, ir.Subscript):
-            arr = arrays[iterable.value]
-            leading_dim = arr.dims.elements[0]
-            sl = iterable.slice
-            if not isinstance(sl, ir.Slice):
-                raise ValueError("non-slice subscript is not yet supported here for array iteration base")
-            if sl.stop is None or leading_dim == sl.stop:
-                bounds.add(ir.AffineSeq(sl.start, leading_dim, sl.step))
-            else:
-                # Expand all bounds, since we don't always know which is tighter.
-                bounds.add(ir.AffineSeq(sl.start, sl.stop, sl.step))
-                bounds.add(ir.AffineSeq(sl.start, leading_dim, sl.step))
+    if len(steps) == 1:
+        step, = steps
+        if len(starts) == 1:
+            start, = starts
+            stop = ir.Min(stops)
+            counter = ir.AffineSeq(start, stop, step)
+        elif len(stops) == 1:
+            # Here we are better off normalizing to start at 0
+            start = ir.Max(starts)
+            stop, = stops
+            interval_width = ir.BinOp(stop, start, "-")
+            counter = ir.AffineSeq(ir.IntNode(0), interval_width, step)
         else:
-            arr = arrays[iterable]
-            leading_dim = arr.dims.elements[0]
-            bounds.add(ir.AffineSeq(ir.IntNode(0), leading_dim, ir.IntNode(1)))
-    return bounds
+            # compute minimum interval width
+            pass
+    else:
+        # different strides, simplification steps above apply per stride,
+        # with the caveat that we have to explicitly compute iteration count
+        # in the end.
+        pass
 
 
 def combine_numeric_checks(bounds: typing.List[ir.AffineSeq]):
