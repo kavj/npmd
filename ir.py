@@ -6,7 +6,7 @@ import typing
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cached_property, singledispatchmethod
 
 
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})

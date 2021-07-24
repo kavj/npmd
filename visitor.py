@@ -99,6 +99,163 @@ def walk_branches(node):
                 yield from walk_branches(stmt.else_branch)
 
 
+class RuleBasedRewriter:
+    """
+    A small utility to help cache expression mappings and rewrite expressions according to
+    updates of their sub-expressions.
+
+    """
+
+    def __init__(self):
+        self.rules = {}
+        self.cache = {}
+
+    def clear(self):
+        self.rules = {}
+
+    def make_rule(self, expr, output):
+        if expr in self.rules:
+            msg = f"Already have an existing rule for {expr}."
+            raise KeyError(msg)
+        self.rules[expr] = output
+
+    def lookup(self, expr):
+        output = self.rules.get(expr)
+        if output is None:
+            output = expr
+        return output
+
+    def reconstruct_expression(self, expr):
+        """
+        Rewrites an expression based on rules available to its sub-expressions.
+        """
+
+        # if we have a rule set for this expression,
+        # it takes priority
+        from_cache = self.rules.get(expr)
+        if from_cache is None:
+            # Check if previously reconstructed
+            form_cache = self.cache.get(expr)
+            if from_cache is None:
+                from_cache = self._rewrite(expr)
+                if from_cache == expr:
+                    # if they match, use the original expression
+                    from_cache = expr
+                self.cache[expr] = form_cache
+        return from_cache
+
+    @singledispatchmethod
+    def _rewrite(self, expr):
+        raise NotImplementedError
+
+    @_rewrite.register
+    def _(self, expr: ir.Length):
+        value = self.lookup(expr.value)
+        repl = ir.Length(value)
+        return repl
+
+    @_rewrite.register
+    def _(self, expr: ir.Subscript):
+        value = self._rewrite(expr.value)
+        slice_ = self._rewrite(expr.slice)
+        subscript = ir.Subscript(value, slice_)
+        return subscript
+
+    @_rewrite.register
+    def _(self, expr: ir.Min):
+        output = tuple(self.lookup(elem) for elem in expr.values)
+        return output
+
+    @_rewrite.register
+    def _(self, expr: ir.Max):
+        output = tuple(self.rules[elem] for elem in expr.values)
+        return output
+
+    @_rewrite.register
+    def _(self, expr: ir.Slice):
+        start = self.lookup(expr.start)
+        stop = self.lookup(expr.stop)
+        step = self.lookup(expr.step)
+        return ir.Slice(start, stop, step)
+
+    @_rewrite.register
+    def _(self, expr: ir.Tuple):
+        output = tuple(self.lookup(elem) for elem in expr.elements)
+        output = ir.Tuple(output)
+        return output
+
+    @_rewrite.register
+    def _(self, expr: ir.Ternary):
+        test = self.lookup(expr.test)
+        on_true = self.lookup(expr.if_expr)
+        on_false = self.lookup(expr.else_expr)
+        output = ir.Ternary(test, on_true, on_false)
+        return output
+
+    @_rewrite.register
+    def _(self, expr: ir.BinOp):
+        left = self.lookup(expr.left)
+        right = self.lookup(expr.right)
+        output = ir.BinOp(left, right, expr.op)
+        return output
+
+    @_rewrite.register
+    def _(self, expr: ir.Call):
+        args = tuple(self.lookup(arg) for arg in expr.args)
+        kws = tuple((kw, self.lookup(value)) for (kw, value) in expr.keywords)
+        func = self.lookup(expr.func)
+        output = ir.Call(func, args, kws)
+        return output
+
+    @_rewrite.register
+    def _(self, expr: ir.BoolOp):
+        subexprs = tuple(self.lookup(operand) for operand in expr.operands)
+        output = ir.BoolOp(subexprs, expr.op)
+        return output
+
+    @_rewrite.register
+    def _(self, expr: ir.AffineSeq):
+        start = self.lookup(expr.start)
+        stop = self.lookup(expr.stop)
+        step = self.lookup(expr.step)
+        output = ir.AffineSeq(start, stop, step)
+        return output
+
+    @_rewrite.register
+    def _(self, expr: ir.UnaryOp):
+        operand = self.lookup(expr.operand)
+        output = ir.UnaryOp(operand, expr.op)
+        return output
+
+    @_rewrite.register
+    def _(self, expr: ir.Zip):
+        elems = tuple(self.lookup(elem) for elem in expr.elements)
+        output = ir.Zip(elems)
+        return output
+
+    @_rewrite.register
+    def _(self, expr: ir.Reversed):
+        iterable = self.lookup(expr.iterable)
+        output = ir.Reversed(iterable)
+        return output
+
+    @_rewrite.register
+    def _(self, expr: ir.IntNode):
+        return expr
+
+    @_rewrite.register
+    def _(self, expr: ir.FloatNode):
+        return expr
+
+    @_rewrite.register
+    def _(self, expr: ir.BoolNode):
+        return expr
+
+    @_rewrite.register
+    def _(self, expr: ir.NameRef):
+        return expr
+
+
 class StmtVisitor:
 
     @singledispatchmethod
