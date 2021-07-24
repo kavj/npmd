@@ -332,7 +332,7 @@ def make_loop_counter(iterables, syms):
         step, min_interval_width = min_interval_widths.popitem()
         counter = ir.AffineSeq(ir.Zero, min_interval_width, step)
     else:
-        iter_counts = tuple(make_iter_count_expr(step, width) for (step, width) in min_interval_widths.items())
+        iter_counts = {make_iter_count_expr(step, width) for (step, width) in min_interval_widths.items()}
         min_iter_count = ir.Min(iter_counts)
         counter = ir.AffineSeq(ir.Zero, min_iter_count, ir.One)
 
