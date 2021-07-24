@@ -55,6 +55,18 @@ binops = {"+": operator.add,
           }
 
 
+def wrap_constant(c):
+    if isinstance(c, bool):
+        return ir.BoolNode(c)
+    if isinstance(c, numbers.Integral):
+        return ir.IntNode(c)
+    elif isinstance(c, numbers.Real):
+        return ir.FloatNode(c)
+    else:
+        msg = f"Can't construct constant node for unsupported constant type {type(c)}"
+        raise NotImplementedError(msg)
+
+
 def is_pow(expr):
     return isinstance(expr, ir.BinOp) and expr.op in ("**", "**=")
 
@@ -132,7 +144,8 @@ def _(expr: ir.BinOp):
     right = fold_if_constant(expr.right)
     if left.constant and right.constant:
         oper = binops[expr.op]
-        repl = oper(left, right)
+        repl = oper(left.value, right.value)
+        repl = wrap_constant(repl)
     else:
         repl = ir.BinOp(left, right, op)
     return repl
@@ -143,7 +156,7 @@ def _(expr: ir.UnaryOp):
     value = fold_if_constant(expr.value)
     if value.constant:
         oper = unaryops[expr.op]
-        repl = wrap_constant(oper(value))
+        repl = wrap_constant(oper(value.value))
     else:
         repl = ir.UnaryOp(value, expr.op)
     return repl

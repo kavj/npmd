@@ -2,7 +2,7 @@ import os
 
 from TreePipeline import run_tree_pipeline as rtp
 from printing import printtree
-from ir import ArrayType
+from ir import ArrayType, One
 
 # tests = ("test_conditional_terminated.py",)
 
@@ -13,7 +13,7 @@ tests = ("test_forifcont.py",)
 # "test_pass.py", "test_conditional_terminated.py", "test_bothterminated.py", "test_chained_comparisons.py",
 # "test_folding.py", "test_fold_unreachable.py", "test_normalize_return_flow.py")
 
-array_n = ArrayType(("n",), float)
+array_n = ArrayType(One, float)
 
 # uws_types = {"unpack_test": {"a": array_n,
 #                             "b": array_n,

@@ -204,8 +204,8 @@ class ArrayType:
     This is necessary in order to describe array parameters on input without ambiguity.
     """
 
-    ndims: typing.Union[IntNode]
-    dtype: typing.Union[type, IntType, FloatType, PredicateType]
+    ndims: IntNode
+    dtype: typing.Union[IntType, FloatType, PredicateType]
 
     @property
     def array_type(self):
