@@ -213,9 +213,9 @@ class symbol:
 def make_numpy_call(node: ir.Call):
     name = node.func
     if name == "numpy.ones":
-        fill_value = ir.IntNode(1)
+        fill_value = ir.One
     elif name == "numpy.zeros":
-        fill_value = ir.IntNode(0)
+        fill_value = ir.Zero
     else:
         if name != "numpy.empty":
             raise NotImplementedError

@@ -175,6 +175,11 @@ class IntNode(Constant):
         yield
 
 
+# commonly used
+
+Zero = IntNode(0)
+One = IntNode(1)
+
 # Top Level
 
 

@@ -98,13 +98,13 @@ def enter_for_loop(header: ir.ForLoop, lltypes):
     # we'll need to add the exception code for illegal (here) step
     if counter.reversed:
         end_expr = ">"
-        if counter.step == ir.IntNode(1):
+        if counter.step == ir.One:
             step_expr = f"--{loop_index}"
         else:
             step_expr = f"{loop_index} -= {counter.step}"
     else:
         end_expr = "<"
-        if counter.step == ir.IntNode(1):
+        if counter.step == ir.One:
             step_expr = f"++{loop_index}"
         else:
             step_expr = f"{loop_index} += {counter.step}"

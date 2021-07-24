@@ -184,18 +184,18 @@ def _(iterable: ir.Subscript, symbols):
         if symbols.lookup(value).ndims < 2:
             msg = f"Cannot iterate over a scalar reference {iterable}."
             raise ValueError(msg)
-        counter = ir.AffineSeq(ir.IntNode(0), array_type.dims[1], ir.AffineSeq(1))
+        counter = ir.AffineSeq(ir.Zero, array_type.dims[1], ir.One)
     return counter
 
 
 @make_affine_counter.register
 def _(iterable: ir.ArrayArg):
-    return ir.AffineSeq(ir.IntNode(0), iterable.dims[0], ir.IntNode(1))
+    return ir.AffineSeq(ir.Zero, iterable.dims[0], ir.One)
 
 
 @make_affine_counter.register
 def _(iterable: ir.NameRef):
-    counter = ir.AffineSeq(ir.IntNode(0), ir.Length(iterable), ir.IntNode(1))
+    counter = ir.AffineSeq(ir.Zero, ir.Length(iterable), ir.One)
     return counter
 
 
@@ -210,9 +210,9 @@ def _(iterable: ir.Subscript):
         if iterable.stop is not None:
             stop = ir.Min(stop, iterable.stop)
     else:
-        start = ir.IntNode(0)
+        start = ir.Zero
         stop = ir.Length(iterable)
-        step = ir.IntNode(1)
+        step = ir.One
     counter = ir.AffineSeq(start, stop, step)
     return counter
 
@@ -223,13 +223,12 @@ def get_sequence_step(iterable):
             return iterable.slice.step
     elif isinstance(iterable, ir.AffineSeq):
         return iterable.step
-    return ir.IntNode(1)
+    return ir.One
 
 
 def find_min_interval_width(intervals):
     lower_bounds = set()
     upper_bounds = set()
-    zero = ir.IntNode(0)
 
     for lower, upper in intervals:
         lower_bounds.add(lower)
@@ -278,6 +277,28 @@ def find_min_interval_width(intervals):
     return min_interval_width
 
 
+def make_iter_count_expr(span, step):
+    if step == ir.Zero:
+        # catches some cases which are not folded, with a more detailed message
+        msg = f"Interval or range calculations may not use a step size of zero."
+        raise ZeroDivisionError(msg)
+    base = ir.BinOp(span, step, "//")
+    base = fold_if_constant(base)
+    remainder = ir.BinOp(span, step, "%")
+    remainder = fold_if_constant(remainder)
+    if remainder.constant:
+        if operator.gt(remainder.value, 0):
+            expr = ir.BinOp(base, ir.One, "+")
+            expr = fold_if_constant(expr)
+        else:
+            expr = base
+    else:
+        cond = ir.BinOp(remainder, ir.Zero, ">")
+        fringe = ir.Ternary(cond, ir.One, ir.Zero)
+        expr = ir.BinOp(base, fringe, "+")
+    return expr
+
+
 def make_loop_counter(iterables, syms):
     """
     Map a combination of array iterators and range and enumerate calls to a set of counters,
@@ -302,59 +323,29 @@ def make_loop_counter(iterables, syms):
 
     # For each possibly unique step size, simplify runtime interval width
     # calculations as much as possible.
-    grouped = []
+    min_interval_widths = {}
     for step, counter_group in by_step.items():
-        # min_interval =
-        min_interv = find_minimum_interval_width(counter_group)
+        min_interval_widths[step] = find_minimum_interval_width(counter_group)
 
-
-    if len(grouped) == 1:
-        # If there's one step size, we can use use it as a loop index
-        # step size without explicitly computing iteration count at this stage.
-
-        pass
+    if len(min_interval_widths) == 1:
+        # we can make a loop counter of the form range(0, min_interval_width, step)
+        step, min_interval_width = min_interval_widths.popitem()
+        counter = ir.AffineSeq(ir.Zero, min_interval_width, step)
     else:
-        pass
+        iter_counts = tuple(make_iter_count_expr(step, width) for (step, width) in min_interval_widths.items())
+        min_iter_count = ir.Min(iter_counts)
+        counter = ir.AffineSeq(ir.Zero, min_iter_count, ir.One)
 
-    # We can still optimize based on 1-2 uniform parameters.
-    starts = set()
-    stops = set()
-    steps = set()
-
-    for c in counters:
-        starts.add(c.start)
-        stops.add(c.stop)
-        steps.add(c.step)
-
-    if len(steps) == 1:
-        step, = steps
-        if len(starts) == 1:
-            start, = starts
-            stop = ir.Min(stops)
-            counter = ir.AffineSeq(start, stop, step)
-        elif len(stops) == 1:
-            # Here we are better off normalizing to start at 0
-            start = ir.Max(starts)
-            stop, = stops
-            interval_width = ir.BinOp(stop, start, "-")
-            counter = ir.AffineSeq(ir.IntNode(0), interval_width, step)
-        else:
-            # compute minimum interval width
-            pass
-    else:
-        # different strides, simplification steps above apply per stride,
-        # with the caveat that we have to explicitly compute iteration count
-        # in the end.
-        pass
+    return counter
 
 
 def make_min_sliced_len_expr(slices, leading_dim_expr):
     if not slices:
         return leading_dim_expr
     s = slices[0]
-    bound = leading_dim_expr if (s.stop is None or s.start == ir.IntNode(0)) else ir.BinOp(s.stop, s.start, "-")
+    bound = leading_dim_expr if (s.stop is None or s.start == ir.Zero) else ir.BinOp(s.stop, s.start, "-")
     for s in slices[1:]:
-        b = leading_dim_expr if (s.stop is None or s.start == ir.IntNode(0)) else ir.BinOp(s.stop, s.start, "-")
+        b = leading_dim_expr if (s.stop is None or s.start == ir.Zero) else ir.BinOp(s.stop, s.start, "-")
         bound = ir.Ternary(ir.BinOp(bound, b, "<"), bound, b)
     return bound
 
@@ -362,13 +353,13 @@ def make_min_sliced_len_expr(slices, leading_dim_expr):
 def make_explicit_iter_count(counter):
     if all(isinstance(subexpr, ir.IntNode) for subexpr in counter.subexprs):
         count = numeric_max_iter_count(counter)
-    elif counter.step == ir.IntNode(1):
+    elif counter.step == ir.One:
         count = ir.BinOp(counter.stop, counter.start, "-")
     else:
         on_false = ir.BinOp(counter.stop, counter.start, "-")
         # avoid integer division
         test = ir.BinOp(interval, counter.step, "&")
-        on_true = ir.BinOp(on_false, ir.IntNode(1), "+")
+        on_true = ir.BinOp(on_false, ir.One, "+")
         count = ir.Ternary(test, on_true, on_false)
     return count
 
@@ -396,7 +387,7 @@ def _(base: ir.NameRef, syms):
     arr = sym.type_
     leading = arr.dims[0]
     # this is delinearized, so not a direct access func
-    counter = ir.AffineSeq(ir.IntNode(0), leading, ir.IntNode(1))
+    counter = ir.AffineSeq(ir.Zero, leading, ir.One)
     return counter
 
 
@@ -418,10 +409,10 @@ def _(base: ir.Subscript, syms):
         # assume single subscript
         if len(arr.dims) < 2:
             raise ValueError
-        start = ir.IntNode(0)
+        start = ir.Zero
         stop = arr.dims[1]
         stop = wrap_constant(stop)
-        step = ir.IntNode(1)
+        step = ir.One
         counter = ir.AffineSeq(start, stop, step)
     return counter
 

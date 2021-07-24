@@ -23,8 +23,6 @@ class prettystringify:
     @singledispatchmethod
     def visit(self, node):
         # handle non-parametric statements
-        if isinstance(node, ir.EllipsisNode):
-            return "..."
         return node.__class__.__name__.lower()
 
     @visit.register
@@ -138,12 +136,12 @@ class prettystringify:
         if node.stop is None:
             # rarely used, just marking enumerate without full context
             s = "enumerate()"
-        elif node.start == ir.IntNode(0):
-            if node.step == ir.IntNode(1):
+        elif node.start == ir.Zero:
+            if node.step == ir.One:
                 s = f"range({self.visit(node.stop)})"
             else:
                 s = f"range(0, {self.visit(node.stop)}, {self.visit(node.step)})"
-        elif node.step == ir.IntNode(1):
+        elif node.step == ir.One:
             s = f"range({self.visit(node.start)}, {self.visit(node.stop)})"
         else:
             s = f"range({self.visit(node.start)}, {self.visit(node.stop)}, {self.visit(node.step)})"

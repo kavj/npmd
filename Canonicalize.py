@@ -399,7 +399,7 @@ class CallSpecialize:
 
 
 def EnumerateBuilder(mapping):
-    return ir.Zip((ir.AffineSeq(mapping["start"], None, ir.IntNode(1)), mapping["iterable"]))
+    return ir.Zip((ir.AffineSeq(mapping["start"], None, ir.One), mapping["iterable"]))
 
 
 def IterBuilder(mapping):
@@ -449,9 +449,9 @@ def RangeBuilder(node: ir.Call):
     elif node.keywords:
         return None, "Range does not support keyword arguments"
     if argct == 1:
-        repl = ir.AffineSeq(ir.IntNode(0), node.args[0], ir.IntNode(1))
+        repl = ir.AffineSeq(ir.Zero, node.args[0], ir.One)
     elif argct == 2:
-        repl = ir.AffineSeq(node.args[0], node.args[1], ir.IntNode(1))
+        repl = ir.AffineSeq(node.args[0], node.args[1], ir.One)
     else:
         repl = ir.AffineSeq(node.args[0], node.args[1], node.args[2])
     return repl
@@ -460,7 +460,7 @@ def RangeBuilder(node: ir.Call):
 builders = {"enumerate": CallSpecialize(name="enumerate",
                                         args=("iterable", "start"),
                                         repl=EnumerateBuilder,
-                                        defaults={"start": ir.IntNode(0)},
+                                        defaults={"start": ir.Zero},
                                         allows_keywords=True),
 
             "reversed": CallSpecialize(name="reversed",
