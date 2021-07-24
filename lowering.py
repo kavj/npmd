@@ -364,61 +364,8 @@ def make_explicit_iter_count(counter):
     return count
 
 
-@singledispatch
-def make_counter(base, syms):
-    msg = f"Make counter not supported for input type {type(base)}"
-    raise NotImplementedError(msg)
-
-
-@make_counter.register
-def _(base: ir.AffineSeq, syms):
-    return base
-
-
-@make_counter.register
-def _(base: ir.NameRef, syms):
-    if not syms.is_array(base):
-        msg = f"Variable {base} is iterated over without an array type declaration or assignment."
-        raise KeyError(msg)
-    sym = syms.lookup(base)
-    if not sym.is_array:
-        msg = f"Cannot create counter from non-array type {sym.type_}"
-        raise TypeError(msg)
-    arr = sym.type_
-    leading = arr.dims[0]
-    # this is delinearized, so not a direct access func
-    counter = ir.AffineSeq(ir.Zero, leading, ir.One)
-    return counter
-
-
-@make_counter.register
-def _(base: ir.Subscript, syms):
-    array_ = syms.lookup(base.value)
-    # avoid linearizing
-    sl = base.slice
-    if isinstance(sl, ir.Slice):
-        start = sl.start
-        stop = arr.dims[0]
-        if sl.stop is None:
-            stop = sl.stop
-        else:
-            stop = ir.Min(stop, sl.stop)
-        step = sl.step
-        counter = ir.AffineSeq(start, stop, step)
-    else:
-        # assume single subscript
-        if len(arr.dims) < 2:
-            raise ValueError
-        start = ir.Zero
-        stop = arr.dims[1]
-        stop = wrap_constant(stop)
-        step = ir.One
-        counter = ir.AffineSeq(start, stop, step)
-    return counter
-
-
 def make_loop_interval(targets, iterables, symbols, loop_index):
-    counters = {make_counter(iterable, symbols) for iterable in iterables}
+    counters = {make_affine_counter(iterable, symbols) for iterable in iterables}
     # This has the annoying effect of dragging around the symbol table.
     # Since we need to be able to reach an array definition along each path
     # and array names are not meant to be reassigned, we should be passing an array
