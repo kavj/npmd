@@ -59,7 +59,7 @@ def is_pow(expr):
     return isinstance(expr, ir.BinOp) and expr.op in ("**", "**=")
 
 
-def simplify_if_square_root(expr):
+def rewrite_if_matches_square_root(expr):
     if is_pow(expr):
         repl = expr
         coeff = expr.right
@@ -69,7 +69,7 @@ def simplify_if_square_root(expr):
     return repl
 
 
-def simplify_if_is_square(expr):
+def rewrite_if_matches_square(expr):
     repl = expr
     if is_pow(expr):
         coeff = expr.right
@@ -79,7 +79,7 @@ def simplify_if_is_square(expr):
     return repl
 
 
-def simplify_if_sign_flip(expr):
+def rewrite_if_matches_sign_flip(expr):
     repl = expr
     if isinstance(expr, ir.BinOp) and op in ("*", "*="):
         unary_minus_equiv = ir.IntNode(-1)
@@ -93,9 +93,9 @@ def simplify_if_sign_flip(expr):
 
 
 def simplify_binop(expr: ir.BinOp):
-    repl = simplify_if_is_square(expr)
-    repl = simplify_if_square_root(repl)
-    repl = simplify_if_sign_flip(repl)
+    repl = rewrite_if_matches_square(expr)
+    repl = rewrite_if_matches_square_root(repl)
+    repl = rewrite_if_matches_sign_flip(repl)
     return repl
 
 
