@@ -312,7 +312,8 @@ def make_iter_count_expr(span, step):
         step_ = step.value
         base_iteration_count = operator.floordiv(width, step_)
         fringe = 1 if operator.and_(width, step_) else 0
-        iter_count = base_iteration_count + fringe
+        iter_count = operator.add(base_iteration_count, fringe)
+        iter_count = wrap_constant(iter_count)
     else:
         base_iteation_count = ir.BinOp(span, step, "//")
         test = ir.BinOp(span, step, "&")
