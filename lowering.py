@@ -239,6 +239,16 @@ def get_sequence_step(iterable):
     return ir.One
 
 
+# Todo: fill in stubs. These are needed to avoid sensitivity in ordering of
+#       min/max expression creation for integer expressions.
+def merge_integer_min(a: ir.Min, b: ir.Min):
+    raise NotImplementedError
+
+
+def merge_integer_max():
+    raise NotImplementedError
+
+
 def find_min_interval_width(intervals):
     lower_bounds = set()
     upper_bounds = set()
@@ -295,21 +305,20 @@ def make_iter_count_expr(span, step):
         # catches some cases which are not folded, with a more detailed message
         msg = f"Interval or range calculations may not use a step size of zero."
         raise ZeroDivisionError(msg)
-    base = ir.BinOp(span, step, "//")
-    base = fold_if_constant(base)
-    remainder = ir.BinOp(span, step, "%")
-    remainder = fold_if_constant(remainder)
-    if remainder.constant:
-        if operator.gt(remainder.value, 0):
-            expr = ir.BinOp(base, ir.One, "+")
-            expr = fold_if_constant(expr)
-        else:
-            expr = base
+    if span.constant and step.constant:
+        assert isinstance(span, ir.IntNode)
+        assert isinstance(step, ir.IntNode)
+        width = span.value
+        step_ = step.value
+        base_iteration_count = operator.floordiv(width, step_)
+        fringe = 1 if operator.and_(width, step_) else 0
+        iter_count = base_iteration_count + fringe
     else:
-        cond = ir.BinOp(remainder, ir.Zero, ">")
-        fringe = ir.Ternary(cond, ir.One, ir.Zero)
-        expr = ir.BinOp(base, fringe, "+")
-    return expr
+        base_iteation_count = ir.BinOp(span, step, "//")
+        test = ir.BinOp(span, step, "&")
+        fringe = ir.Ternary(test, ir.One, ir.Zero)
+        iter_count = ir.BinOp(base_iteation_count, fringe, "+")
+    return iter_count
 
 
 def make_loop_counter(iterables, syms):
