@@ -110,14 +110,27 @@ class RuleBasedRewriter:
         self.rules = {}
         self.cache = {}
 
-    def clear(self):
-        self.rules = {}
+    def clear(self, expr=None):
+        if expr is None:
+            self.rules.clear()
+        else:
+            self.rules.pop(expr, None)
+
+    def update_rule(self, expr, output):
+        assert output is not None
+        curr = self.rules.get(expr)
+        if curr is None or curr != output:
+            self.rules[expr] = output
 
     def make_rule(self, expr, output):
-        if expr in self.rules:
-            msg = f"Already have an existing rule for {expr}."
-            raise KeyError(msg)
-        self.rules[expr] = output
+        assert output is not None
+        curr = self.rules.get(expr)
+        if curr is not None:
+            if curr != output:
+                msg = f"Already have a non-matching existing rule for {expr}."
+                raise KeyError(msg)
+        else:
+            self.rules[expr] = output
 
     def lookup(self, expr):
         output = self.rules.get(expr)
