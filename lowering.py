@@ -202,6 +202,8 @@ def _(iterable: ir.NameRef):
 @make_affine_counter.register
 def _(iterable: ir.Subscript):
     if isinstance(iterable.slice, ir.Slice):
+        # We can convert iteration over a sliced array
+        # to affine parameters with respect to the base array.
         start = iterable.start
         stop = ir.Length(iterable.value)
         step = iterable.step
@@ -224,6 +226,58 @@ def get_sequence_step(iterable):
     return ir.IntNode(1)
 
 
+def find_min_interval_width(intervals):
+    lower_bounds = set()
+    upper_bounds = set()
+    zero = ir.IntNode(0)
+
+    for lower, upper in intervals:
+        lower_bounds.add(lower)
+        upper_bounds.add(upper)
+
+    unique_upper_count = len(upper_bounds)
+    unique_lower_count = len(lower_bounds)
+
+    if unique_upper_count == unique_lower_count == 1:
+        lower, = lower_bounds
+        upper, = upper_bounds
+        diff_expr = ir.BinOp(upper, lower, "-")
+        min_interval_width = fold_if_constant(expr)
+        assert isinstance(min_interval_width, ir.IntNode) or not min_interval_width.constant
+    elif unique_upper_count == 1:
+        lower = ir.Max(lower_bounds)
+        upper, = upper_bounds
+        min_interval_width = ir.BinOp(upper, lower, "-")
+    elif unique_lower_count == 1:
+        lower, = lower_bounds
+        upper = ir.Min(upper_bounds)
+        min_interval_width = ir.BinOp(upper, lower, "-")
+    else:
+        # reduce over all pairs
+        interval_widths = set()
+        numeric_min = None
+        for lower, upper in intervals:
+            width = ir.BinOp(upper, lower, "-")
+            width = fold_if_constant(width)
+            if width.constant:
+                assert isinstance(width, ir.IntNode)
+                if numeric_min is None:
+                    numeric_min = width.value
+                else:
+                    numeric_min = min(width.value, numeric_min)
+            else:
+                interval_widths.add(width)
+        if numeric_min is None:
+            min_interval_width = ir.Min(interval_widths)
+        elif numeric_min <= 0:
+            # avoid clamping here
+            min_interval_width = wrap_constant(numeric_min)
+        else:
+            interval_widths.add(wrap_constant(numeric_min))
+            min_interval_width = ir.Min(interval_widths)
+    return min_interval_width
+
+
 def make_loop_counter(iterables, syms):
     """
     Map a combination of array iterators and range and enumerate calls to a set of counters,
@@ -242,17 +296,25 @@ def make_loop_counter(iterables, syms):
         return counter
 
     # group by step
-
     by_step = defaultdict(set)
-
     for c in counters:
         by_step[c.step].add((c.start, c.stop))
 
+    # For each possibly unique step size, simplify runtime interval width
+    # calculations as much as possible.
     grouped = []
     for step, counter_group in by_step.items():
         # min_interval =
-        grouped.append(min_interval)
+        min_interv = find_minimum_interval_width(counter_group)
 
+
+    if len(grouped) == 1:
+        # If there's one step size, we can use use it as a loop index
+        # step size without explicitly computing iteration count at this stage.
+
+        pass
+    else:
+        pass
 
     # We can still optimize based on 1-2 uniform parameters.
     starts = set()
@@ -286,7 +348,6 @@ def make_loop_counter(iterables, syms):
         pass
 
 
-
 def make_min_sliced_len_expr(slices, leading_dim_expr):
     if not slices:
         return leading_dim_expr
@@ -310,7 +371,6 @@ def make_explicit_iter_count(counter):
         on_true = ir.BinOp(on_false, ir.IntNode(1), "+")
         count = ir.Ternary(test, on_true, on_false)
     return count
-
 
 
 @singledispatch
