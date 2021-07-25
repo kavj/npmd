@@ -109,11 +109,6 @@ class ValueRef(ABC):
 
     """
 
-    @property
-    @abstractmethod
-    def subexprs(self):
-        raise NotImplementedError
-
     constant: clscond = False
 
 
@@ -127,11 +122,6 @@ class Constant(ValueRef):
 
     def __bool__(self):
         return operator.truth(self.value)
-
-    @property
-    def subexprs(self):
-        return
-        yield
 
 
 @dataclass(frozen=True)
@@ -149,30 +139,15 @@ class AttributeRef:
 class BoolNode(Constant):
     value: bool
 
-    @property
-    def subexprs(self):
-        return
-        yield
-
 
 @dataclass(frozen=True)
 class FloatNode(Constant):
     value: numbers.Real
 
-    @property
-    def subexprs(self):
-        return
-        yield
-
 
 @dataclass(frozen=True)
 class IntNode(Constant):
     value: numbers.Integral
-
-    @property
-    def subexprs(self):
-        return
-        yield
 
 
 # commonly used
@@ -188,13 +163,6 @@ class NameRef(ValueRef):
     # variable name ref
     name: str
     constant: clscond = False
-
-    # empty generator to avoid checking
-    # if something is an expression
-    @property
-    def subexprs(self):
-        return
-        yield
 
 
 @dataclass(frozen=True)
@@ -256,10 +224,6 @@ class ArrayRef(ValueRef):
     def ndims(self):
         return self.array_type.ndims
 
-    @property
-    def subexprs(self):
-        yield from ()
-
 
 @dataclass(frozen=True)
 class ViewRef:
@@ -292,11 +256,6 @@ class ViewRef:
     @cached_property
     def name(self):
         return self.base.name
-
-    @property
-    def subexprs(self):
-        return
-        yield
 
 
 @dataclass(frozen=True)
@@ -470,6 +429,8 @@ class Call(ValueRef):
     @property
     def subexprs(self):
         for arg in self.args:
+            yield arg
+        for kw, arg in self.keywords:
             yield arg
 
     @property

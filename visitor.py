@@ -18,53 +18,30 @@ def walk_assigns(stmts, reverse=False):
                 yield stmt.target, stmt.value
 
 
-def walk_parameters(node):
+def walk_expr_parameters(node):
     """
     Walk an expression, yielding only sub-expressions that are not expressions themselves.
 
     """
-    if not isinstance(node, ir.ValueRef):
-        assert not isinstance(node, ir.StmtBase)
-        yield node
-    else:
-        queued = [node]
-        seen = set()
-        while queued:
-            expr = queued.pop()
-            if expr in seen:
-                continue
+    if hasattr(node, "subexprs"):
+        for subexpr in node.subexprs:
+            if hasattr(subexpr, "subexprs"):
+                yield from walk_expr_parameters(subexpr)
             else:
-                seen.add(expr)
-                if isinstance(expr, ir.ValueRef):
-                    queued.extend(expr.subexprs)
-                else:
-                    yield expr
+                yield subexpr
 
 
 def walk_expr(node):
     """
-    This walks an expression in post order, yielding everything including the original.
-    This avoids having to check whether something is an expression as opposed to a name or constant.
-    Declaring a name as an implicit expression produces inconsistent behavior, as we can explicitly
-    bind to names.
+    walk an expression depth first in post order, yielding everything but the original node
     """
-
-    queued = [node]
-    seen = set()
-    sent = set()
-    while queued:
-        expr = queued.pop()
-        if expr in seen:
-            if expr not in sent:
-                sent.add(expr)
-                yield expr
-        else:
-            seen.add(expr)
-            queued.append(expr)
-            queued.extend(expr.subexprs)
+    if hasattr(node, "subexprs"):
+        for subexpr in node.subexprs:
+            yield from walk_expr(subexpr)
+            yield subexpr
 
 
-def walk(node):
+def walk_statements(node):
     """
     extending walk interface to include lists
     """
@@ -72,13 +49,13 @@ def walk(node):
     if isinstance(node, list):
         for stmt in node:
             yield stmt
-            if is_control_flow_entry(stmt):
-                yield from walk(stmt)
+            if isinstance(stmt, (ir.ForLoop, ir.WhileLoop, ir.IfElse)):
+                yield from walk_statements(stmt)
     elif isinstance(node, (ir.ForLoop, ir.WhileLoop)):
-        yield from walk(node.body)
+        yield from walk_statements(node.body)
     elif isinstance(node, ir.IfElse):
-        yield from walk(node.if_branch)
-        yield from walk(node.else_branch)
+        yield from walk_statements(node.if_branch)
+        yield from walk_statements(node.else_branch)
     else:
         raise TypeError(f"Cannot walk type of {type(node)}.")
 
