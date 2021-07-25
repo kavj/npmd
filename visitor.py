@@ -331,10 +331,11 @@ class StmtTransformer:
         repl = []
         for stmt in node:
             stmt = self.visit(stmt)
-            # ignore unreachable
-            if isinstance(stmt, (ir.Continue, ir.Break, ir.Return)):
-                break
-        return repl
+            repl.append(stmt)
+        if repl != node:
+            # Only return a copy if it differs from the input.
+            node = repl
+        return node
 
     @visit.register
     def _(self, node: ir.Function):
@@ -342,20 +343,25 @@ class StmtTransformer:
 
     @visit.register
     def _(self, node: ir.IfElse):
-        self.visit(node.if_branch)
-        self.visit(node.else_branch)
+        if_branch = self.visit(node.if_branch)
+        else_branch = self.visit(node.else_branch)
+        if if_branch is not node.if_branch or else_branch is not node.else_branch:
+            node = ir.IfElse(node.test, if_branch, else_branch, node.pos)
+        return node
 
     @visit.register
     def _(self, node: ir.ForLoop):
         body = self.visit(node.body)
-        repl = ir.ForLoop(node.target, node.iterable, body, node.pos)
-        return repl
+        if body != node.body:
+            node = ir.ForLoop(node.target, node.iterable, body, node.pos)
+        return node
 
     @visit.register
     def _(self, node: ir.WhileLoop):
         body = self.visit(node.body)
-        repl = ir.WhileLoop(node.test, body, node.pos)
-        return repl
+        if body is not node.body:
+            node = ir.WhileLoop(node.test, body, node.pos)
+        return node
 
     @visit.register
     def _(self, node: ir.Assign):
