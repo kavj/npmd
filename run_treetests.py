@@ -1,8 +1,9 @@
 import os
+import numpy as np
 
 from TreePipeline import run_tree_pipeline as rtp
 from printing import printtree
-from ir import ArrayType, One
+from ir import ArrayRef, One
 
 # tests = ("test_conditional_terminated.py",)
 
@@ -13,7 +14,7 @@ tests = ("test_forifcont.py",)
 # "test_pass.py", "test_conditional_terminated.py", "test_bothterminated.py", "test_chained_comparisons.py",
 # "test_folding.py", "test_fold_unreachable.py", "test_normalize_return_flow.py")
 
-array_n = ArrayType(One, float)
+array_n = ArrayRef("blah", ("n",), np.float64)
 
 # uws_types = {"unpack_test": {"a": array_n,
 #                             "b": array_n,

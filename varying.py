@@ -2,7 +2,7 @@ from collections import defaultdict
 from functools import singledispatchmethod
 
 import ir
-from visitor import StmtVisitor, walk
+from visitor import StmtVisitor, walk_statements
 
 """
 Very conservative varying checks. These determine uniformity at a variable name level, ignoring local dataflow
@@ -118,7 +118,7 @@ class MapTargets(StmtVisitor):
 
 def collect_assigned(entry):
     exprs = defaultdict(set)
-    for stmt in walk(entry):
+    for stmt in walk_statements(entry):
         if isinstance(stmt, ir.Assign):
             # only record expressions recorded as top level expressions
             if isinstance(stmt.target, ir.NameRef):

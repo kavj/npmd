@@ -3,10 +3,6 @@ from functools import singledispatchmethod
 import ir
 
 
-def is_control_flow_entry(node):
-    return isinstance(node, (ir.IfElse, ir.ForLoop, ir.WhileLoop))
-
-
 def walk_assigns(stmts, reverse=False):
     if reverse:
         for stmt in reversed(stmts):

@@ -8,7 +8,7 @@ from functools import singledispatch, singledispatchmethod
 import ir
 import symbols
 
-from visitor import StmtVisitor, walk, walk_branches
+from visitor import StmtVisitor, walk_statements, walk_branches
 
 
 unaryops = {"+": operator.pos,
@@ -199,11 +199,6 @@ def _(iterable: ir.Subscript, symbols):
             raise ValueError(msg)
         counter = ir.AffineSeq(ir.Zero, array_type.dims[1], ir.One)
     return counter
-
-
-@make_affine_counter.register
-def _(iterable: ir.ArrayArg):
-    return ir.AffineSeq(ir.Zero, iterable.dims[0], ir.One)
 
 
 @make_affine_counter.register

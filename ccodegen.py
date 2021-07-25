@@ -1,7 +1,5 @@
 import ctypes
 import numpy as np
-import textwrap
-import tempfile
 
 from contextlib import ContextDecorator
 from functools import singledispatchmethod
@@ -81,11 +79,11 @@ class FuncWrapperGen:
 
 
 def enter_func(func, lltypes, return_type):
-    func_name = extract_name(func.name)
+    # func_name = extract_name(func.name)
     rt = lltypes.get(return_type)
-    assert rt is not None
-    args = (f"{lltypes[arg]} {extract_name(arg)}" for arg in func.args)
-    return f"{rt} {func_name} ({', '.join(arg for arg in args)})"
+    # assert rt is not None
+    # args = (f"{lltypes[arg]} {extract_name(arg)}" for arg in func.args)
+    # return f"{rt} {func_name} ({', '.join(arg for arg in args)})"
 
 
 def extract_leading_dim(array):

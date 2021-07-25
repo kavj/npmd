@@ -15,8 +15,6 @@ import ir
 
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
 
-internal_scalar_type = (ir.IntType, ir.FloatType, ir.PredicateType)
-
 
 def extract_name(name):
     if not isinstance(name, (str, ir.NameRef)):
@@ -79,67 +77,6 @@ def _(input: numbers.Real):
     return ir.FloatNode(input)
 
 
-class TypeBuilder:
-    # partly intern basic types
-    # Predicates don't really differ between integral and floating point representations,
-    # but AVX intrinsics distinguish between the two, based on the operand types that generated
-    # the predicate mask and how it is used.
-    _internal_types = {"int32": ir.IntType(bitwidth=32),
-                       "int64": ir.IntType(bitwidth=64),
-                       "float32": ir.FloatType(bitwidth=32),
-                       "float64": ir.FloatType(bitwidth=64),
-                       "pred32": ir.PredicateType(bitwidth=32),
-                       "pred64": ir.PredicateType(bitwidth=64)}
-
-    # These are only used for interface lookups, since we
-    # don't distinguish numpy specific types internally.
-    _standard_lookup = {np.int32: _internal_types["int32"],
-                        np.int64: _internal_types["int64"],
-                        np.float32: _internal_types["float32"],
-                        np.float64: _internal_types["float64"],
-                        np.float: _internal_types["float64"],
-                        float: _internal_types["float64"]}
-
-    def __init__(self, default_int64=True):
-
-        self.lookup = self._standard_lookup.copy()
-
-        if default_int64:
-            self.lookup[int] = self._internal_types["int64"]
-        else:
-            self.lookup[int] = self._internal_types["int32"]
-
-    def get_internal_type(self, item):
-        if isinstance(item, ir.ArrayType):
-            input_scalar_type = item.dtype
-            if isinstance(input_scalar_type, internal_scalar_type):
-                dtype = item.dtype
-            else:
-                dtype = self.lookup.get(input_scalar_type)
-            if dtype is None:
-                msg = f"Cannot map array data type {input_scalar_type} to an internal type."
-                raise KeyError(msg)
-            dims = tuple(wrap_input(d) for d in item.dims)
-            internal_type = ir.ArrayType(dims, dtype)
-        else:
-            if isinstance(item, internal_scalar_type):
-                internal_type = item
-            else:
-                internal_type = self.lookup.get(item)
-                if internal_type is None:
-                    msg = f"Unable to map input parameter {item} to an internal type"
-                    raise KeyError(msg)
-        return internal_type
-
-    @property
-    def default_float(self):
-        return self.lookup[float]
-
-    @property
-    def default_int(self):
-        return self.lookup[int]
-
-
 class FunctionContext:
 
     def __init__(self, func, types):
@@ -199,13 +136,11 @@ class symbol:
 
     @property
     def is_array(self):
-        return isinstance(self.type_, ir.ArrayType)
+        return isinstance(self.type_, ir.ArrayRef)
 
     @property
     def is_integer(self):
-        if isinstance(self.type_, ir.ArrayType):
-            return False
-        return self.type_.integral
+        return isinstance(self.type_, (ir.Int32, ir.Int64))
 
 
 # array creation nodes
@@ -239,10 +174,14 @@ def make_numpy_call(node: ir.Call):
 
 
 class symboltable:
-    def __init__(self, type_builder):
+
+    scalar_types = frozenset({ir.Int32, ir.Int64, ir.Float32, ir.Float64, ir.Predicate32, ir.Predicate64})
+
+    _scalar_lookup = {int: ir.Int64, float: ir.}
+
+    def __init__(self, source_names, default_int_type=ir.Int64):
         self.symbols = {}
-        self.added = set()
-        self.type_builder = type_builder
+        self.from_source = source_names
         self.prefixes = {}  # prefix for adding enumerated variable names
 
     def declares(self, name):
@@ -316,13 +255,13 @@ class symboltable:
     # In the case of is_added=False, this is the original name. Otherwise it
     # may be a unique variable name that instantiates some renaming or implementation binding.
 
-    def add_var(self, name, type_, added):
+    def add_scalar(self, name, type_, added):
         """
 
         """
         # run type check by default, to avoid internal array types
         # with Python or numpy types as parameters.
-        type_ = self.type_builder.get_internal_type(type_)
+
         name = wrap_input(name)
         if added:
             name = self.make_unique_name(name)

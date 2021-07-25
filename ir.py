@@ -1,20 +1,19 @@
 from __future__ import annotations
 
+import numpy as np
 import numbers
 import operator
 import typing
-from abc import ABC, abstractmethod
+from abc import ABC
 from collections.abc import Iterable
 from dataclasses import dataclass
-from functools import cached_property, singledispatchmethod
-
+from functools import cached_property
 
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
 inplace_ops = frozenset({"+=", "-=", "*=", "/=", "//=", "%=", "**=", "<<=", ">>=", "|=", "^=", "&=", "@="})
 unaryops = frozenset({"+", "-", "~", "not"})
 boolops = frozenset({"and", "or"})
 compareops = frozenset({"==", "!=", "<", "<=", ">", ">=", "is", "isnot", "in", "notin"})
-
 
 oop_to_inplace = {
     "+": "+=",
@@ -32,7 +31,6 @@ oop_to_inplace = {
     "@": "@=",
 }
 
-
 inplace_to_oop = {
     "+=": "+",
     "-=": "-",
@@ -49,7 +47,6 @@ inplace_to_oop = {
     "@=": "@",
 }
 
-
 supported_builtins = frozenset({'iter', 'range', 'enumerate', 'zip', 'all', 'any', 'max', 'min', 'abs', 'pow',
                                 'round', 'reversed'})
 
@@ -65,29 +62,65 @@ class Position:
 clscond = typing.ClassVar[bool]
 
 
-@dataclass(frozen=True)
-class IntType:
-    bitwidth: int
-    is_array: typing.ClassVar[bool] = False
-    is_integral: typing.ClassVar[bool] = True
+# Types are subject to change.
+# Predicate types included for bookkeeping, as mask types used in SIMD ISAs
+# are not always compatible with C99 bool.
+
+class Int32:
+    bits = 32
+    min_value = -2**31
+    max_value = 2**31-1
+
+    def __hash__(self):
+        return hash((self.__class__.__name__, self.bits))
 
 
-@dataclass(frozen=True)
-class FloatType:
-    bitwidth: int
-    is_array: typing.ClassVar[bool] = False
-    is_integral: typing.ClassVar[bool] = False
+class Int64:
+    bits = 64
+    min_value = -2**63
+    max_value = 2**63-1
+
+    def __hash__(self):
+        return hash((self.__class__.__name__, self.bits))
 
 
-# unfortunately this has to be tracked for lowering to C, where
-# intrinsics must sometimes explicitly cast a predicate.
+class Float32:
+    bits = 64
+    min_value = np.finfo(np.float32).min
+    max_value = np.finfo(np.float32).max
 
-@dataclass(frozen=True)
-class PredicateType:
-    bitwidth: int
-    is_array: typing.ClassVar[bool] = False
-    # Treat predicates as integral by default, since they may be subjected to bit manipulation.
-    is_integral: typing.ClassVar[bool] = True
+    def __hash__(self):
+        return hash((self.__class__.__name__, self.bits))
+
+
+class Float64:
+    bits = 64
+    min_value = np.finfo(np.float64).min
+    max_value = np.finfo(np.float64).max
+
+    def __hash__(self):
+        return hash((self.__class__.__name__, self.bits))
+
+
+class Predicate32:
+    bits = 32
+
+    def __hash__(self):
+        return hash((self.__class__.__name__, 64))
+
+
+class Predicate64:
+    bits = 64
+
+    def __hash__(self):
+        return hash((self.__class__.__name__, 64))
+
+
+class BoolType:
+    bits = 8
+
+    def __hash__(self):
+        return hash((self.__class__.__name__, 8))
 
 
 class StmtBase:
@@ -155,95 +188,39 @@ class IntNode(Constant):
 Zero = IntNode(0)
 One = IntNode(1)
 
+
 # Top Level
 
 
 @dataclass(frozen=True)
-class NameRef(ValueRef):
+class NameRef:
     # variable name ref
     name: str
+
+
+@dataclass(frozen=True)
+class ArrayRef(ValueRef):
+    name: NameRef
+    dims: typing.Tuple[typing.Union[NameRef, IntNode], ...]
+    dtype: typing.Union[IntType, FloatType]
     constant: clscond = False
 
-
-@dataclass(frozen=True)
-class ArrayType:
-    """
-    descriptor for array inputs,
-    This is necessary in order to describe array parameters on input without ambiguity.
-    """
-
-    ndims: IntNode
-    dtype: typing.Union[IntType, FloatType, PredicateType]
-
     @property
-    def array_type(self):
-        return self
-
-    def __post_init__(self):
-        # Zero dimensions must be treated as a scalar, not an array.
-        assert operator.gt(self.ndims.value, 0)
-
-
-@dataclass(frozen=True)
-class ArrayArg:
-    """
-    Array type descriptor
-
-    dtype: scalar type used by this array
-    dims: tuple(str or int,...)
-    stride: input stride
-
-    """
-    dims: typing.Tuple[typing.Union[str, int, NameRef, IntNode], ...]
-    dtype: typing.Union[type, IntType, FloatType, PredicateType]
-
-    @property
-    def array_type(self):
+    def base(self):
         return self
 
     @property
     def ndims(self):
         return len(self.dims)
 
-    def __post_init__(self):
-        # Zero dimensions must be treated as a scalar, not an array.
-        assert len(self.dims) > 0
-
-
-@dataclass(frozen=True)
-class ArrayRef(ValueRef):
-    name: NameRef
-    array_type: ArrayType
-    constant: clscond = False
-
-    @property
-    def base(self):
-        return self
-
-    @property
-    def ndims(self):
-        return self.array_type.ndims
-
 
 @dataclass(frozen=True)
 class ViewRef:
-    derived_from: typing.Union[ArrayRef, ViewRef]
+    # name: NameRef
+    base: typing.Union[ArrayRef, ViewRef]
     slice: typing.Optional[typing.Union[IntNode, Slice, NameRef, BinOp, UnaryOp]]
-    array_type: ArrayType
-    name: NameRef
-    transposed: bool = False
+    transposed: bool
     constant: clscond = False
-
-    @cached_property
-    def base(self):
-        d = self.derived_from
-        seen = {self}
-        while isinstance(d, ViewRef):
-            if d in seen:
-                raise ValueError("contains view cycles")
-            seen.add(d)
-            d = d.derived_from
-        return d
 
     @cached_property
     def dtype(self):
@@ -251,7 +228,10 @@ class ViewRef:
 
     @cached_property
     def ndims(self):
-        return self.array_type.array_type.ndims
+        if isinstance(self.slice, Slice):
+            return self.base.ndims
+        else:
+            return self.base.ndims - 1
 
     @cached_property
     def name(self):
