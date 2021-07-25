@@ -161,12 +161,14 @@ class TreeBuilder(ast.NodeVisitor):
         assert isinstance(line, int)
         self.line = line
 
-    def visit_Attribute(self, node: ast.Attribute) -> ir.AttributeRef:
+    def visit_Attribute(self, node: ast.Attribute) -> ir.NameRef:
         value = self.visit(node.value)
-        if isinstance(value, ir.AttributeRef):
-            value = ir.AttributeRef(value.value, value.attr + node.attr)
+        if isinstance(value, ir.NameRef):
+            name = f"{value.name}.{node.attr}"
+            value = ir.NameRef(name)
         else:
-            value = ir.AttributeRef(value, node.attr)
+            msg = f"Attributes are only supported when attached to names, like 'module.function', received {node}."
+            raise NotImplementedError(msg)
         return value
 
     def visit_Constant(self, node: ast.Constant) -> ir.Constant:

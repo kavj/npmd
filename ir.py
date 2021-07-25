@@ -158,17 +158,6 @@ class Constant(ValueRef):
 
 
 @dataclass(frozen=True)
-class AttributeRef:
-    """
-    Limited number of attributes are read only.
-
-    """
-    value: NameRef
-    attr: str
-    constant: clscond = False
-
-
-@dataclass(frozen=True)
 class BoolNode(Constant):
     value: bool
 
@@ -199,11 +188,16 @@ class NameRef:
 
 
 @dataclass(frozen=True)
+class ArrayType(ValueRef):
+    ndims: int
+    dtype: typing.Hashable
+
+
+@dataclass(frozen=True)
 class ArrayRef(ValueRef):
     name: NameRef
     dims: typing.Tuple[typing.Union[NameRef, IntNode], ...]
-    dtype: typing.Union[IntType, FloatType]
-    constant: clscond = False
+    dtype: typing.Hashable
 
     @property
     def base(self):
@@ -220,7 +214,6 @@ class ViewRef:
     base: typing.Union[ArrayRef, ViewRef]
     slice: typing.Optional[typing.Union[IntNode, Slice, NameRef, BinOp, UnaryOp]]
     transposed: bool
-    constant: clscond = False
 
     @cached_property
     def dtype(self):
@@ -241,7 +234,6 @@ class ViewRef:
 @dataclass(frozen=True)
 class Length(ValueRef):
     value: ValueRef
-    constant: clscond = False
 
     @property
     def subexprs(self):
@@ -252,7 +244,6 @@ class Length(ValueRef):
 class Subscript(ValueRef):
     value: ValueRef
     slice: ValueRef
-    constant: clscond = False
 
     @property
     def subexprs(self):

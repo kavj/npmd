@@ -4,6 +4,7 @@ import builtins
 import itertools
 import keyword
 import numbers
+import operator
 
 import numpy as np
 
@@ -136,7 +137,7 @@ class symbol:
 
     @property
     def is_array(self):
-        return isinstance(self.type_, ir.ArrayRef)
+        return isinstance(self.type_, (ir.ArrayRef, ir.ViewRef))
 
     @property
     def is_integer(self):
@@ -177,32 +178,49 @@ class symboltable:
 
     scalar_types = frozenset({ir.Int32, ir.Int64, ir.Float32, ir.Float64, ir.Predicate32, ir.Predicate64})
 
-    _scalar_lookup = {int: ir.Int64, float: ir.}
+    _scalar_lookup = {int: ir.Int64, float: ir.Float64, np.int32: ir.Int32, np.int64: ir.Int64, np.float32: ir.Float32,
+                      np.float64: ir.Float64}
 
     def __init__(self, source_names, default_int_type=ir.Int64):
         self.symbols = {}
-        self.from_source = source_names
+        self.scalars = symboltable._scalar_lookup.copy()
+        self.scalars[int] = default_int_type
+        self.source_names = source_names
         self.prefixes = {}  # prefix for adding enumerated variable names
 
     def declares(self, name):
         name = wrap_input(name)
         return name in self.symbols
 
+    def get_internal_type(self, type_):
+        if isinstance(type_, ir.ArrayType):
+            dtype = type_.dtype
+            if dtype not in symboltable.scalar_types:
+                dtype = self.scalars.get(dtype)
+                if dtype is None:
+                    msg = f"Cannot map {type_.dtype} to an internal scalar type."
+                    raise TypeError(msg)
+                type_ = ir.ArrayType(type_.ndims, dtype)
+        elif type_ not in symboltable.scalar_types:
+            dtype = self.scalars.get(type_)
+            if dtype is None:
+                msg = f"Cannot map {type_} to an internal scalar type."
+                raise TypeError(msg)
+            type_ = dtype
+        return type_
+
     def lookup(self, name):
         name = wrap_input(name)
         sym = self.symbols.get(name)
-        if sym is None:
-            msg = f"{name} is not a registered variable name."
-            raise KeyError(msg)
         return sym
 
     def is_added(self, name):
-        symbol = self.lookup(name)
-        return symbol.unique
+        name = wrap_input(name)
+        return name not in self.source_names
 
     @property
     def default_int(self):
-        return self.type_builder.default_int
+        return self.scalars[int]
 
     def _get_num_generator(self, prefix):
         # splitting by prefix helps avoids appending
@@ -215,25 +233,15 @@ class symboltable:
 
     def is_array(self, name):
         sym = self.lookup(name)
-        return sym.is_array
-
-    def matches(self, ref, value):
-        """
-        Check if ref is both registered and the existing definition matches value
-        """
-        if not self.declares(ref):
-            return False
-        existing = self.lookup(ref)
-        return existing == value
+        return isinstance(sym.type_, ir.ArrayType)
 
     def make_symbol(self, name, type_, added):
         name = wrap_input(name)
         if self.declares(name):
-            if not self.matches(name, type_):
-                existing = self.lookup(name)
-                msg = f"Existing symbol definition {existing} for {name} is incompatible with new definition" \
-                      f"{type_}."
-                raise KeyError(msg)
+            existing = self.lookup(name)
+            msg = f"Existing symbol definition {existing} for {name} is incompatible with new definition" \
+                  f"{type_}."
+            raise KeyError(msg)
         else:
             sym = symbol(name, type_, added)
             self.symbols[name] = sym
@@ -256,21 +264,17 @@ class symboltable:
     # may be a unique variable name that instantiates some renaming or implementation binding.
 
     def add_scalar(self, name, type_, added):
-        """
-
-        """
         # run type check by default, to avoid internal array types
         # with Python or numpy types as parameters.
 
         name = wrap_input(name)
         if added:
             name = self.make_unique_name(name)
-        elif self.declares(name):
+        if self.declares(name):
             msg = f"Duplicate symbol declaration for variabl name '{name}'."
             raise ValueError(msg)
-        type_ = self.type_builder.get_internal_type(type_)
+        type_ = self.get_internal_type(type_)
         self.make_symbol(name, type_, added)
-        # self.make_symbol(name, type_, is)
         return name
 
     @singledispatchmethod
@@ -278,40 +282,49 @@ class symboltable:
         raise NotImplementedError
 
     @add_view.register
-    def _(self, base: ir.Subscript, name, transpose, is_added):
-        base_type = self.lookup(base.value)
-        transposed = transpose and not base_type.tranposed
-        if is_added:
+    def _(self, expr: ir.Subscript, name, is_added):
+        base = self.lookup(expr.value)
+        base_type = base.type_
+        if not isinstance(base_type, ir.ArrayType):
+            msg = f"Cannot take view of non-array type {base.name}"
+            raise ValueError(msg)
+        if is_added or name not in self.source_names:
+            # mangle if either the name or assignment motivating
+            # this symbol is not present in source.
             name = self.make_unique_name(prefix=name)
-        if isinstance(base.slice, ir.Slice):
-            vt = ir.ViewRef(base_type.array_type, transposed)
+        if isinstance(expr.slice, ir.Slice):
+            # no dim change
+            ndims = base_type.ndims
         else:
-            # single index reduces dims
-
-            vt = ()
-        self.make_symbol(name, vt, is_added)
+            ndims = operator.sub(base_type.ndims, 1)
+        if operator.ge(ndims.value, 1):
+            view_type = ir.ArrayType(ndims, base_type.dtype)
+        else:
+            view_type = base_type.dtype
+        self.make_symbol(name, view_type, is_added)
         return name
 
     @add_view.register
-    def _(self, base: ir.NameRef, name, transpose, is_added):
-        pass
+    def _(self, expr: ir.NameRef, name, is_added):
+        base = self.lookup(expr)
+        base_type = base.type_
+        if not isinstance(base_type, ir.ArrayType):
+            msg = f"Cannot take view using non-array type {base_type}"
+            raise ValueError(msg)
+        if is_added or name not in self.source_names:
+            name = self.make_unique_name(name)
+        self.make_symbol(name, base_type, is_added)
+        return name
 
-    @add_view.register
-    def _(self, base: ir.ArrayRef, name, transpose, is_added):
-        pass
 
-    @add_view.register
-    def _(self, base: ir.ViewRef, name, transpose, is_added):
-        pass
-
-
-def symbol_table_from_func(func, type_map, type_builder, filename):
+def symbol_table_from_func(func, type_map, filename):
     """
     Build an internally used symbol table from a Python function symtable and type information.
 
     func: Function symbol table symtable.symtable
     type_map: dict[name: interface_type]
-    type_builder: builder to construct internal type info
+    filename: source file name
+
     """
     func_name = func.get_name()
     if func.is_nested():
@@ -330,19 +343,20 @@ def symbol_table_from_func(func, type_map, type_builder, filename):
         args = ", ".join(arg for arg in missing)
         msg = f"Function '{func.get_name()}' is missing type info for the following arguments: {args}."
         raise ValueError(msg)
-    table = symboltable(type_builder)
-    for name, type_ in type_map.items():
-        table.add_var(name, type_, added=False)
-    return table
+    source_names = set()
+    # Todo: extract source names
+    # table = symboltable(type_builder)
+    # for name, type_ in type_map.items():
+    #    table.add_var(name, type_, added=False)
+    # return table
 
 
 def create_symbol_tables(src, filename, types_by_func, use_default_int64=True):
-    type_builder = TypeBuilder(use_default_int64)
     tables = {}
     mod = symtable(src, filename, "exec")
     # extract names that correspond to functions
     for func in mod.get_children():
         name = func.get_name()
         types = types_by_func.get(name, ())
-        tables[name] = symbol_table_from_func(func, types, type_builder, filename)
+        tables[name] = symbol_table_from_func(func, types, filename)
     return tables

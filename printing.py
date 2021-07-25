@@ -26,10 +26,6 @@ class prettystringify:
         return node.__class__.__name__.lower()
 
     @visit.register
-    def _(self, node: ir.AttributeRef):
-        return self.visit(node.value)
-
-    @visit.register
     def _(self, node: ir.NameRef):
         return node.name
 
