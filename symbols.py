@@ -181,11 +181,12 @@ class symboltable:
     _scalar_lookup = {int: ir.Int64, float: ir.Float64, np.int32: ir.Int32, np.int64: ir.Int64, np.float32: ir.Float32,
                       np.float64: ir.Float64}
 
-    def __init__(self, source_names, default_int_type=ir.Int64):
+    def __init__(self, scope_name, src_locals, default_int_type=ir.Int64):
         self.symbols = {}
-        self.scalars = symboltable._scalar_lookup.copy()
-        self.scalars[int] = default_int_type
-        self.source_names = source_names
+        self.scalar_type_map = symboltable._scalar_lookup.copy()
+        self.scalar_type_map[int] = default_int_type
+        self.src_locals = src_locals
+        self.scope_name = scope_name
         self.prefixes = {}  # prefix for adding enumerated variable names
 
     def declares(self, name):
@@ -196,13 +197,13 @@ class symboltable:
         if isinstance(type_, ir.ArrayType):
             dtype = type_.dtype
             if dtype not in symboltable.scalar_types:
-                dtype = self.scalars.get(dtype)
+                dtype = self.scalar_type_map.get(dtype)
                 if dtype is None:
                     msg = f"Cannot map {type_.dtype} to an internal scalar type."
                     raise TypeError(msg)
                 type_ = ir.ArrayType(type_.ndims, dtype)
         elif type_ not in symboltable.scalar_types:
-            dtype = self.scalars.get(type_)
+            dtype = self.scalar_type_map.get(type_)
             if dtype is None:
                 msg = f"Cannot map {type_} to an internal scalar type."
                 raise TypeError(msg)
@@ -216,11 +217,11 @@ class symboltable:
 
     def is_added(self, name):
         name = wrap_input(name)
-        return name not in self.source_names
+        return name not in self.src_locals
 
     @property
     def default_int(self):
-        return self.scalars[int]
+        return self.scalar_type_map[int]
 
     def _get_num_generator(self, prefix):
         # splitting by prefix helps avoids appending
@@ -288,7 +289,7 @@ class symboltable:
         if not isinstance(base_type, ir.ArrayType):
             msg = f"Cannot take view of non-array type {base.name}"
             raise ValueError(msg)
-        if is_added or name not in self.source_names:
+        if is_added or name not in self.src_locals:
             # mangle if either the name or assignment motivating
             # this symbol is not present in source.
             name = self.make_unique_name(prefix=name)
@@ -311,40 +312,50 @@ class symboltable:
         if not isinstance(base_type, ir.ArrayType):
             msg = f"Cannot take view using non-array type {base_type}"
             raise ValueError(msg)
-        if is_added or name not in self.source_names:
+        if is_added or name not in self.src_locals:
             name = self.make_unique_name(name)
         self.make_symbol(name, base_type, is_added)
         return name
 
 
-def symbol_table_from_func(func, type_map, filename):
+def make_internal_symbol_table(func_table, type_map, file_name):
     """
     Build an internally used symbol table from a Python function symtable and type information.
 
-    func: Function symbol table symtable.symtable
+    func_table: Function symbol table symtable.symtable
     type_map: dict[name: interface_type]
-    filename: source file name
+    file_name: source file name
 
     """
-    func_name = func.get_name()
-    if func.is_nested():
-        raise ValueError(f"{func_name} in file {filename} appears as a nested scope, which is unsupported.")
-    elif func.has_children():
-        raise ValueError(f"{func_name} in file {filename} contains nested scopes, which are unsupported.")
-    elif func.get_type() != "function":
-        raise TypeError(f"{func_name} in file {filename} refers to a class rather than a function. This is "
+    func_name = func_table.get_name()
+    if func_table.is_nested():
+        raise ValueError(f"{func_name} in file {file_name} appears as a nested scope, which is unsupported.")
+    elif func_table.has_children():
+        raise ValueError(f"{func_name} in file {file_name} contains nested scopes, which are unsupported.")
+    elif func_table.get_type() != "function":
+        raise TypeError(f"{func_name} in file {file_name} refers to a class rather than a function. This is "
                         f"unsupported.")
     missing = []
-    for arg in func.get_parameters():
+    for arg in func_table.get_parameters():
         # Check that all arguments have type info.
         if arg not in type_map:
             missing.append(arg)
     if missing:
         args = ", ".join(arg for arg in missing)
-        msg = f"Function '{func.get_name()}' is missing type info for the following arguments: {args}."
+        msg = f"Function '{func_table.get_name()}' is missing type info for the following arguments: {args}."
         raise ValueError(msg)
-    source_names = set()
+    # We track these explicitly for a couple reasons. First, names defined by the language but overwritten
+    # here will be handled incorrectly if we don't make note of them here. Second, variables added for instrumentation
+    # have enforced single assignments and tighter declaration bounds.
+    locals_from_source = set(func_table.get_locals())
+    # This might be handled by renaming later. We throw an error here, because it's
+    # almost certainly unintentional, and this is intended to be compiled ahead of execution
+    # rather than milliseconds prior to execution.
+    if func_table.get_name() in locals_from_source:
+        msg = f"Function {func_table.get_name()} contains a local variable with the same name. This is unsupported."
+        raise ValueError(msg)
     # Todo: extract source names
+
     # table = symboltable(type_builder)
     # for name, type_ in type_map.items():
     #    table.add_var(name, type_, added=False)
@@ -358,5 +369,6 @@ def create_symbol_tables(src, filename, types_by_func, use_default_int64=True):
     for func in mod.get_children():
         name = func.get_name()
         types = types_by_func.get(name, ())
-        tables[name] = symbol_table_from_func(func, types, filename)
+        from_src = set(func.get_locals())
+        tables[name] = make_internal_symbol_table(func, types, filename)
     return tables

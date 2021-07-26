@@ -130,11 +130,13 @@ class TreeBuilder(ast.NodeVisitor):
         self.entry = None
         self.enclosing_loop = None
         self.symbols = None
+        self.renaming = None
 
     def __call__(self, entry: ast.FunctionDef, symbols):
         self.enclosing_loop = None
         self.entry = entry
         self.symbols = symbols
+        self.renaming = {}
         self.body = []
         func = self.visit(entry)
         assert self.enclosing_loop is None
@@ -160,6 +162,13 @@ class TreeBuilder(ast.NodeVisitor):
     def set_line(self, line):
         assert isinstance(line, int)
         self.line = line
+
+    def is_name_conflict(self):
+        pass
+
+    def is_local_variable_name(self, name: ir.NameRef):
+        name = name.name
+        return name in self.symbols.source_names
 
     def visit_Attribute(self, node: ast.Attribute) -> ir.NameRef:
         value = self.visit(node.value)
@@ -231,18 +240,23 @@ class TreeBuilder(ast.NodeVisitor):
             compares.append(ir.BinOp(left, right, op))
         return ir.BoolOp(tuple(compares), "and")
 
-    def visit_Call(self, node: ast.Call) -> typing.Union[ir.ValueRef, ir.NameRef]:
+    def visit_Call(self, node: ast.Call) -> typing.Union[ir.ValueRef, ir.NameRef, ir.Call]:
         if isinstance(node.func, ast.Name):
-            func_name = node.func.id
+            func_name = ir.NameRef(node.func.id)
         else:
             func_name = self.visit(node.func)
         args = tuple(self.visit(arg) for arg in node.args)
         keywords = tuple((kw.arg, self.visit(kw.value)) for kw in node.keywords)
         # replace call should handle folding of casts
+
         call_ = ir.Call(func_name, args, keywords)
         # Todo: need a way to identify array creation
-        func = replace_builtin_call(call_)
-        return func
+        if not self.is_local_variable_name(func_name):
+            # Most of the time this kind of conflict is an error. For example
+            # we don't support overwriting zip, enumerate, etc. since we don't
+            # really support customized iterator protocols anyway.
+            call_ = replace_builtin_call(call_)
+        return call_
 
     def visit_IfExp(self, node: ast.IfExp) -> ir.Ternary:
         test = self.visit(node.test)
