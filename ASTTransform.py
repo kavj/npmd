@@ -1,6 +1,7 @@
 import ast
 import sys
 import typing
+import warnings
 
 from contextlib import contextmanager
 
@@ -129,99 +130,99 @@ class ImportHandler(ast.NodeVisitor):
 
     def __init__(self):
         self.alias_map = None
-        self.imports = None
+        self.modules = None
+        self.names = None
 
     @contextmanager
     def make_context(self):
+        self.names = set()
         self.alias_map = {}
-        self.imports = set()
+        self.modules = {}
         yield
+        self.names = None
         self.alias_map = None
+        self.modules = None
 
-    def __call__(self, node):
+    def visit_Module(self, node):
         with self.make_context():
-            self.visit(node)
+            for n in node.body:
+                if isinstance(n, (ast.Import, ast.ImportFrom)):
+                    self.visit(n)
+            modules = self.modules
             alias_map = self.alias_map
-        return alias_map
+        return modules, alias_map
 
     def generic_visit(self, node):
-        msg = f"Import handler only handles only handles imports, not {type(node)}"
-        raise NotImplementedError(msg)
-
-    def visit_alias(self, node):
-        imported_name = ir.NameRef(node.name)
-        if hasattr(node, "asname"):
-            as_name = ir.NameRef(node.asname)
-            if as_name in self.imports:
-                msg = f"Alias {as_name.name} to name {node.name} shadows imported name {as_name.name}."
-                raise ValueError(msg)
-            elif as_name in self.alias_map:
-                msg = f"Assigning import to alias {as_name.name} would overwrite a previous value. This is almost" \
-                      f"certainly a programming error and is unsupported."
-                raise ValueError(msg)
-            self.alias_map[as_name] = imported_name
-        self.imports.add(imported_name)
+        # ignore anything that isn't an import
+        pass
 
     def visit_Import(self, node):
+        # import modules only
         for name in node.names:
-            imported_name = ir.NameRef(name.name)
+            module_name = ir.NameRef(name.name)
             if hasattr(name, "asname"):
-                as_name = ir.NameRef(name.asname)
-                if as_name in self.imports:
-                    msg = f"Alias {as_name.name} to name {name.name} shadows imported name {as_name.name}."
+                module_alias = ir.NameRef(name.asname)
+                if module_alias in self.names:
+                    msg = f"Alias {module_alias.name} to name {name.name} shadows imported name {module_alias.name}."
                     raise ValueError(msg)
-                elif as_name in self.alias_map:
-                    msg = f"Assigning import to alias {as_name.name} would overwrite a previous value. This is almost" \
-                          f"certainly a programming error and is unsupported."
+                self.alias_map[module_alias] = module_name
+            else:
+                if module_name in self.names:
+                    msg = f"Importing name {module_name} overwrites an existing import entry."
                     raise ValueError(msg)
-                self.alias_map[as_name] = imported_name
-            # Todo: That isn't quite right. We should be tracking module, then name, in addition to whether
-            #       the entire module itself is imported. asname attributes dictate whether we require lookup.
-            self.imports.add(imported_name)
+                if name not in self.modules:
+                    self.modules[name] = set()
+            self.names.add(module_name)
 
     def visit_ImportFrom(self, node):
         module_name = node.module
         for name in node.names:
             # assume alias node
-            imported_name = f"{module_name}.{name}"
-            if hasattr(name, 'asname'):
-                as_name = ir.NameRef(name.asname)
-                if as_name in self.imports:
-                    msg = f"Alias {as_name.name} to name {name.name} shadows imported name {as_name.name}."
-                    raise ValueError(msg)
-                elif as_name in self.alias_map:
-                    msg = f"Assigning import to alias {as_name.name} would overwrite a previous value. This is almost" \
-                          f"certainly a programming error and is unsupported."
-                    raise ValueError(msg)
-                self.alias_map[as_name] = imported_name
-
-
-
-        pass
-
-
-def handle_imports():
-    pass
+            import_name = name.name
+            if hasattr(name, "asname"):
+                import_alias = name.asname
+            else:
+                import_alias = import_name
+            if import_alias in self.names:
+                msg = "Name {import_alias} overwrites an existing assignment."
+                raise ValueError(msg)
+            # mapping relative to module name, even though it's not imported this way
+            # eg. you can write "from numpy import zeros" but not "import numpy.zeros"
+            # since the first term always has to reference an appropriate import hook
+            if import_name is not import_alias:
+                self.alias_map[import_alias] = f"{module_name}.{import_name}"
+                self.names.add(import_alias)
+            else:
+                self.alias_map[import_name] = f"{module_name}.{import_name}"
+                self.names.add(import_name)
 
 
 class TreeBuilder(ast.NodeVisitor):
 
     def __init__(self):
         self.body = None
-        self.line = None
         self.entry = None
         self.enclosing_loop = None
         self.symbols = None
         self.renaming = None
 
-    def __call__(self, entry: ast.FunctionDef, symbols):
+    @contextmanager
+    def function_context(self, entry, symbols):
         self.enclosing_loop = None
         self.entry = entry
         self.symbols = symbols
         self.renaming = {}
         self.body = []
-        func = self.visit(entry)
+        yield
         assert self.enclosing_loop is None
+        self.entry = None
+        self.symbols = None
+        self.renaming = None
+        self.body = None
+
+    def __call__(self, entry: ast.FunctionDef, symbols):
+        with self.function_context(entry, symbols):
+            func = self.visit(entry)
         return func
 
     @contextmanager
@@ -240,14 +241,6 @@ class TreeBuilder(ast.NodeVisitor):
         self.body = []
         yield
         self.body = stashed
-
-    def set_line(self, line):
-        assert isinstance(line, int)
-        self.line = line
-
-    def find_matching_type(self, annotation):
-
-        pass
 
     def is_local_variable_name(self, name: ir.NameRef):
         name = name.name
@@ -390,13 +383,29 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_AnnAssign(self, node: ast.AnnAssign):
         target = self.visit(node.target)
         value = self.visit(node.value)
-        annotation = self.visit(node.annotation)
-
         pos = extract_positional_info(node)
-        # We ignore these, because they don't scale well
-        # based on parametric constraints
-        assign = ir.Assign(target, value, pos)
-        self.body.append(assign)
+        annotation = self.visit(node.annotation)
+        if isinstance(annotation, ir.NameRef):
+            # Check if type is recognized by name
+            type_ = self.symbols.type_by_name.get(annotation.name)
+            if type_ is None:
+                msg = f"Ignoring unrecognized annotation: {annotation}, line: {pos.line_begin}"
+                warnings.warn(msg)
+            else:
+                ir_type = self.symbols.get_ir_type(type_)
+                if isinstance(target, ir.NameRef):
+                    sym = self.symbols.lookup(target)
+                    existing_type = sym.type_
+                    # This is an error, since it's an actual conflict.
+                    if existing_type != ir_type:
+                        msg = f"IR type from type hint conflicts with existing " \
+                              f"(possibly inferred) type {existing_type}, line: {pos.line_begin}"
+                        raise ValueError(msg)
+        if node.value is not None:
+            # CPython will turn the syntax "var: annotation" into an AnnAssign node
+            # with node.value = None. If executed, this won't bind or update the value of var.
+            assign = ir.Assign(target, value, pos)
+            self.body.append(assign)
 
     def visit_Pass(self, node: ast.Pass):
         pos = extract_positional_info(node)
@@ -535,9 +544,11 @@ def build_module_ir(src, filename, types):
     # are not reasonable to type via annotations
     # It's not optimal, but this isn't necessarily
     # meant to be user facing.
+
     symbols = create_symbol_tables(src, filename, types)
     tree = ast.parse(src)
     tree = ast.fix_missing_locations(tree)
+    handle_imports = ImportHandler()
 
     # scan module for functions
 

@@ -176,7 +176,10 @@ def make_numpy_call(node: ir.Call):
 
 class symboltable:
 
-    scalar_types = frozenset({ir.Int32, ir.Int64, ir.Float32, ir.Float64, ir.Predicate32, ir.Predicate64})
+    type_by_name = {"int": int, "float": float, "numpy.int32": np.int32, "numpy.int64": np.int64,
+                     "numpy.float32": np.float32, "numpy.float64": np.float64}
+
+    scalar_ir_types = frozenset({ir.Int32, ir.Int64, ir.Float32, ir.Float64, ir.Predicate32, ir.Predicate64})
 
     _scalar_lookup = {int: ir.Int64, float: ir.Float64, np.int32: ir.Int32, np.int64: ir.Int64, np.float32: ir.Float32,
                       np.float64: ir.Float64}
@@ -191,27 +194,32 @@ class symboltable:
 
     def make_type_lowering_rule(self, input_type, lltype):
         assert isinstance(input_type, type)
-        assert lltype in symboltable.scalar_types
+        assert lltype in symboltable.scalar_ir_types
         self.scalar_type_map[input_type] = lltype
 
     def declares(self, name):
         name = wrap_input(name)
         return name in self.symbols
 
-    def get_internal_type(self, type_):
+    def get_ir_type(self, type_):
+        if isinstance(type_, ir.NameRef):
+            type_ = symboltable.type_by_name.get(type_.name)
+            if type_ is None:
+                msg = f"Cannot match ir type to {type}."
+                raise ValueError(msg)
         if isinstance(type_, ir.ArrayType):
             dtype = type_.dtype
-            if dtype not in symboltable.scalar_types:
+            if dtype not in symboltable.scalar_ir_types:
                 dtype = self.scalar_type_map.get(dtype)
                 if dtype is None:
-                    msg = f"Cannot map {type_.dtype} to an internal scalar type."
-                    raise TypeError(msg)
-                type_ = ir.ArrayType(type_.ndims, dtype)
-        elif type_ not in symboltable.scalar_types:
+                    msg = f"Cannot match ir type to array element type {type_.dtype}."
+                    raise ValueError(msg)
+            type_ = ir.ArrayType(type_.ndims, dtype)
+        elif type_ not in symboltable.scalar_ir_types:
             dtype = self.scalar_type_map.get(type_)
             if dtype is None:
-                msg = f"Cannot map {type_} to an internal scalar type."
-                raise TypeError(msg)
+                msg = f"Cannot match ir type to scalar type {type_}"
+                raise ValueError(msg)
             type_ = dtype
         return type_
 
@@ -279,7 +287,7 @@ class symboltable:
         if self.declares(name):
             msg = f"Duplicate symbol declaration for variabl name '{name}'."
             raise ValueError(msg)
-        type_ = self.get_internal_type(type_)
+        type_ = self.get_ir_type(type_)
         self.make_symbol(name, type_, added)
         return name
 
@@ -323,7 +331,7 @@ class symboltable:
         return name
 
 
-def make_internal_symbol_table(func_table, type_map, file_name):
+def make_internal_symbol_table(func_table, import_map, type_map, file_name):
     """
     Build an internally used symbol table from a Python function symtable and type information.
 
@@ -359,17 +367,17 @@ def make_internal_symbol_table(func_table, type_map, file_name):
     if func_table.get_name() in locals_from_source:
         msg = f"Function {func_table.get_name()} contains a local variable with the same name. This is unsupported."
         raise ValueError(msg)
-    table = symboltable(func_name, locals_from_source)
+    table = symboltable(func_name, locals_from_source, import_map)
     return table
 
 
-def create_symbol_tables(src, filename, types_by_func, use_default_int64=True):
+def create_symbol_tables(src, filename, types_by_func, import_map, use_default_int64=True):
     tables = {}
     mod = symtable(src, filename, "exec")
     # extract names that correspond to functions
-    for func in mod.get_children():
-        name = func.get_name()
+    for func_table in mod.get_children():
+        name = func_table.get_name()
         types = types_by_func.get(name, ())
-        tables[name] = make_internal_symbol_table(func, types, filename)
+        tables[name] = make_internal_symbol_table(func_table, types, import_map, filename)
         # type overrides could be placed here
     return tables
