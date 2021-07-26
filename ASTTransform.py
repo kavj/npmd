@@ -1,12 +1,13 @@
 import ast
 import sys
 import typing
+import symtable
 import warnings
 
 from contextlib import contextmanager
 
 import ir
-from symbols import create_symbol_tables, wrap_input
+from symbol_table import symbol_table_from_pysymtable, wrap_input
 from Canonicalize import replace_builtin_call
 from lowering import make_loop_interval
 
@@ -129,28 +130,24 @@ class ImportHandler(ast.NodeVisitor):
     """
 
     def __init__(self):
-        self.alias_map = None
-        self.modules = None
-        self.names = None
+        self.import_map = None
+        self.bound_names = None
 
     @contextmanager
     def make_context(self):
-        self.names = set()
-        self.alias_map = {}
-        self.modules = {}
+        self.bound_names = set()
+        self.import_map = {}
         yield
-        self.names = None
-        self.alias_map = None
-        self.modules = None
+        self.bound_names = None
+        self.import_map = None
 
     def visit_Module(self, node):
         with self.make_context():
             for n in node.body:
                 if isinstance(n, (ast.Import, ast.ImportFrom)):
                     self.visit(n)
-            modules = self.modules
-            alias_map = self.alias_map
-        return modules, alias_map
+            import_map = self.import_map
+        return import_map
 
     def generic_visit(self, node):
         # ignore anything that isn't an import
@@ -158,43 +155,35 @@ class ImportHandler(ast.NodeVisitor):
 
     def visit_Import(self, node):
         # import modules only
+        imported_name = None
         for name in node.names:
             module_name = ir.NameRef(name.name)
-            if hasattr(name, "asname"):
-                module_alias = ir.NameRef(name.asname)
-                if module_alias in self.names:
-                    msg = f"Alias {module_alias.name} to name {name.name} shadows imported name {module_alias.name}."
-                    raise ValueError(msg)
-                self.alias_map[module_alias] = module_name
-            else:
-                if module_name in self.names:
-                    msg = f"Importing name {module_name} overwrites an existing import entry."
-                    raise ValueError(msg)
-                if name not in self.modules:
-                    self.modules[name] = set()
-            self.names.add(module_name)
+            module_alias = ir.NameRef(name.asname) if hasattr(name, "asname") else None
+            bound_name = module_alias if module_alias is not None else module_name
+            if bound_name in self.bound_names:
+                if module_alias is None:
+                    msg = f"Module name {module_name.name} shadows a previously bound name."
+                else:
+                    msg = f"Module alias {module_alias.name} to module {module_name.name}" \
+                          f" shadows a previously bound name."
+                raise ValueError(msg)
+            import_ref = ir.ImportRef(module_name, imported_name, module_alias)
+            self.import_map[bound_name] = import_ref
+            self.bound_names.add(bound_name)
 
     def visit_ImportFrom(self, node):
-        module_name = node.module
+        module_name = ir.NameRef(node.module)
         for name in node.names:
             # assume alias node
-            import_name = name.name
-            if hasattr(name, "asname"):
-                import_alias = name.asname
-            else:
-                import_alias = import_name
-            if import_alias in self.names:
+            imported_name = ir.NameRef(name.name)
+            import_alias = ir.NameRef(name.asname) if hasattr(name, "asname") else None
+            bound_name = import_alias if import_alias is not None else imported_name
+            if bound_name in self.bound_names:
                 msg = "Name {import_alias} overwrites an existing assignment."
                 raise ValueError(msg)
-            # mapping relative to module name, even though it's not imported this way
-            # eg. you can write "from numpy import zeros" but not "import numpy.zeros"
-            # since the first term always has to reference an appropriate import hook
-            if import_name is not import_alias:
-                self.alias_map[import_alias] = f"{module_name}.{import_name}"
-                self.names.add(import_alias)
-            else:
-                self.alias_map[import_name] = f"{module_name}.{import_name}"
-                self.names.add(import_name)
+            import_ref = ir.ImportRef(module_name, imported_name, import_alias)
+            self.import_map[bound_name] = import_ref
+            self.bound_names.add(import_alias)
 
 
 class TreeBuilder(ast.NodeVisitor):
@@ -523,7 +512,16 @@ class TreeBuilder(ast.NodeVisitor):
         raise NotImplementedError(f"{type(node)} is unsupported")
 
 
-def build_module_ir(src, filename, types):
+def map_functions_by_name(node: ast.Module):
+    by_name = {}
+    assert(isinstance(node, ast.Module))
+    for n in node.body:
+        if isinstance(n, ast.FunctionDef):
+            by_name[n.name] = n
+    return by_name
+
+
+def build_module_ir(src, file_name, type_map):
     """
     Module level point of entry for IR construction.
 
@@ -533,43 +531,25 @@ def build_module_ir(src, filename, types):
     src: str
         Source code for the corresponding module
 
-    filename:
+    file_name:
         File path we used to extract source. This is used for error reporting.
 
-    types:
+    type_map:
         Map of function parameters and local variables to numpy or python numeric types.
    
     """
-    # Type info helps annotate things that
-    # are not reasonable to type via annotations
-    # It's not optimal, but this isn't necessarily
-    # meant to be user facing.
 
-    symbols = create_symbol_tables(src, filename, types)
-    tree = ast.parse(src)
+    tree = ast.parse(src, filename=file_name)
     tree = ast.fix_missing_locations(tree)
-    handle_imports = ImportHandler()
-
-    # scan module for functions
-
+    import_map = ImportHandler().visit(tree)
+    func_asts_by_name = map_functions_by_name(tree)
     funcs = []
-    imports = []
+    module_symtable = symtable.symtable(src, file_name, "exec")
     build_func_ir = TreeBuilder()
-    for stmt in tree.body:
-        if isinstance(stmt, ast.FunctionDef):
-            syms = symbols[stmt.name]
-            func = build_func_ir(stmt, syms)
-            funcs.append(func)
-        elif isinstance(stmt, ast.Import):
-            pos = extract_positional_info(stmt)
-            for imp in stmt.names:
-                imports.append(ir.ModImport(imp.name, imp.asname, pos))
-        elif isinstance(stmt, ast.ImportFrom):
-            mod = stmt.module
-            pos = extract_positional_info(stmt)
-            for name in stmt.names:
-                imports.append(ir.NameImport(mod, name.name, name.asname, pos))
-        else:
-            raise ValueError("Unsupported")
+    for func_name, ast_entry_point in func_asts_by_name.items():
+        table = module_symtable.lookup(func_name).get_namespace()
+        symbols = symbol_table_from_pysymtable(table, import_map, type_map, file_name)
+        func_ir = build_func_ir(ast_entry_point, symbols)
+        funcs.append(func_ir)
 
-    return ir.Module(funcs, imports)
+    return ir.Module(funcs, import_map)

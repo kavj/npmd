@@ -13,7 +13,6 @@ from symtable import symtable
 
 import ir
 
-
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
 
 
@@ -115,6 +114,7 @@ class symbol:
     """
     variable name symbol class
     """
+
     def __init__(self, name, type_, make_unique):
         self.name = name
         self.type_ = type_
@@ -175,9 +175,8 @@ def make_numpy_call(node: ir.Call):
 
 
 class symboltable:
-
     type_by_name = {"int": int, "float": float, "numpy.int32": np.int32, "numpy.int64": np.int64,
-                     "numpy.float32": np.float32, "numpy.float64": np.float64}
+                    "numpy.float32": np.float32, "numpy.float64": np.float64}
 
     scalar_ir_types = frozenset({ir.Int32, ir.Int64, ir.Float32, ir.Float64, ir.Predicate32, ir.Predicate64})
 
@@ -331,7 +330,7 @@ class symboltable:
         return name
 
 
-def make_internal_symbol_table(func_table, import_map, type_map, file_name):
+def symbol_table_from_pysymtable(func_table, import_map, type_map, file_name):
     """
     Build an internally used symbol table from a Python function symtable and type information.
 
@@ -357,27 +356,9 @@ def make_internal_symbol_table(func_table, import_map, type_map, file_name):
         args = ", ".join(arg for arg in missing)
         msg = f"Function '{func_table.get_name()}' is missing type info for the following arguments: {args}."
         raise ValueError(msg)
-    # We track these explicitly for a couple reasons. First, names defined by the language but overwritten
-    # here will be handled incorrectly if we don't make note of them here. Second, variables added for instrumentation
-    # have enforced single assignments and tighter declaration bounds.
     locals_from_source = set(func_table.get_locals())
-    # This might be handled by renaming later. We throw an error here, because it's
-    # almost certainly unintentional, and this is intended to be compiled ahead of execution
-    # rather than milliseconds prior to execution.
     if func_table.get_name() in locals_from_source:
         msg = f"Function {func_table.get_name()} contains a local variable with the same name. This is unsupported."
         raise ValueError(msg)
     table = symboltable(func_name, locals_from_source, import_map)
     return table
-
-
-def create_symbol_tables(src, filename, types_by_func, import_map, use_default_int64=True):
-    tables = {}
-    mod = symtable(src, filename, "exec")
-    # extract names that correspond to functions
-    for func_table in mod.get_children():
-        name = func_table.get_name()
-        types = types_by_func.get(name, ())
-        tables[name] = make_internal_symbol_table(func_table, types, import_map, filename)
-        # type overrides could be placed here
-    return tables

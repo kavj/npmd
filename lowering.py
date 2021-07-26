@@ -6,7 +6,7 @@ from collections import defaultdict
 from functools import singledispatch, singledispatchmethod
 
 import ir
-import symbols
+import symbol_table
 
 from visitor import StmtVisitor, walk_statements, walk_branches
 
