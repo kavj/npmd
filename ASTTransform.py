@@ -302,9 +302,9 @@ class TreeBuilder(ast.NodeVisitor):
         initial_compare = ir.BinOp(left, right, op)
         if len(node.ops) == 1:
             return initial_compare
-        compares = [initial_compare]
+        compares = {initial_compare}
+        seen = set()
         for index, ast_op in enumerate(node.ops[1:], 1):
-            # expressions are immutable, so we can safely reuse them
             left = right
             right = self.visit(node.comparators[index])
             op = compareops[type(ast_op)]
@@ -314,7 +314,11 @@ class TreeBuilder(ast.NodeVisitor):
                 if not operator.truth(cmp):
                     return ir.BoolNode(False)
             else:
-                compares.append(cmp)
+                if cmp not in seen:
+                    # Preserve the original comparison order, ignoring
+                    # duplicate expressions.
+                    seen.add(cmp)
+                    compares.append(cmp)
         return ir.BoolOp(tuple(compares), "and")
 
     def visit_Call(self, node: ast.Call) -> typing.Union[ir.ValueRef, ir.NameRef, ir.Call]:
