@@ -108,6 +108,8 @@ def simplify_binop(expr: ir.BinOp):
     repl = rewrite_if_matches_square(expr)
     repl = rewrite_if_matches_square_root(repl)
     repl = rewrite_if_matches_sign_flip(repl)
+    if repl == expr:
+        repl = expr
     return repl
 
 
@@ -134,8 +136,10 @@ def _(expr: ir.Slice):
     if stop is not None:
         stop = fold_if_constant(stop)
     step = fold_if_constant(expr.step)
-    slice_ = ir.Slice(start, stop, step)
-    return slice_
+    repl = ir.Slice(start, stop, step)
+    if repl == expr:
+        repl = expr
+    return repl
 
 
 @fold_if_constant.register
@@ -148,6 +152,8 @@ def _(expr: ir.BinOp):
         repl = wrap_constant(repl)
     else:
         repl = ir.BinOp(left, right, op)
+    if repl == expr:
+        repl = expr
     return repl
 
 
@@ -167,7 +173,52 @@ def _(expr: ir.Subscript):
     value = expr.value
     slice_ = fold_if_constant(expr.slice)
     repl = ir.Subscript(value, slice_)
+    if expr == repl:
+        repl = expr
     return repl
+
+
+@fold_if_constant.register
+def _(expr: ir.Ternary):
+    test = fold_if_constant(expr.test)
+    on_if = fold_if_constant(expr.if_expr)
+    on_else = fold_if_constant(expr.else_expr)
+    if test.constant:
+        if operator.truth(test):
+            repl = on_if
+        else:
+            repl = on_else
+    else:
+        repl = ir.Ternary(on_if, on_else)
+    if repl == expr:
+        repl = expr
+    return repl
+
+
+@fold_if_constant.register
+def _(expr: ir.BoolOp):
+    contains_false = False
+    contains_true = False
+    repl = set()
+    for operand in expr.operands:
+        operand = fold_if_constant(operand)
+        if operand.constant:
+            if operator.truth(operand):
+                contains_true = True
+            else:
+                contains_false = True
+        repl.add(operand)
+    if contains_false and expr.op == "and":
+        updated = ir.BoolNode(False)
+    elif contains_true and expr.op == "or":
+        updated = ir.BoolNode(True)
+    else:
+        repl = tuple(repl)
+        updated = ir.BoolOp(repl, expr.op)
+    if expr == updated:
+        # discard copy if unchanged
+        updated = expr
+    return updated
 
 
 def discard_unbounded(iterables):

@@ -1,4 +1,5 @@
 import ast
+import operator
 import sys
 import typing
 import symtable
@@ -9,7 +10,7 @@ from contextlib import contextmanager
 import ir
 from symbol_table import symbol_table_from_pysymtable, wrap_input
 from Canonicalize import replace_builtin_call
-from lowering import make_loop_interval
+from lowering import make_loop_interval, fold_if_constant
 
 binaryops = {ast.Add: "+",
              ast.Sub: "-",
@@ -276,20 +277,25 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_UnaryOp(self, node: ast.UnaryOp) -> ir.UnaryOp:
         op = unaryops.get(type(node.op))
         operand = self.visit(node.operand)
+        operand = fold_if_constant(operand)
         return ir.UnaryOp(operand, op) if op != "+" else operand
 
     def visit_BinOp(self, node: ast.BinOp) -> ir.BinOp:
         op = binaryops.get(type(node.op))
         left = self.visit(node.left)
+        left = fold_if_constant(left)
         right = self.visit(node.right)
+        right = fold_if_constant(right)
         return ir.BinOp(left, right, op)
 
     def visit_BoolOp(self, node: ast.BoolOp) -> ir.BoolOp:
         op = boolops[node.op]
         operands = tuple(self.visit(value) for value in node.values)
-        return ir.BoolOp(operands, op)
+        expr = ir.BoolOp(operands, op)
+        expr = fold_if_constant(expr)
+        return expr
 
-    def visit_Compare(self, node: ast.Compare) -> typing.Union[ir.BinOp, ir.BoolOp]:
+    def visit_Compare(self, node: ast.Compare) -> typing.Union[ir.BinOp, ir.BoolOp, ir.BoolNode]:
         left = self.visit(node.left)
         right = self.visit(node.comparators[0])
         op = compareops[type(node.ops[0])]
@@ -302,7 +308,13 @@ class TreeBuilder(ast.NodeVisitor):
             left = right
             right = self.visit(node.comparators[index])
             op = compareops[type(ast_op)]
-            compares.append(ir.BinOp(left, right, op))
+            cmp = ir.BinOp(left, right, op)
+            cmp = fold_if_constant(cmp)
+            if cmp.constant:
+                if not operator.truth(cmp):
+                    return ir.BoolNode(False)
+            else:
+                compares.append(cmp)
         return ir.BoolOp(tuple(compares), "and")
 
     def visit_Call(self, node: ast.Call) -> typing.Union[ir.ValueRef, ir.NameRef, ir.Call]:
@@ -323,11 +335,18 @@ class TreeBuilder(ast.NodeVisitor):
             call_ = replace_builtin_call(call_)
         return call_
 
-    def visit_IfExp(self, node: ast.IfExp) -> ir.Ternary:
+    def visit_IfExp(self, node: ast.IfExp) -> ir.ValueRef:
         test = self.visit(node.test)
         on_true = self.visit(node.body)
         on_false = self.visit(node.orelse)
-        return ir.Ternary(test, on_true, on_false)
+        if test.constant:
+            if operator.truth(test):
+                expr = on_true
+            else:
+                expr = on_false
+        else:
+            expr = ir.Ternary(test, on_true, on_false)
+        return expr
 
     def visit_Subscript(self, node: ast.Subscript) -> ir.Subscript:
         target = self.visit(node.value)
