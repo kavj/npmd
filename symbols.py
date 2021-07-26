@@ -181,13 +181,18 @@ class symboltable:
     _scalar_lookup = {int: ir.Int64, float: ir.Float64, np.int32: ir.Int32, np.int64: ir.Int64, np.float32: ir.Float32,
                       np.float64: ir.Float64}
 
-    def __init__(self, scope_name, src_locals, default_int_type=ir.Int64):
+    def __init__(self, scope_name, src_locals, import_map):
         self.symbols = {}
         self.scalar_type_map = symboltable._scalar_lookup.copy()
-        self.scalar_type_map[int] = default_int_type
         self.src_locals = src_locals
+        self.import_map = import_map
         self.scope_name = scope_name
         self.prefixes = {}  # prefix for adding enumerated variable names
+
+    def make_type_lowering_rule(self, input_type, lltype):
+        assert isinstance(input_type, type)
+        assert lltype in symboltable.scalar_types
+        self.scalar_type_map[input_type] = lltype
 
     def declares(self, name):
         name = wrap_input(name)
@@ -354,12 +359,8 @@ def make_internal_symbol_table(func_table, type_map, file_name):
     if func_table.get_name() in locals_from_source:
         msg = f"Function {func_table.get_name()} contains a local variable with the same name. This is unsupported."
         raise ValueError(msg)
-    # Todo: extract source names
-
-    # table = symboltable(type_builder)
-    # for name, type_ in type_map.items():
-    #    table.add_var(name, type_, added=False)
-    # return table
+    table = symboltable(func_name, locals_from_source)
+    return table
 
 
 def create_symbol_tables(src, filename, types_by_func, use_default_int64=True):
@@ -369,6 +370,6 @@ def create_symbol_tables(src, filename, types_by_func, use_default_int64=True):
     for func in mod.get_children():
         name = func.get_name()
         types = types_by_func.get(name, ())
-        from_src = set(func.get_locals())
         tables[name] = make_internal_symbol_table(func, types, filename)
+        # type overrides could be placed here
     return tables

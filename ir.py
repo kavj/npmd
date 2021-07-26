@@ -504,6 +504,22 @@ class Zip(ValueRef):
         return len(self.elements)
 
 
+@dataclass(frozen=True)
+class InductionVar(ValueRef):
+    # Note: These must already be linearized, because
+    # this won't recursively unpack subexpressions.
+    targets: ValueRef
+    iterables: ValueRef
+
+    @property
+    def subexprs(self):
+        if hasattr(self.targets, 'subexprs') and hasattr(self.iterables, 'subexprs'):
+            for target, iterable in zip(self.targets.subexprs, self.iterables.subexprs):
+                yield target, iterable
+        else:
+            yield self.targets, self.iterables
+
+
 @dataclass
 class Assign(StmtBase):
     """
@@ -538,8 +554,7 @@ class Continue(StmtBase):
 
 @dataclass
 class ForLoop(StmtBase):
-    target: typing.Any
-    iterable: AffineSeq
+    induction_var: InductionVar
     body: typing.List[Statement]
     pos: Position
 

@@ -1,5 +1,4 @@
 import ast
-import numbers
 import sys
 import typing
 
@@ -122,6 +121,89 @@ def extract_loop_indexer(node: ast.For):
                 return target.id
 
 
+class ImportHandler(ast.NodeVisitor):
+    """
+    This is used to replace source aliases with fully qualified names.
+
+    """
+
+    def __init__(self):
+        self.alias_map = None
+        self.imports = None
+
+    @contextmanager
+    def make_context(self):
+        self.alias_map = {}
+        self.imports = set()
+        yield
+        self.alias_map = None
+
+    def __call__(self, node):
+        with self.make_context():
+            self.visit(node)
+            alias_map = self.alias_map
+        return alias_map
+
+    def generic_visit(self, node):
+        msg = f"Import handler only handles only handles imports, not {type(node)}"
+        raise NotImplementedError(msg)
+
+    def visit_alias(self, node):
+        imported_name = ir.NameRef(node.name)
+        if hasattr(node, "asname"):
+            as_name = ir.NameRef(node.asname)
+            if as_name in self.imports:
+                msg = f"Alias {as_name.name} to name {node.name} shadows imported name {as_name.name}."
+                raise ValueError(msg)
+            elif as_name in self.alias_map:
+                msg = f"Assigning import to alias {as_name.name} would overwrite a previous value. This is almost" \
+                      f"certainly a programming error and is unsupported."
+                raise ValueError(msg)
+            self.alias_map[as_name] = imported_name
+        self.imports.add(imported_name)
+
+    def visit_Import(self, node):
+        for name in node.names:
+            imported_name = ir.NameRef(name.name)
+            if hasattr(name, "asname"):
+                as_name = ir.NameRef(name.asname)
+                if as_name in self.imports:
+                    msg = f"Alias {as_name.name} to name {name.name} shadows imported name {as_name.name}."
+                    raise ValueError(msg)
+                elif as_name in self.alias_map:
+                    msg = f"Assigning import to alias {as_name.name} would overwrite a previous value. This is almost" \
+                          f"certainly a programming error and is unsupported."
+                    raise ValueError(msg)
+                self.alias_map[as_name] = imported_name
+            # Todo: That isn't quite right. We should be tracking module, then name, in addition to whether
+            #       the entire module itself is imported. asname attributes dictate whether we require lookup.
+            self.imports.add(imported_name)
+
+    def visit_ImportFrom(self, node):
+        module_name = node.module
+        for name in node.names:
+            # assume alias node
+            imported_name = f"{module_name}.{name}"
+            if hasattr(name, 'asname'):
+                as_name = ir.NameRef(name.asname)
+                if as_name in self.imports:
+                    msg = f"Alias {as_name.name} to name {name.name} shadows imported name {as_name.name}."
+                    raise ValueError(msg)
+                elif as_name in self.alias_map:
+                    msg = f"Assigning import to alias {as_name.name} would overwrite a previous value. This is almost" \
+                          f"certainly a programming error and is unsupported."
+                    raise ValueError(msg)
+                self.alias_map[as_name] = imported_name
+
+
+
+        pass
+
+
+def handle_imports():
+    pass
+
+
 class TreeBuilder(ast.NodeVisitor):
 
     def __init__(self):
@@ -163,12 +245,13 @@ class TreeBuilder(ast.NodeVisitor):
         assert isinstance(line, int)
         self.line = line
 
-    def is_name_conflict(self):
+    def find_matching_type(self, annotation):
+
         pass
 
     def is_local_variable_name(self, name: ir.NameRef):
         name = name.name
-        return name in self.symbols.source_names
+        return name in self.symbols.src_locals
 
     def visit_Attribute(self, node: ast.Attribute) -> ir.NameRef:
         value = self.visit(node.value)
@@ -307,6 +390,8 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_AnnAssign(self, node: ast.AnnAssign):
         target = self.visit(node.target)
         value = self.visit(node.value)
+        annotation = self.visit(node.annotation)
+
         pos = extract_positional_info(node)
         # We ignore these, because they don't scale well
         # based on parametric constraints
@@ -342,13 +427,15 @@ class TreeBuilder(ast.NodeVisitor):
         iterables = []
         prefix = extract_loop_indexer(node)
         if prefix is None:
-            # common generic loop index
+            # Use a common prefix if a suitable name was not found.
             prefix = "i"
         for target, iterable in unpack_iterated(target_node, iter_node, pos):
             targets.append(target)
             iterables.append(iterable)
+        # Todo: This should just pass the prefix. Otherwise it's mangled twice.
+        #       I probably wrote it some time ago before changes in symbol table structure.
         loop_index = self.symbols.make_unique_name(prefix)
-        make_loop_interval(targets, iterables, self.symbols, loop_index)
+        # make_loop_interval(targets, iterables, self.symbols, loop_index)
 
         with self.loop_region(node):
             for target, iterable in unpack_iterated(target_node, iter_node, pos):
