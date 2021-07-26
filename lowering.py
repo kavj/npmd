@@ -57,7 +57,7 @@ binops = {"+": operator.add,
 
 def wrap_constant(c):
     if isinstance(c, bool):
-        return ir.BoolNode(c)
+        return ir.BoolConst(c)
     if isinstance(c, numbers.Integral):
         return ir.IntNode(c)
     elif isinstance(c, numbers.Real):
@@ -65,6 +65,13 @@ def wrap_constant(c):
     else:
         msg = f"Can't construct constant node for unsupported constant type {type(c)}"
         raise NotImplementedError(msg)
+
+
+def rewrite_if_matches_xor(expr):
+    # Python's ast can't directly translate xor
+    # but it's provided by lower level interfaces.
+
+    pass
 
 
 def is_pow(expr):
@@ -209,9 +216,9 @@ def _(expr: ir.BoolOp):
                 contains_false = True
         repl.add(operand)
     if contains_false and expr.op == "and":
-        updated = ir.BoolNode(False)
+        updated = ir.BoolConst(False)
     elif contains_true and expr.op == "or":
-        updated = ir.BoolNode(True)
+        updated = ir.BoolConst(True)
     else:
         repl = tuple(repl)
         updated = ir.BoolOp(repl, expr.op)

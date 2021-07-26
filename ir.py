@@ -12,7 +12,7 @@ from functools import cached_property
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
 inplace_ops = frozenset({"+=", "-=", "*=", "/=", "//=", "%=", "**=", "<<=", ">>=", "|=", "^=", "&=", "@="})
 unaryops = frozenset({"+", "-", "~", "not"})
-boolops = frozenset({"and", "or"})
+boolops = frozenset({"and", "or", "xor"})
 compareops = frozenset({"==", "!=", "<", "<=", ">", ">=", "is", "isnot", "in", "notin"})
 
 oop_to_inplace = {
@@ -181,7 +181,7 @@ class Constant(ValueRef):
 
 
 @dataclass(frozen=True)
-class BoolNode(Constant):
+class BoolConst(Constant):
     value: bool
 
 
@@ -379,6 +379,66 @@ class BinOp(ValueRef):
     @cached_property
     def in_place(self):
         return self.op in inplace_ops
+
+
+@dataclass(frozen=True)
+class OR(ValueRef):
+    """
+    Boolean OR
+    """
+    operands: typing.Tuple[ValueRef, ...]
+
+    def __post_init__(self):
+        assert (isinstance(self.operands, tuple))
+
+    @property
+    def subexprs(self):
+        for operand in self.operands:
+            yield operand
+
+
+@dataclass(frozen=True)
+class AND(ValueRef):
+    """
+    Boolean AND
+    """
+    operands: typing.Tuple[ValueRef, ...]
+
+    def __post_init__(self):
+        assert (isinstance(self.operands, tuple))
+
+    @property
+    def subexprs(self):
+        for operand in self.operands:
+            yield operand
+
+
+@dataclass(frozen=True)
+class XOR(ValueRef):
+    """
+    Boolean XOR
+    """
+    operands: typing.Tuple[ValueRef, ...]
+
+    def __post_init__(self):
+        assert (isinstance(self.operands, tuple))
+
+    @property
+    def subexprs(self):
+        for operand in self.operands:
+            yield operand
+
+
+@dataclass(frozen=True)
+class TRUTH(ValueRef):
+    """
+    Truth test single operand
+    """
+    operand: ValueRef
+
+    @property
+    def subexprs(self):
+        yield self.operand
 
 
 @dataclass(frozen=True)

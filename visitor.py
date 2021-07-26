@@ -234,7 +234,7 @@ class RuleBasedRewriter:
         return expr
 
     @_rewrite.register
-    def _(self, expr: ir.BoolNode):
+    def _(self, expr: ir.BoolConst):
         return expr
 
     @_rewrite.register

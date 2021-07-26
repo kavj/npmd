@@ -64,7 +64,7 @@ def _(input: int):
 
 @wrap_input.register
 def _(input: bool):
-    return ir.BoolNode(input)
+    return ir.BoolConst(input)
 
 
 @wrap_input.register

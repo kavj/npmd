@@ -10,7 +10,7 @@ from visitor import StmtTransformer, walk_branches
 def negate_condition(node):
     repl = ir.UnaryOp(node, "not")
     if node.constant:
-        repl = ir.BoolNode(operator.invert(operator.truth(node)))
+        repl = ir.BoolConst(operator.invert(operator.truth(node)))
     elif isinstance(node, ir.UnaryOp):
         if node.op == "not":
             repl = node.operand

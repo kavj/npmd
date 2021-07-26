@@ -288,18 +288,44 @@ class TreeBuilder(ast.NodeVisitor):
         right = fold_if_constant(right)
         return ir.BinOp(left, right, op)
 
-    def visit_BoolOp(self, node: ast.BoolOp) -> ir.BoolOp:
+    def visit_BoolOp(self, node: ast.BoolOp) -> typing.Union[ir.BoolConst, ir.AND, ir.OR]:
         op = boolops[node.op]
-        operands = tuple(self.visit(value) for value in node.values)
-        expr = ir.BoolOp(operands, op)
-        expr = fold_if_constant(expr)
+        operands = []
+        seen = set()
+        for value in node.values:
+            value = self.visit(value)
+            if value.constant:
+                if operator.truth(value):
+                    if op == "and":
+                        continue
+                    else: # op == "or"
+                        return ir.BoolConst(True)
+                else:
+                    if op == "and":
+                        return ir.BoolConst(False)
+                    else: # op == "or"
+                        continue
+            else:
+                if value not in seen:
+                    seen.add(value)
+                    operands.append(value)
+        if len(operands) == 1:
+            expr = operands.pop()
+            expr = ir.TRUTH(expr)
+        else:
+            operands = tuple(operands)
+            if op == "and":
+                expr = ir.AND(operands)
+            else:
+                expr = ir.OR(operands)
         return expr
 
-    def visit_Compare(self, node: ast.Compare) -> typing.Union[ir.BinOp, ir.BoolOp, ir.BoolNode]:
+    def visit_Compare(self, node: ast.Compare) -> typing.Union[ir.BinOp, ir.BoolOp, ir.BoolConst]:
         left = self.visit(node.left)
         right = self.visit(node.comparators[0])
         op = compareops[type(node.ops[0])]
         initial_compare = ir.BinOp(left, right, op)
+        initial_compare = fold_if_constant(initial_compare)
         if len(node.ops) == 1:
             return initial_compare
         compares = {initial_compare}
@@ -312,7 +338,7 @@ class TreeBuilder(ast.NodeVisitor):
             cmp = fold_if_constant(cmp)
             if cmp.constant:
                 if not operator.truth(cmp):
-                    return ir.BoolNode(False)
+                    return ir.BoolConst(False)
             else:
                 if cmp not in seen:
                     # Preserve the original comparison order, ignoring

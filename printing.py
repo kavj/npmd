@@ -51,7 +51,7 @@ class prettystringify:
         return s
 
     @visit.register
-    def _(self, node: ir.BoolNode):
+    def _(self, node: ir.BoolConst):
         return str(node.value)
 
     @visit.register
