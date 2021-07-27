@@ -8,7 +8,7 @@ from functools import singledispatch, singledispatchmethod
 import ir
 import symbol_table
 
-from visitor import StmtVisitor, ExpressionVisitor, walk_statements, walk_branches
+from visitor import StmtVisitor, ExpressionVisitor
 
 
 unaryops = {"+": operator.pos,

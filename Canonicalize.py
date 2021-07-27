@@ -4,7 +4,7 @@ import typing
 from functools import singledispatch, singledispatchmethod
 
 import ir
-from visitor import StmtTransformer, walk_branches
+from visitor import StmtTransformer
 
 
 def negate_condition(node):
@@ -63,10 +63,7 @@ def simplify_branch(node: ir.IfElse) -> typing.Union[ir.IfElse, list]:
 
 
 def contains_break(entry):
-    for stmt in walk_branches(entry):
-        if isinstance(stmt, ir.Break):
-            return True
-    return False
+    raise NotImplementedError
 
 
 @singledispatch

@@ -10,7 +10,7 @@ from contextlib import contextmanager
 import ir
 from symbol_table import symbol_table_from_pysymtable, wrap_input
 from Canonicalize import replace_builtin_call
-from lowering import make_loop_interval, fold_if_constant
+from lowering import make_loop_interval, ConstFolder
 
 binaryops = {ast.Add: "+",
              ast.Sub: "-",
@@ -195,6 +195,8 @@ class TreeBuilder(ast.NodeVisitor):
         self.enclosing_loop = None
         self.symbols = None
         self.renaming = None
+        self.fold_if_constant = ConstFolder()
+
 
     @contextmanager
     def function_context(self, entry, symbols):
@@ -277,15 +279,15 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_UnaryOp(self, node: ast.UnaryOp) -> ir.UnaryOp:
         op = unaryops.get(type(node.op))
         operand = self.visit(node.operand)
-        operand = fold_if_constant(operand)
+        operand = self.fold_if_constant(operand)
         return ir.UnaryOp(operand, op) if op != "+" else operand
 
     def visit_BinOp(self, node: ast.BinOp) -> ir.BinOp:
         op = binaryops.get(type(node.op))
         left = self.visit(node.left)
-        left = fold_if_constant(left)
+        left = self.fold_if_constant(left)
         right = self.visit(node.right)
-        right = fold_if_constant(right)
+        right = self.fold_if_constant(right)
         return ir.BinOp(left, right, op)
 
     def visit_BoolOp(self, node: ast.BoolOp) -> typing.Union[ir.BoolConst, ir.AND, ir.OR]:
@@ -298,12 +300,12 @@ class TreeBuilder(ast.NodeVisitor):
                 if operator.truth(value):
                     if op == "and":
                         continue
-                    else: # op == "or"
+                    else:  # op == "or"
                         return ir.BoolConst(True)
                 else:
                     if op == "and":
                         return ir.BoolConst(False)
-                    else: # op == "or"
+                    else:  # op == "or"
                         continue
             else:
                 if value not in seen:
@@ -325,17 +327,17 @@ class TreeBuilder(ast.NodeVisitor):
         right = self.visit(node.comparators[0])
         op = compareops[type(node.ops[0])]
         initial_compare = ir.BinOp(left, right, op)
-        initial_compare = fold_if_constant(initial_compare)
+        initial_compare = self.fold_if_constant(initial_compare)
         if len(node.ops) == 1:
             return initial_compare
-        compares = {initial_compare}
+        compares = [initial_compare]
         seen = set()
         for index, ast_op in enumerate(node.ops[1:], 1):
             left = right
             right = self.visit(node.comparators[index])
             op = compareops[type(ast_op)]
             cmp = ir.BinOp(left, right, op)
-            cmp = fold_if_constant(cmp)
+            cmp = self.fold_if_constant(cmp)
             if cmp.constant:
                 if not operator.truth(cmp):
                     return ir.BoolConst(False)
@@ -502,7 +504,7 @@ class TreeBuilder(ast.NodeVisitor):
             # make a unique loop index name, which cannot escape the current scope
             if prefix is None:
                 prefix = "i"
-            loop_index = self.symbols.add_var(prefix, self.symbols.default_int, added=True)
+            loop_index = self.symbols.add_scalar(prefix, self.symbols.default_int, added=True)
             loop_counter = make_loop_interval(targets, iterables, self.symbols, loop_index)
 
             for stmt in node.body:
@@ -597,7 +599,8 @@ def build_module_ir(src, file_name, type_map):
     build_func_ir = TreeBuilder()
     for func_name, ast_entry_point in func_asts_by_name.items():
         table = module_symtable.lookup(func_name).get_namespace()
-        symbols = symbol_table_from_pysymtable(table, import_map, type_map, file_name)
+        func_type_map = type_map[func_name]
+        symbols = symbol_table_from_pysymtable(table, import_map, func_type_map, file_name)
         func_ir = build_func_ir(ast_entry_point, symbols)
         funcs.append(func_ir)
 
