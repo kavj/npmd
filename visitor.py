@@ -1,5 +1,4 @@
 from functools import singledispatchmethod, lru_cache
-from weakref import WeakKeyDictionary
 
 import ir
 
@@ -75,137 +74,120 @@ def walk_branches(node):
 
 class ExpressionVisitor:
     """
-    Since expressions are immutable and hashable, they deserve their own visitor.
-    This
+    Since expressions are immutable and hashable, we can cache their results.
 
     """
-
-    def __init__(self):
-        self.rules = WeakKeyDictionary()
-
-    def clear(self):
-        self.rules.clear()
-        self.lookup.cache_clear()
 
     def invalidate_cache(self):
         self.lookup.cache_clear()
 
-    def invalidate_rule(self, expr):
-        if expr in self.rules:
-            self.rules.pop(expr)
-            self.lookup.cache_clear()
-
-    def assign_rule(self, expr, output):
-        self.rules[expr] = output
-        self.lookup.cache_clear()  # invalidate cache
-
     @lru_cache
     def lookup(self, expr):
-        output = self.rules.get(expr)
-        if output is None:
-            # try rewriting
-            output = self._rewrite(expr)
-        # avoid propagating copies
-        return output if output != expr else expr
+        repl = self.visit(expr)
+        # prefer the original rather over an identical copy
+        return expr if expr == repl else repl
+
+    # Don't cache visitor results directly, since
+    # they may be overridden.
 
     @singledispatchmethod
-    def _rewrite(self, expr):
+    def visit(self, expr):
         msg = f"No method to rewrite object of type {type(expr)}."
         raise NotImplementedError(msg)
 
-    @_rewrite.register
+    @visit.register
     def _(self, expr: ir.Length):
         value = self.lookup(expr.value)
         return ir.Length(value)
 
-    @_rewrite.register
+    @visit.register
     def _(self, expr: ir.Subscript):
         value = self.lookup(expr.value)
         slice_ = self.lookup(expr.slice)
         return ir.Subscript(value, slice_)
 
-    @_rewrite.register
+    @visit.register
     def _(self, expr: ir.Min):
         values = tuple(self.lookup(value) for value in expr.values)
         return ir.Min(values)
 
-    @_rewrite.register
+    @visit.register
     def _(self, expr: ir.Max):
         values = tuple(self.lookup(value) for value in expr.values)
         return ir.Max(values)
 
-    @_rewrite.register
+    @visit.register
     def _(self, expr: ir.Slice):
         start = self.lookup(expr.start)
         stop = self.lookup(expr.stop)
         step = self.lookup(expr.step)
         return ir.Slice(start, stop, step)
 
-    @_rewrite.register
+    @visit.register
     def _(self, expr: ir.Tuple):
         elements = tuple(self.lookup(elem) for elem in expr.elements)
         return ir.Tuple(elements)
 
-    @_rewrite.register
+    @visit.register
     def _(self, expr: ir.Ternary):
         test = self.lookup(expr.test)
         if_expr = self.lookup(expr.if_expr)
         else_expr = self.lookup(expr.else_expr)
         return ir.Ternary(test, if_expr, else_expr)
 
-    @_rewrite.register
+    @visit.register
     def _(self, expr: ir.BinOp):
         left = self.lookup(expr.left)
         right = self.lookup(expr.right)
         return ir.BinOp(left, right, expr.op)
 
-    @_rewrite.register
+    @visit.register
     def _(self, expr: ir.Call):
         args = tuple(self.lookup(arg) for arg in expr.args)
         kws = tuple((kw, self.lookup(value)) for (kw, value) in expr.keywords)
         func = self.lookup(expr.func)
         return ir.Call(func, args, kws)
 
-    @_rewrite.register
+    @visit.register
     def _(self, expr: ir.BoolOp):
         operands = tuple(self.lookup(operand) for operand in expr.operands)
         return ir.BoolOp(operands, expr.op)
 
-    @_rewrite.register
+    @visit.register
     def _(self, expr: ir.AffineSeq):
         start = self.lookup(expr.start)
         stop = self.lookup(expr.stop)
         step = self.lookup(expr.step)
         return ir.AffineSeq(start, stop, step)
 
-    @_rewrite.register
+    @visit.register
     def _(self, expr: ir.UnaryOp):
         operand = self.lookup(expr.operand)
         return ir.UnaryOp(operand, expr.op)
 
-    @_rewrite.register
+    @visit.register
     def _(self, expr: ir.Zip):
         elems = tuple(self.lookup(elem) for elem in expr.elements)
         return ir.Zip(elems)
 
-    @_rewrite.register
+    @visit.register
     def _(self, expr: ir.Reversed):
         iterable = self.lookup(expr.iterable)
         return ir.Reversed(iterable)
 
-    @_rewrite.register
+    @visit.register
     def _(self, expr: ir.IntConst):
         return expr
 
-    @_rewrite.register
+    @visit.register
     def _(self, expr: ir.FloatConst):
         return expr
 
-    @_rewrite.register
+    @visit.register
     def _(self, expr: ir.BoolConst):
         return expr
 
-    @_rewrite.register
+    @visit.register
     def _(self, expr: ir.NameRef):
         return expr
 

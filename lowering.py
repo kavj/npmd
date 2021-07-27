@@ -8,7 +8,7 @@ from functools import singledispatch, singledispatchmethod
 import ir
 import symbol_table
 
-from visitor import StmtVisitor, walk_statements, walk_branches
+from visitor import StmtVisitor, ExpressionVisitor, walk_statements, walk_branches
 
 
 unaryops = {"+": operator.pos,
@@ -123,112 +123,87 @@ def simplify_binop(expr: ir.BinOp):
     return repl
 
 
-@singledispatch
-def fold_if_constant(expr):
-    msg = f"fold expression not implemented for "
-    raise NotImplementedError
+class ConstFolder(ExpressionVisitor):
 
+    def __call__(self, expr):
+        return self.lookup(expr)
 
-@fold_if_constant.register
-def _(expr: ir.Constant):
-    return expr
+    @singledispatchmethod
+    def visit(self, expr):
+        super().visit(expr)
 
-
-@fold_if_constant.register
-def _(expr: ir.NameRef):
-    return expr
-
-
-@fold_if_constant.register
-def _(expr: ir.Slice):
-    start = fold_if_constant(expr.start)
-    stop = expr.stop
-    if stop is not None:
-        stop = fold_if_constant(stop)
-    step = fold_if_constant(expr.step)
-    repl = ir.Slice(start, stop, step)
-    if repl == expr:
-        repl = expr
-    return repl
-
-
-@fold_if_constant.register
-def _(expr: ir.BinOp):
-    left = fold_if_constant(expr.left)
-    right = fold_if_constant(expr.right)
-    if left.constant and right.constant:
-        oper = binops[expr.op]
-        repl = oper(left.value, right.value)
-        repl = wrap_constant(repl)
-    else:
-        repl = ir.BinOp(left, right, op)
-    if repl == expr:
-        repl = expr
-    return repl
-
-
-@fold_if_constant.register
-def _(expr: ir.UnaryOp):
-    value = fold_if_constant(expr.value)
-    if value.constant:
-        oper = unaryops[expr.op]
-        repl = wrap_constant(oper(value.value))
-    else:
-        repl = ir.UnaryOp(value, expr.op)
-    return repl
-
-
-@fold_if_constant.register
-def _(expr: ir.Subscript):
-    value = expr.value
-    slice_ = fold_if_constant(expr.slice)
-    repl = ir.Subscript(value, slice_)
-    if expr == repl:
-        repl = expr
-    return repl
-
-
-@fold_if_constant.register
-def _(expr: ir.Ternary):
-    test = fold_if_constant(expr.test)
-    on_if = fold_if_constant(expr.if_expr)
-    on_else = fold_if_constant(expr.else_expr)
-    if test.constant:
-        if operator.truth(test):
-            repl = on_if
+    @visit.register
+    def _(self, expr: ir.BinOp):
+        left = self.lookup(node.left)
+        right = self.lookup(node.right)
+        if left.constant and right.constant:
+            op = binops[expr.op]
+            value = op(left.value, right.value)
+            result = wrap_constant(value)
+            return result
         else:
-            repl = on_else
-    else:
-        repl = ir.Ternary(on_if, on_else)
-    if repl == expr:
-        repl = expr
-    return repl
+            return expr
 
-
-@fold_if_constant.register
-def _(expr: ir.BoolOp):
-    contains_false = False
-    contains_true = False
-    repl = set()
-    for operand in expr.operands:
-        operand = fold_if_constant(operand)
+    @visit.register
+    def _(self, expr: ir.UnaryOp):
+        operand = self.lookup(expr.operand)
         if operand.constant:
-            if operator.truth(operand):
-                contains_true = True
+            op = unaryops[expr.op]
+            value = op(operand.value)
+            result = wrap_constant(value)
+            return result
+        else:
+            return expr
+
+    @visit.register
+    def _(self, expr: ir.Ternary):
+        test = self.lookup(expr.test)
+        if_expr = self.lookup(expr.if_expr)
+        else_expr = self.lookup(expr.else_expr)
+        if test.constant:
+            return if_expr if operator.truth(test) else else_expr
+        else:
+            return ir.Ternary(test, if_expr, else_expr)
+
+    @visit.register
+    def _(self, expr: ir.AND):
+        operands = []
+        for operand in self.operands:
+            operand = self.lookup(operand)
+            if operand.constant:
+                if not operator.truth(operand):
+                    return ir.BoolConst(False)
             else:
-                contains_false = True
-        repl.add(operand)
-    if contains_false and expr.op == "and":
-        updated = ir.BoolConst(False)
-    elif contains_true and expr.op == "or":
-        updated = ir.BoolConst(True)
-    else:
-        repl = tuple(repl)
-        updated = ir.BoolOp(repl, expr.op)
-    if expr == updated:
-        # discard copy if unchanged
-        updated = expr
-    return updated
+                operands.append(operand)
+        if len(operands) >= 2:
+            operands = tuple(operands)
+            return ir.AND(operands)
+        else:
+            operands = operands.pop()
+            return ir.TRUTH(operands)
+
+    @visit.register
+    def _(self, expr: ir.OR):
+        operands = []
+        for operand in self.operands:
+            operand = self.lookup(operand)
+            if operand.constant:
+                if operator.truth(operand):
+                    return ir.BoolConst(True)
+            else:
+                operands.append(operand)
+        if len(operands) >= 2:
+            operands = tuple(operands)
+            return ir.OR(operands)
+        else:
+            operands = operands.pop()
+            return ir.TRUTH(operands)
+
+    @visit.register
+    def _(self, expr: ir.XOR):
+        # not sure about this one, since
+        # it's not monotonic
+        raise NotImplementedError
 
 
 def discard_unbounded(iterables):
@@ -308,6 +283,7 @@ def merge_integer_max():
 def find_min_interval_width(intervals):
     lower_bounds = set()
     upper_bounds = set()
+    fold_if_constant = ConstFolder()
 
     for lower, upper in intervals:
         lower_bounds.add(lower)
