@@ -55,11 +55,11 @@ class prettystringify:
         return str(node.value)
 
     @visit.register
-    def _(self, node: ir.IntNode):
+    def _(self, node: ir.IntConst):
         return str(node.value)
 
     @visit.register
-    def _(self, node: ir.FloatNode):
+    def _(self, node: ir.FloatConst):
         return str(node.value)
 
     @visit.register

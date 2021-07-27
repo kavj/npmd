@@ -1,4 +1,5 @@
-from functools import singledispatchmethod
+from functools import singledispatchmethod, lru_cache
+from weakref import WeakKeyDictionary
 
 import ir
 
@@ -72,90 +73,66 @@ def walk_branches(node):
                 yield from walk_branches(stmt.else_branch)
 
 
-class RuleBasedRewriter:
+class ExpressionVisitor:
     """
-    A small utility to help cache expression mappings and rewrite expressions according to
-    updates of their sub-expressions.
+    Since expressions are immutable and hashable, they deserve their own visitor.
+    This
 
     """
 
     def __init__(self):
-        self.rules = {}
-        self.cache = {}
+        self.rules = WeakKeyDictionary()
 
-    def clear(self, expr=None):
-        if expr is None:
-            self.rules.clear()
-        else:
-            self.rules.pop(expr, None)
+    def clear(self):
+        self.rules.clear()
+        self.lookup.cache_clear()
 
-    def update_rule(self, expr, output):
-        assert output is not None
-        curr = self.rules.get(expr)
-        if curr is None or curr != output:
-            self.rules[expr] = output
+    def invalidate_cache(self):
+        self.lookup.cache_clear()
 
-    def make_rule(self, expr, output):
-        assert output is not None
-        curr = self.rules.get(expr)
-        if curr is not None:
-            if curr != output:
-                msg = f"Already have a non-matching existing rule for {expr}."
-                raise KeyError(msg)
-        else:
-            self.rules[expr] = output
+    def invalidate_rule(self, expr):
+        if expr in self.rules:
+            self.rules.pop(expr)
+            self.lookup.cache_clear()
 
+    def assign_rule(self, expr, output):
+        self.rules[expr] = output
+        self.lookup.cache_clear()  # invalidate cache
+
+    @lru_cache
     def lookup(self, expr):
         output = self.rules.get(expr)
         if output is None:
-            output = expr
-        return output
-
-    def reconstruct_expression(self, expr):
-        """
-        Rewrites an expression based on rules available to its sub-expressions.
-        """
-
-        # if we have a rule set for this expression,
-        # it takes priority
-        from_cache = self.rules.get(expr)
-        if from_cache is None:
-            # Check if previously reconstructed
-            form_cache = self.cache.get(expr)
-            if from_cache is None:
-                from_cache = self._rewrite(expr)
-                if from_cache == expr:
-                    # if they match, use the original expression
-                    from_cache = expr
-                self.cache[expr] = form_cache
-        return from_cache
+            # try rewriting
+            output = self._rewrite(expr)
+        # avoid propagating copies
+        return output if output != expr else expr
 
     @singledispatchmethod
     def _rewrite(self, expr):
-        raise NotImplementedError
+        msg = f"No method to rewrite object of type {type(expr)}."
+        raise NotImplementedError(msg)
 
     @_rewrite.register
     def _(self, expr: ir.Length):
         value = self.lookup(expr.value)
-        repl = ir.Length(value)
-        return repl
+        return ir.Length(value)
 
     @_rewrite.register
     def _(self, expr: ir.Subscript):
-        value = self._rewrite(expr.value)
-        slice_ = self._rewrite(expr.slice)
-        subscript = ir.Subscript(value, slice_)
-        return subscript
+        value = self.lookup(expr.value)
+        slice_ = self.lookup(expr.slice)
+        return ir.Subscript(value, slice_)
 
     @_rewrite.register
     def _(self, expr: ir.Min):
-        output = tuple(self.lookup(elem) for elem in expr.values)
-        return output
+        values = tuple(self.lookup(value) for value in expr.values)
+        return ir.Min(values)
 
     @_rewrite.register
     def _(self, expr: ir.Max):
-        output = tuple(self.rules[elem] for elem in expr.values)
-        return output
+        values = tuple(self.lookup(value) for value in expr.values)
+        return ir.Max(values)
 
     @_rewrite.register
     def _(self, expr: ir.Slice):
@@ -166,71 +143,62 @@ class RuleBasedRewriter:
 
     @_rewrite.register
     def _(self, expr: ir.Tuple):
-        output = tuple(self.lookup(elem) for elem in expr.elements)
-        output = ir.Tuple(output)
-        return output
+        elements = tuple(self.lookup(elem) for elem in expr.elements)
+        return ir.Tuple(elements)
 
     @_rewrite.register
     def _(self, expr: ir.Ternary):
         test = self.lookup(expr.test)
-        on_true = self.lookup(expr.if_expr)
-        on_false = self.lookup(expr.else_expr)
-        output = ir.Ternary(test, on_true, on_false)
-        return output
+        if_expr = self.lookup(expr.if_expr)
+        else_expr = self.lookup(expr.else_expr)
+        return ir.Ternary(test, if_expr, else_expr)
 
     @_rewrite.register
     def _(self, expr: ir.BinOp):
         left = self.lookup(expr.left)
         right = self.lookup(expr.right)
-        output = ir.BinOp(left, right, expr.op)
-        return output
+        return ir.BinOp(left, right, expr.op)
 
     @_rewrite.register
     def _(self, expr: ir.Call):
         args = tuple(self.lookup(arg) for arg in expr.args)
         kws = tuple((kw, self.lookup(value)) for (kw, value) in expr.keywords)
         func = self.lookup(expr.func)
-        output = ir.Call(func, args, kws)
-        return output
+        return ir.Call(func, args, kws)
 
     @_rewrite.register
     def _(self, expr: ir.BoolOp):
-        subexprs = tuple(self.lookup(operand) for operand in expr.operands)
-        output = ir.BoolOp(subexprs, expr.op)
-        return output
+        operands = tuple(self.lookup(operand) for operand in expr.operands)
+        return ir.BoolOp(operands, expr.op)
 
     @_rewrite.register
     def _(self, expr: ir.AffineSeq):
         start = self.lookup(expr.start)
         stop = self.lookup(expr.stop)
         step = self.lookup(expr.step)
-        output = ir.AffineSeq(start, stop, step)
-        return output
+        return ir.AffineSeq(start, stop, step)
 
     @_rewrite.register
     def _(self, expr: ir.UnaryOp):
         operand = self.lookup(expr.operand)
-        output = ir.UnaryOp(operand, expr.op)
-        return output
+        return ir.UnaryOp(operand, expr.op)
 
     @_rewrite.register
     def _(self, expr: ir.Zip):
         elems = tuple(self.lookup(elem) for elem in expr.elements)
-        output = ir.Zip(elems)
-        return output
+        return ir.Zip(elems)
 
     @_rewrite.register
     def _(self, expr: ir.Reversed):
         iterable = self.lookup(expr.iterable)
-        output = ir.Reversed(iterable)
-        return output
+        return ir.Reversed(iterable)
 
     @_rewrite.register
-    def _(self, expr: ir.IntNode):
+    def _(self, expr: ir.IntConst):
         return expr
 
     @_rewrite.register
-    def _(self, expr: ir.FloatNode):
+    def _(self, expr: ir.FloatConst):
         return expr
 
     @_rewrite.register
@@ -246,7 +214,7 @@ class StmtVisitor:
 
     @singledispatchmethod
     def visit(self, node):
-        msg = f"No handler for node type {type(node)}."
+        msg = f"No handler exists for node type {type(node)}."
         raise NotImplementedError(msg)
 
     @visit.register

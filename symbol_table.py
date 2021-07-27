@@ -59,7 +59,7 @@ def _(input: ir.Constant):
 
 @wrap_input.register
 def _(input: int):
-    return ir.IntNode(input)
+    return ir.IntConst(input)
 
 
 @wrap_input.register
@@ -69,12 +69,12 @@ def _(input: bool):
 
 @wrap_input.register
 def _(input: numbers.Integral):
-    return ir.IntNode(input)
+    return ir.IntConst(input)
 
 
 @wrap_input.register
 def _(input: numbers.Real):
-    return ir.FloatNode(input)
+    return ir.FloatConst(input)
 
 
 class FunctionContext:

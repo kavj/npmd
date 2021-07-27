@@ -59,9 +59,9 @@ def wrap_constant(c):
     if isinstance(c, bool):
         return ir.BoolConst(c)
     if isinstance(c, numbers.Integral):
-        return ir.IntNode(c)
+        return ir.IntConst(c)
     elif isinstance(c, numbers.Real):
-        return ir.FloatNode(c)
+        return ir.FloatConst(c)
     else:
         msg = f"Can't construct constant node for unsupported constant type {type(c)}"
         raise NotImplementedError(msg)
@@ -70,6 +70,9 @@ def wrap_constant(c):
 def rewrite_if_matches_xor(expr):
     # Python's ast can't directly translate xor
     # but it's provided by lower level interfaces.
+
+    # Capture simple cases that are either obvious or
+    # follow from DeMorgan's Laws
 
     pass
 
@@ -82,7 +85,7 @@ def rewrite_if_matches_square_root(expr):
     if is_pow(expr):
         repl = expr
         coeff = expr.right
-        if coeff == ir.FloatNode(0.5):
+        if coeff == ir.FloatConst(0.5):
             # Todo: needs a namespace or direct specialization
             repl = ir.Call("sqrt", (expr.left), ())
     return repl
@@ -92,7 +95,7 @@ def rewrite_if_matches_square(expr):
     repl = expr
     if is_pow(expr):
         coeff = expr.right
-        if (coeff == ir.IntNode(2)) or (coeff == ir.FloatNode(2.0)):
+        if (coeff == ir.IntConst(2)) or (coeff == ir.FloatConst(2.0)):
             op = "*=" if expr.in_place else "*"
             repl = ir.BinOp(expr.left, expr.left, op)
     return repl
@@ -101,7 +104,7 @@ def rewrite_if_matches_square(expr):
 def rewrite_if_matches_sign_flip(expr):
     repl = expr
     if isinstance(expr, ir.BinOp) and op in ("*", "*="):
-        unary_minus_equiv = ir.IntNode(-1)
+        unary_minus_equiv = ir.IntConst(-1)
         left = expr.left
         right = expr.right
         if left == unary_minus_equiv:
@@ -318,7 +321,7 @@ def find_min_interval_width(intervals):
         upper, = upper_bounds
         diff_expr = ir.BinOp(upper, lower, "-")
         min_interval_width = fold_if_constant(expr)
-        assert isinstance(min_interval_width, ir.IntNode) or not min_interval_width.constant
+        assert isinstance(min_interval_width, ir.IntConst) or not min_interval_width.constant
     elif unique_upper_count == 1:
         lower = ir.Max(lower_bounds)
         upper, = upper_bounds
@@ -335,7 +338,7 @@ def find_min_interval_width(intervals):
             width = ir.BinOp(upper, lower, "-")
             width = fold_if_constant(width)
             if width.constant:
-                assert isinstance(width, ir.IntNode)
+                assert isinstance(width, ir.IntConst)
                 if numeric_min is None:
                     numeric_min = width.value
                 else:
@@ -359,8 +362,8 @@ def make_iter_count_expr(span, step):
         msg = f"Interval or range calculations may not use a step size of zero."
         raise ZeroDivisionError(msg)
     if span.constant and step.constant:
-        assert isinstance(span, ir.IntNode)
-        assert isinstance(step, ir.IntNode)
+        assert isinstance(span, ir.IntConst)
+        assert isinstance(step, ir.IntConst)
         width = span.value
         step_ = step.value
         base_iteration_count = operator.floordiv(width, step_)
@@ -427,7 +430,7 @@ def make_min_sliced_len_expr(slices, leading_dim_expr):
 
 
 def make_explicit_iter_count(counter):
-    if all(isinstance(subexpr, ir.IntNode) for subexpr in counter.subexprs):
+    if all(isinstance(subexpr, ir.IntConst) for subexpr in counter.subexprs):
         count = numeric_max_iter_count(counter)
     elif counter.step == ir.One:
         count = ir.BinOp(counter.stop, counter.start, "-")

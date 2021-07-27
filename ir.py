@@ -47,6 +47,7 @@ inplace_to_oop = {
     "@=": "@",
 }
 
+
 supported_builtins = frozenset({'iter', 'range', 'enumerate', 'zip', 'all', 'any', 'max', 'min', 'abs', 'pow',
                                 'round', 'reversed'})
 
@@ -167,6 +168,10 @@ class ValueRef(ABC):
 
     constant: clscond = False
 
+    @property
+    def as_constant(self):
+        return self
+
 
 class Constant(ValueRef):
     """
@@ -186,19 +191,19 @@ class BoolConst(Constant):
 
 
 @dataclass(frozen=True)
-class FloatNode(Constant):
+class FloatConst(Constant):
     value: numbers.Real
 
 
 @dataclass(frozen=True)
-class IntNode(Constant):
+class IntConst(Constant):
     value: numbers.Integral
 
 
 # commonly used
 
-Zero = IntNode(0)
-One = IntNode(1)
+Zero = IntConst(0)
+One = IntConst(1)
 
 
 # Top Level
@@ -219,7 +224,7 @@ class ArrayType(ValueRef):
 @dataclass(frozen=True)
 class ArrayRef(ValueRef):
     name: NameRef
-    dims: typing.Tuple[typing.Union[NameRef, IntNode], ...]
+    dims: typing.Tuple[typing.Union[NameRef, IntConst], ...]
     dtype: typing.Hashable
 
     @property
@@ -235,7 +240,7 @@ class ArrayRef(ValueRef):
 class ViewRef:
     # name: NameRef
     base: typing.Union[ArrayRef, ViewRef]
-    slice: typing.Optional[typing.Union[IntNode, Slice, NameRef, BinOp, UnaryOp]]
+    slice: typing.Optional[typing.Union[IntConst, Slice, NameRef, BinOp, UnaryOp]]
     transposed: bool
 
     @cached_property
@@ -327,9 +332,9 @@ class Slice(ValueRef):
 
     """
 
-    start: typing.Union[NameRef, IntNode]
-    stop: typing.Optional[typing.Union[NameRef, IntNode]]
-    step: typing.Union[NameRef, IntNode]
+    start: typing.Union[NameRef, IntConst]
+    stop: typing.Optional[typing.Union[NameRef, IntConst]]
+    step: typing.Union[NameRef, IntConst]
 
     @property
     def subexprs(self):
@@ -381,6 +386,21 @@ class BinOp(ValueRef):
         return self.op in inplace_ops
 
 
+# Compare ops are once again their own class,
+# since they cannot be in place like binops
+
+
+@dataclass(frozen=True)
+class CompareOp(ValueRef):
+    left: ValueRef
+    right: ValueRef
+    op: str
+
+    def subexprs(self):
+        yield self.left
+        yield self.right
+
+
 @dataclass(frozen=True)
 class OR(ValueRef):
     """
@@ -390,6 +410,7 @@ class OR(ValueRef):
 
     def __post_init__(self):
         assert (isinstance(self.operands, tuple))
+        assert len(self.operands) >= 2
 
     @property
     def subexprs(self):
@@ -406,6 +427,7 @@ class AND(ValueRef):
 
     def __post_init__(self):
         assert (isinstance(self.operands, tuple))
+        assert len(self.operands) >= 2
 
     @property
     def subexprs(self):
@@ -422,6 +444,7 @@ class XOR(ValueRef):
 
     def __post_init__(self):
         assert (isinstance(self.operands, tuple))
+        assert len(self.operands) >= 2
 
     @property
     def subexprs(self):
@@ -637,7 +660,8 @@ class Continue(StmtBase):
 
 @dataclass
 class ForLoop(StmtBase):
-    induction_var: InductionVar
+    target: ValueRef
+    iterable: ValueRef
     body: typing.List[Statement]
     pos: Position
 
