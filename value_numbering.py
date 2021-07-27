@@ -5,8 +5,6 @@ from functools import singledispatch, singledispatchmethod
 
 import ir
 
-from visitor import walk_branches, walk_expr_params, walk_assigns
-
 # These yield everything including the original expression
 # This way we can remove a lot of type checks from common paths.
 
@@ -44,8 +42,11 @@ class scoped:
 
     @register_read.register
     def _(self, target: ir.ValueRef):
-        for subexpr in walk_expr_params(target):
-            self.register_read(subexpr)
+        for subexpr in walk(target):
+            if isinstance(subexpr, ir.NameRef):
+                self.register_read(subexpr)
+        # or subexpr in walk_expr_params(target):
+        #    self.register_read(subexpr)
 
     def register_write(self, target):
         if isinstance(target, ir.NameRef):

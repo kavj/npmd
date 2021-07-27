@@ -3,73 +3,22 @@ from functools import singledispatchmethod, lru_cache
 import ir
 
 
-def walk_assigns(stmts, reverse=False):
-    if reverse:
-        for stmt in reversed(stmts):
-            if isinstance(stmt, ir.Assign):
-                yield stmt.target, stmt.value
-    else:
-        for stmt in stmts:
-            if isinstance(stmt, ir.Assign):
-                yield stmt.target, stmt.value
-
-
-def walk_expr_parameters(node):
-    """
-    Walk an expression, yielding only sub-expressions that are not expressions themselves.
-
-    """
-    if hasattr(node, "subexprs"):
-        for subexpr in node.subexprs:
-            if hasattr(subexpr, "subexprs"):
-                yield from walk_expr_parameters(subexpr)
-            else:
-                yield subexpr
-
-
-def walk_expr(node):
+def walk(node):
     """
     walk an expression depth first in post order, yielding everything but the original node
     """
     if hasattr(node, "subexprs"):
         for subexpr in node.subexprs:
-            yield from walk_expr(subexpr)
+            yield from walk(subexpr)
             yield subexpr
 
 
-def walk_statements(node):
-    """
-    extending walk interface to include lists
-    """
-
-    if isinstance(node, list):
-        for stmt in node:
-            yield stmt
-            if isinstance(stmt, (ir.ForLoop, ir.WhileLoop, ir.IfElse)):
-                yield from walk_statements(stmt)
-    elif isinstance(node, (ir.ForLoop, ir.WhileLoop)):
-        yield from walk_statements(node.body)
-    elif isinstance(node, ir.IfElse):
-        yield from walk_statements(node.if_branch)
-        yield from walk_statements(node.else_branch)
-    else:
-        raise TypeError(f"Cannot walk type of {type(node)}.")
-
-
-def walk_branches(node):
-    """
-    Walk statements, expanding branches but not loop constructs
-
-    """
-    if isinstance(node, ir.IfElse):
-        yield from walk_branches(node.if_branch)
-        yield from walk_branches(node.else_branch)
-    elif isinstance(node, list):
-        for stmt in node:
-            yield stmt
-            if isinstance(stmt, ir.IfElse):
-                yield from walk_branches(stmt.if_branch)
-                yield from walk_branches(stmt.else_branch)
+def walk_unique(node):
+    seen = set()
+    for subexpr in walk(node):
+        if subexpr not in seen:
+            yield subexpr
+            seen.add(subexpr)
 
 
 class ExpressionVisitor:
