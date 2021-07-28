@@ -69,16 +69,6 @@ def wrap_constant(c):
         raise NotImplementedError(msg)
 
 
-def rewrite_if_matches_xor(expr):
-    # Python's ast can't directly translate xor
-    # but it's provided by lower level interfaces.
-
-    # Capture simple cases that are either obvious or
-    # follow from DeMorgan's Laws
-
-    pass
-
-
 def is_pow(expr):
     return isinstance(expr, ir.BinOp) and expr.op in ("**", "**=")
 
@@ -169,12 +159,7 @@ class simplify_exprs(ExpressionVisitor):
 
     @visit.register
     def _(expr: ir.UnaryOp):
-        operand = expr.operand
-        if operand.constant:
-            oper = unaryops[op]
-            value = oper(expr.value)
-            return wrap_constant(value)
-        elif op == "+":
+        if op == "+":
             return operand
         elif op == "-":
             if isinstance(operand, ir.UnaryOp) and operand.op == "-":
@@ -193,14 +178,12 @@ class simplify_exprs(ExpressionVisitor):
                 repl = ir.UnaryOp(left, "-")
         return repl
 
-
     @visit.register
     def _(expr: ir.Ternary):
         # Fold if both sides match
         # Fold to min or max if matches ordered form
         # a few others
         pass
-
 
     @visit.register
     def _(expr: ir.Max):
@@ -242,7 +225,7 @@ def simplify_binop(expr: ir.BinOp):
     return repl
 
 
-class ConstFolder(ExpressionVisitor):
+class const_folding(ExpressionVisitor):
 
     def __call__(self, expr):
         return self.lookup(expr)
@@ -338,37 +321,38 @@ def discard_unbounded(iterables):
     return bounded
 
 
-@singledispatch
-def split_intervals(iterable):
-    msg = f"No method to make counter for {iterable}."
-    raise NotImplementedError(msg)
+class interval_splitting(ExpressionVisitor):
 
+    @singledispatchmethod
+    def visit(iterable):
+        msg = f"No method to make counter for {iterable}."
+        raise NotImplementedError(msg)
 
-@split_intervals.register
-def _(iterable: ir.NameRef):
-    return ((ir.Zero, ir.Length(iterable), ir.One),)
+    @visit.register
+    def _(iterable: ir.NameRef):
+        return {(ir.Zero, ir.Length(iterable), ir.One)}
 
+    @visit.register
+    def _(iterable: ir.AffineSeq):
+        # Note: we have to return an interval even if the stop parameter is None
+        # Without this, the
+        return {(iterable.start, iterable.stop, iterable.step)}
 
-@split_intervals.register
-def _(iterable: ir.AffineSeq):
-    return ((iterable.start, iterable.stop, iterable.step))
-
-
-@split_intervals.register
-def _(iterable: ir.Subscript):
-    if isinstance(iterable.slice, ir.Slice):
-        # We can convert iteration over a sliced array
-        # to affine parameters with respect to the base array.
-        start = iterable.start
-        step = iterable.step
-        base = (start, ir.Length(iterable.value), step)
-        if iterble.stop is None:
-            intervals = (base,)
+    @visit.register
+    def _(iterable: ir.Subscript):
+        if isinstance(iterable.slice, ir.Slice):
+            # We can convert iteration over a sliced array
+            # to affine parameters with respect to the base array.
+            start = iterable.start
+            step = iterable.step
+            base = (start, ir.Length(iterable.value), step)
+            if iterble.stop is None:
+                intervals = {base}
+            else:
+                intervals = {base, (start, iterable.stop, step)}
         else:
-            intervals = base, (start, iterable.stop, step)
-    else:
-        intervals = ((ir.Zero, ir.Length(iterable), ir.One),)
-    return intervals
+            intervals = {(ir.Zero, ir.Length(iterable), ir.One),}
+        return intervals
 
 
 def get_sequence_step(iterable):
@@ -387,24 +371,33 @@ def find_min_interval(spans):
         starts.add(start)
         stops.add(stop)
 
+    # ignore unbounded
+    stops.discard(None)
+
     start_count = len(starts)
     stop_count = len(stops)
 
-    if start_count == stop_count == 1:
+    if start_count == 1 and stop_count <= 1:
         start, = starts
-        stop, = stops
+        if stops:
+            stop, = stops
+        else:
+            stop = None
     elif start_count == 1:
         start, = starts
-        stop = ir.Min(tuple(stops))
-    elif stop_count == 1:
+        stop = ir.Min(tuple(stops)) if stops else None
+    elif stop_count <= 1:
         start = ir.Max(tuple(starts))
-        stop, = stops
+        if stops:
+            stop, = stops
+        else:
+            stop = None
     else:
         widths = set()
         for start, stop in start_stop:
             if start == ir.Zero:
                 widths.add(stop)
-            else:
+            elif stop is not None:
                 d = ir.BinOp(stop, start, "-")
                 widths.add(d)
         start = ir.Zero
@@ -421,6 +414,13 @@ def make_loop_counter(iterables, syms):
     index into the array at each step, which should be taken by the iterator at runtime.
 
     """
+
+    intervals = set()
+    split_intervals = interval_splitting.lookup
+
+    for iterable in iterables:
+        from_iterable = split_intervals(iterable)
+        intervals.update(from_iterable)
 
     by_step = defaultdict(set)
 
@@ -445,7 +445,11 @@ def make_loop_counter(iterables, syms):
         # compute interval count explicitly
         reduce = set()
         for step, (start, stop) in intervals:
-            if start == ir.Zero:
+            if stop is None:
+                # This still requires a compatible step,
+                # but it doesn't bound anything.
+                continue
+            elif start == ir.Zero:
                 diff = stop
             else:
                 diff = ir.BinOp(stop, start, "-")
@@ -460,29 +464,3 @@ def make_loop_counter(iterables, syms):
     counter = ir.AffineSeq(start, stop, step)
 
     return counter
-
-
-def make_min_sliced_len_expr(slices, leading_dim_expr):
-    if not slices:
-        return leading_dim_expr
-    s = slices[0]
-    bound = leading_dim_expr if (s.stop is None or s.start == ir.Zero) else ir.BinOp(s.stop, s.start, "-")
-    for s in slices[1:]:
-        b = leading_dim_expr if (s.stop is None or s.start == ir.Zero) else ir.BinOp(s.stop, s.start, "-")
-        bound = ir.Ternary(ir.BinOp(bound, b, "<"), bound, b)
-    return bound
-
-
-def make_explicit_iter_count(counter):
-    if all(isinstance(subexpr, ir.IntConst) for subexpr in counter.subexprs):
-        count = numeric_max_iter_count(counter)
-    elif counter.step == ir.One:
-        count = ir.BinOp(counter.stop, counter.start, "-")
-    else:
-        on_false = ir.BinOp(counter.stop, counter.start, "-")
-        # avoid integer division
-        test = ir.BinOp(interval, counter.step, "&")
-        on_true = ir.BinOp(on_false, ir.One, "+")
-        count = ir.Ternary(test, on_true, on_false)
-    return count
-
