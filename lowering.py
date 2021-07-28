@@ -253,6 +253,7 @@ def get_sequence_step(iterable):
         return iterable.step
     return ir.One
 
+
 def find_min_interval(spans):
     starts = set()
     stops = set()
@@ -296,14 +297,10 @@ def make_loop_counter(iterables, syms):
     """
 
     by_step = defaultdict(set)
-    starts = set()
-    stops = set()
 
     for interval in intervals:
         (start, stop, step) = interval
         ss = (start, stop)
-        starts.add(start)
-        stops.add(stop)
         by_step[step].add(ss)
 
     # If we have one step size
@@ -326,7 +323,6 @@ def make_loop_counter(iterables, syms):
                 diff = stop
             else:
                 diff = ir.BinOp(stop, start, "-")
-            clamped = ir.Max(diff, ir.Zero)
             base_count = ir.BinOp(diff, step, "//")
             rem = ir.BinOp(diff, step, "&")
             fringe = ir.Ternary(ir.BinOp(rem, ir.Zero, ">"), ir.One, ir.Zero)
