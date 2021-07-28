@@ -63,13 +63,24 @@ supported_builtins = {"iter", "range", "enumerate", "zip", "all", "any", "max", 
                       "round", "reversed"}
 
 
-def unpack_iterated(target, iterable, pos):
-    if not isinstance(target, ir.Tuple) or not isinstance(iterable, ir.Zip):
-        yield target, iterable
-    elif target.length != iterable.length:
-        msg = f"Cannot ensure full unpacking of {iterable} with {target}, line: {pos.line_begin}."
-        raise ValueError(msg)
+def unpackable_length(iterable: ir.Call):
+    func_name = iterable.func
+    if func_name.name == "zip":
+        assert len(iterable.keywords) == 0
+        return len(iterable.args)
+    elif func_name.name == "enumerate":
+        return 2
     else:
+        return 0
+
+
+def unpack_iterated(target, iterable, pos):
+    if isinstance(target, ir.Tuple):
+        # Tuples are only supported here with full unpacking,
+        # so either this succeeds or we issue a compile time error.
+        if len(target.elements) != unpackable_length(iterable):
+            msg = f"Cannot generate unpacking for {iterable} using {target}."
+            raise ValueError(msg)
         for t, v in zip(target.subexprs, iterable.subexprs):
             yield from unpack_iterated(t, v, pos)
 

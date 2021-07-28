@@ -510,14 +510,6 @@ class Call(ValueRef):
         for kw, arg in self.keywords:
             yield arg
 
-    @property
-    def arg_count(self):
-        return len(self.args)
-
-    @property
-    def kwarg_count(self):
-        return len(self.keywords)
-
     def has_keyword(self, kw):
         return any(keyword == kw for (keyword, _) in self.keywords)
 

@@ -134,8 +134,8 @@ class ConstFolder(ExpressionVisitor):
 
     @visit.register
     def _(self, expr: ir.BinOp):
-        left = self.lookup(node.left)
-        right = self.lookup(node.right)
+        left = self.lookup(expr.left)
+        right = self.lookup(expr.right)
         if left.constant and right.constant:
             op = binops[expr.op]
             value = op(left.value, right.value)
@@ -215,26 +215,6 @@ def discard_unbounded(iterables):
 def make_affine_counter(iterable, symbols):
     msg = f"No method to make counter for {iterable}."
     raise NotImplementedError(msg)
-
-
-@make_affine_counter.register
-def _(iterable: ir.Subscript, symbols):
-    value = iterable.value
-    slice_ = fold_if_constant(iterable.slice)
-    if isinstance(slice_, ir.Slice):
-        if slice_.stop is None:
-            stop = array_type.dims[0]
-        else:
-            stop = ir.Min(leading_dim, slice_.stop)
-        counter = ir.AffineSeq(slice_.start, stop, slice_.step)
-    else:
-        # iterating over a single index subscript means iteration is bounded by
-        # the second dimension.
-        if symbols.lookup(value).ndims < 2:
-            msg = f"Cannot iterate over a scalar reference {iterable}."
-            raise ValueError(msg)
-        counter = ir.AffineSeq(ir.Zero, array_type.dims[1], ir.One)
-    return counter
 
 
 @make_affine_counter.register
@@ -425,5 +405,5 @@ def make_loop_interval(targets, iterables, symbols, loop_index):
     # Since we need to be able to reach an array definition along each path
     # and array names are not meant to be reassigned, we should be passing an array
     # reference here.
-    counter = merge_loop_counters(counters, symbols, loop_index)
+    # counter = merge_loop_counters(counters, symbols, loop_index)
     return counters
