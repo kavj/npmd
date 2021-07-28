@@ -106,121 +106,131 @@ def rewrite_pow(expr):
         return expr
 
 
-# Trivial rewriting
-# This stuff is sometimes introduced by other transforms.
+class simplify_exprs(ExpressionVisitor):
+    """
+    This class helps clean up composite adjustments made by other visitors.
+    Placing it here helps omit having to perform an excessive number of checks in each
+    individual expression rewrite. This is meant to run on expression hierarchies prior
+    to scheduling the introduction of temporary variables.
 
-@singledispatchmethod
-def fold_arithmetic(expr):
-    return expr
+    This contains some parts for associative ops, which should be disabled with floating point types.
 
+    """
 
-@fold_arithmetic.register
-def _(expr: ir.BinOp):
-    if is_pow(expr):
-        expr = rewrite_pow(expr)
-    left = fold_identity(expr.left)
-    right = fold_identity(expr.right)
-    op = expr.op
-    if left.constant and right.constant:
-        oper = binops[op]
-        value = oper(left.value, right.value)
-        value = wrap_constant(value)
-    if op in ("*", "*="):
-        if left == ir.One:
-            return eright
-        elif right == ir.One:
-            return left
-        elif left == ir.Zero or right == ir.Zero:
-            return ir.Zero
-        elif left == ir.IntConst(-1):
-            return ir.UnaryOp(right, "-")
-        elif right == ir.IntConst(-1):
-            return ir.UnaryOp(left, "-")
-    elif op in ("+", "+="):
-        if left == ir.Zero:
-            return right
-        elif right == ir.Zero:
-            return left
-    elif op in ("-", "-="):
-        if left == ir.Zero:
-            return ir.UnaryOp(right, "-")
-        elif right == ir.Zero:
-            return left
-        elif left == right:
-            return ir.Zero
-    elif op in ("//", "//="):
-        if right == ir.One:
-            return left
-    else:
-        return expr
+    def __init__(self, syms):
+        self.syms = syms
 
+    def __call__(self, expr):
+        return self.lookup(expr)
 
-@fold_arithmetic.register
-def _(expr: ir.UnaryOp):
-    operand = fold_arithmetic(expr.operand)
-    if operand.constant:
-        oper = unaryops[op]
-        value = oper(expr.value)
-        return wrap_constant(value)
-    elif op == "+":
-        return operand
-    elif op == "-":
-        if isinstance(operand, ir.UnaryOp) and operand.op == "-":
-            return operand.operand
-    else:
-        return expr
+    @singledispatchmethod
+    def visit(self, expr):
+        super().visit(expr)
 
-
-@fold_arithmetic.register
-def _(expr: ir.Ternary):
-    # Fold if both sides match
-    # Fold to min or max if matches ordered form
-    # a few others
-    pass
-
-
-@fold_arithmetic.register
-def _(expr: ir.Max):
-    # remove nesting and duplicates
-    repl = set()
-    numeric = None
-    contains_nan = False
-    contains_fp_consts = False
-    contains_int_consts = False
-    nested_mins = []
-    # Todo: need a flattening step for nested max exprs
-    for elem in expr.exprs:
-        if elem.constant and not contains_nan:
-            if math.isnan(elem.value):
-                contains_nan = True
-                numeric = math.nan
-            elif numeric is None:
-                numeric = elem.value
-            else:
-                numeric = max(numeric, elem.value)
-        elif isinstance(elem, ir.Max):
-            repl.update(elem.exprs)
+    @visit.register
+    def _(self, expr: ir.BinOp):
+        if is_pow(expr):
+            expr = rewrite_pow(expr)
+        left = fold_identity(expr.left)
+        right = fold_identity(expr.right)
+        op = expr.op
+        if left.constant and right.constant:
+            oper = binops[op]
+            value = oper(left.value, right.value)
+            value = wrap_constant(value)
+        if op in ("*", "*="):
+            if left == ir.One:
+                return right
+            elif right == ir.One:
+                return left
+            elif left == ir.Zero or right == ir.Zero:
+                return ir.Zero
+            elif left == ir.IntConst(-1):
+                return ir.UnaryOp(right, "-")
+            elif right == ir.IntConst(-1):
+                return ir.UnaryOp(left, "-")
+        elif op in ("+", "+="):
+            if left == ir.Zero:
+                return right
+            elif right == ir.Zero:
+                return left
+        elif op in ("-", "-="):
+            if left == ir.Zero:
+                return ir.UnaryOp(right, "-")
+            elif right == ir.Zero:
+                return left
+            elif left == right:
+                return ir.Zero
+        elif op in ("//", "//="):
+            if right == ir.One:
+                return left
         else:
-            repl.append(elem)
-    return
+            return expr
+
+    @visit.register
+    def _(expr: ir.UnaryOp):
+        operand = expr.operand
+        if operand.constant:
+            oper = unaryops[op]
+            value = oper(expr.value)
+            return wrap_constant(value)
+        elif op == "+":
+            return operand
+        elif op == "-":
+            if isinstance(operand, ir.UnaryOp) and operand.op == "-":
+                return operand.operand
+        else:
+            return expr
+
+        repl = expr
+        if isinstance(expr, ir.BinOp) and op in ("*", "*="):
+            unary_minus_equiv = ir.IntConst(-1)
+            left = expr.left
+            right = expr.right
+            if left == unary_minus_equiv:
+                repl = ir.UnaryOp(right, "-")
+            elif right == unary_minus_equiv:
+                repl = ir.UnaryOp(left, "-")
+        return repl
 
 
-@fold_arithmetic.register
-def _(expr: ir.Min):
-    pass
+    @visit.register
+    def _(expr: ir.Ternary):
+        # Fold if both sides match
+        # Fold to min or max if matches ordered form
+        # a few others
+        pass
 
 
-def rewrite_if_matches_sign_flip(expr):
-    repl = expr
-    if isinstance(expr, ir.BinOp) and op in ("*", "*="):
-        unary_minus_equiv = ir.IntConst(-1)
-        left = expr.left
-        right = expr.right
-        if left == unary_minus_equiv:
-            repl = ir.UnaryOp(right, "-")
-        elif right == unary_minus_equiv:
-            repl = ir.UnaryOp(left, "-")
-    return repl
+    @visit.register
+    def _(expr: ir.Max):
+        # remove nesting and duplicates
+        repl = set()
+        numeric = None
+        contains_nan = False
+        contains_fp_consts = False
+        contains_int_consts = False
+        nested_mins = []
+        # Todo: need a flattening step for nested max exprs
+        for elem in expr.exprs:
+            if elem.constant and not contains_nan:
+                if math.isnan(elem.value):
+                    contains_nan = True
+                    numeric = math.nan
+                elif numeric is None:
+                    numeric = elem.value
+                else:
+                    numeric = max(numeric, elem.value)
+            elif isinstance(elem, ir.Max):
+                repl.update(elem.exprs)
+            else:
+                repl.append(elem)
+        return
+
+
+    @visit.register
+    def _(expr: ir.Min):
+        pass
 
 
 def simplify_binop(expr: ir.BinOp):
@@ -312,6 +322,14 @@ class ConstFolder(ExpressionVisitor):
     def _(self, expr: ir.XOR):
         # not sure about this one, since
         # it's not monotonic
+        raise NotImplementedError
+
+    @visit.register
+    def _(self, expr: ir.Max):
+        raise NotImplementedError
+
+    @visit.register
+    def _(self, expr: ir.Min):
         raise NotImplementedError
 
 
