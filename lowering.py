@@ -264,7 +264,10 @@ def merge_integer_max():
     raise NotImplementedError
 
 
-def find_min_interval_width(intervals):
+def merge_counters(intervals):
+    """
+
+    """
     lower_bounds = set()
     upper_bounds = set()
     fold_if_constant = ConstFolder()
@@ -338,6 +341,115 @@ def make_iter_count_expr(span, step):
     return iter_count
 
 
+def flatten_integer_min_expr(expr):
+    """
+    Unpack terms and combine like terms without reducing.
+    This avoids hiding invalid terms.
+    """
+    assert isinstance(expr, ir.Min)
+    unpacked_min = set()
+    unpacked_max = set()
+    for term in expr.exprs:
+        if isinstance(term, ir.Min):
+            unpacked.update(unpack_integer_min_expr(term))
+        elif isinstance(term, ir.Max):
+            # can still optimize
+            unpacked_max.update(flatten_integer_max_expr(term))
+
+        else:
+            unpacked.add(term)
+
+    for term in unpacked_min:
+        # If term == max(unpacked_max), then it appears in the min expression twice with one being redundant.
+        # Otherwise term != max(unpacked_max) and therefore cannot be a solution to max(unpacked_max) but can
+        # still be one for unpacked_min, which takes precedence here.
+        unpacked_max.discard(term)
+
+    if unpacked_max:
+        max_term = ir.Max(tuple(unpacked_max))
+        unpacked_min.add(max_term)
+
+    if len(unpacked_min) == 1:
+        reduced, = unpacked_min
+    else:
+        reduced = ir.Min(tuple(unpacked_min))
+
+    return reduced
+
+
+def flatten_integer_max_expr(expr):
+    assert isinstance(expr, ir.Max)
+    unpacked = set()
+    for term in expr.exprs:
+        if isinstance(term, ir.Max):
+            unpacked.update(unpack_integer_min_expr(term))
+        else:
+            unpacked.add(term)
+
+
+def make_integer_min_expr(exprs):
+    unpacked = flatten_integer_min_expr(exprs)
+    # split symbolic and numerical
+    numerical = set()
+    reduced = set()
+    for expr in exprs:
+        if expr.constant:
+            numerical.add(expr)
+        else:
+            reduced.add(expr)
+    if any(not isinstance(n, ir.IntConst) for n in numerical):
+        msg = "Encountered non-integer value {n.value} in strictly integer min expression."
+        raise ValueError(msg)
+    if numerical:
+        numerical_min = wrap_constant(min(numerical))
+        reduced.add(numerical_min)
+    return reduced
+
+
+def make_integer_max_expr(exprs):
+    pass
+
+
+
+def reduce_intervals(intervals):
+    if len(intervals) == 1:
+        return intervals
+    by_start = defaultdict(set)
+    by_stop = defaultdict(set)
+    for start, stop in intervals:
+        by_start[start].add(stop)
+        by_stop[stop].add(start)
+    if len(by_start) == 1:
+        start, stops = by_start.popitem()
+        if len(stops) == 1:
+            stop, = stops
+        else:
+            stop = ir.Min(tuple(stops))
+        intervals = (ir.AffineSeq(start, stop, step),)
+    elif len(by_stop) == 1:
+        stop, starts = by_stop.popitem()
+        start = ir.Max(tuple(starts))
+        intervals = (ir.AffineSeq(start, stop, step),)
+    else:
+        intervals = []
+        if len(by_start) <= len(by_stop):
+            for start, stops in by_start.items():
+                if len(stops) == 1:
+                    stop, = stops
+                else:
+                    stop = ir.Min(tuple(stops))
+                intervals.append((start,stop))
+        else:
+            for stop, starts in by_stop.items():
+                if len(starts) == 1:
+                    start, = starts
+                else:
+                    start = ir.Max(tuple(starts))
+                intervals.append(start, stop)
+        intervals = tuple(intervals)
+    return intervals
+
+
 def make_loop_counter(iterables, syms):
     """
     Map a combination of array iterators and range and enumerate calls to a set of counters,
@@ -348,32 +460,31 @@ def make_loop_counter(iterables, syms):
 
     """
 
-    counters = {make_affine_counter(iterable) for iterable in iterables}
+    counters = set()
 
-    # check for simple case first
-    if len(counters) == 1:
-        counter, = counters
-        return counter
+    for iterable in iterables:
+        c = make_affine_counter(counter)
+        counters.add(c)
 
-    # group by step
+    # group (start, stop) pairs by step
     by_step = defaultdict(set)
+
     for c in counters:
         by_step[c.step].add((c.start, c.stop))
 
-    # For each possibly unique step size, simplify runtime interval width
-    # calculations as much as possible.
-    min_interval_widths = {}
-    for step, counter_group in by_step.items():
-        min_interval_widths[step] = find_minimum_interval_width(counter_group)
+    # Optimize around step first, since this avoids
+    # adding integer division calculations.
+    intervals = []
+    for step, start_stop in by_step.items():
+        starts = set()
+        stops = set()
 
-    if len(min_interval_widths) == 1:
-        # we can make a loop counter of the form range(0, min_interval_width, step)
-        step, min_interval_width = min_interval_widths.popitem()
-        counter = ir.AffineSeq(ir.Zero, min_interval_width, step)
-    else:
-        iter_counts = {make_iter_count_expr(span, step) for (span, step) in min_interval_widths.items()}
-        min_iter_count = ir.Min(iter_counts)
-        counter = ir.AffineSeq(ir.Zero, min_iter_count, ir.One)
+        for start, stop in start_stop:
+            starts.add(start)
+            stops.add(stop)
+
+        start_count = len(starts)
+        stop_count = len(stops)
 
     return counter
 
@@ -402,16 +513,3 @@ def make_explicit_iter_count(counter):
         count = ir.Ternary(test, on_true, on_false)
     return count
 
-
-def make_loop_interval(iterables, loop_index):
-    counters = set()
-    for iterable in iterables:
-        ac = make_affine_counter(iterable)
-        counters.add(ac)
-        # {make_affine_counter(iterable, symbols) for iterable in iterables}
-    # This has the annoying effect of dragging around the symbol table.
-    # Since we need to be able to reach an array definition along each path
-    # and array names are not meant to be reassigned, we should be passing an array
-    # reference here.
-    # counter = merge_loop_counters(counters, symbols, loop_index)
-    return counters

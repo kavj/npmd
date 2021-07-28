@@ -189,15 +189,24 @@ class Constant(ValueRef):
 class BoolConst(Constant):
     value: bool
 
+    def __post_init__(self):
+        assert isinstance(self.value, bool)
+
 
 @dataclass(frozen=True)
 class FloatConst(Constant):
     value: numbers.Real
 
+    def __post_init__(self):
+        assert isinstance(self.value, numbers.Real)
+
 
 @dataclass(frozen=True)
 class IntConst(Constant):
     value: numbers.Integral
+
+    def __post_init__(self):
+        assert isinstance(self.value, numbers.Integral)
 
 
 # commonly used
