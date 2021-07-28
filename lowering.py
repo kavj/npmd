@@ -3,6 +3,7 @@ import operator
 import typing
 
 from collections import defaultdict
+from dataclasses import dataclass
 from functools import singledispatch, singledispatchmethod
 
 import ir
@@ -212,37 +213,36 @@ def discard_unbounded(iterables):
 
 
 @singledispatch
-def make_affine_counter(iterable):
+def split_intervals(iterable):
     msg = f"No method to make counter for {iterable}."
     raise NotImplementedError(msg)
 
 
-@make_affine_counter.register
-def _(iterable: ir.AffineSeq):
-    return iterable
-
-@make_affine_counter.register
+@split_intervals.register
 def _(iterable: ir.NameRef):
-    counter = ir.AffineSeq(ir.Zero, ir.Length(iterable), ir.One)
-    return counter
+    return ((ir.Zero, ir.Length(iterable), ir.One),)
 
 
-@make_affine_counter.register
+@split_intervals.register
+def _(iterable: ir.AffineSeq):
+    return ((iterable.start, iterable.stop, iterable.step))
+
+
+@split_intervals.register
 def _(iterable: ir.Subscript):
     if isinstance(iterable.slice, ir.Slice):
         # We can convert iteration over a sliced array
         # to affine parameters with respect to the base array.
         start = iterable.start
-        stop = ir.Length(iterable.value)
         step = iterable.step
-        if iterable.stop is not None:
-            stop = ir.Min(stop, iterable.stop)
+        base = (start, ir.Length(iterable.value), step)
+        if iterble.stop is None:
+            intervals = (base,)
+        else:
+            intervals = base, (start, iterable.stop, step)
     else:
-        start = ir.Zero
-        stop = ir.Length(iterable)
-        step = ir.One
-    counter = ir.AffineSeq(start, stop, step)
-    return counter
+        intervals = ((ir.Zero, ir.Length(iterable), ir.One),)
+    return intervals
 
 
 def get_sequence_step(iterable):
@@ -253,163 +253,36 @@ def get_sequence_step(iterable):
         return iterable.step
     return ir.One
 
+def find_min_interval(spans):
+    starts = set()
+    stops = set()
+    for start, stop in spans:
+        starts.add(start)
+        stops.add(stop)
 
-def make_iter_count_expr(span, step):
-    if step == ir.Zero:
-        # catches some cases which are not folded, with a more detailed message
-        msg = f"Interval or range calculations may not use a step size of zero."
-        raise ZeroDivisionError(msg)
-    if span.constant and step.constant:
-        assert isinstance(span, ir.IntConst)
-        assert isinstance(step, ir.IntConst)
-        width = span.value
-        step_ = step.value
-        base_iteration_count = operator.floordiv(width, step_)
-        fringe = 1 if operator.and_(width, step_) else 0
-        iter_count = operator.add(base_iteration_count, fringe)
-        iter_count = wrap_constant(iter_count)
+    start_count = len(starts)
+    stop_count = len(stops)
+
+    if start_count == stop_count == 1:
+        start, = starts
+        stop, = stops
+    elif start_count == 1:
+        start, = starts
+        stop = ir.Min(tuple(stops))
+    elif stop_count == 1:
+        start = ir.Max(tuple(starts))
+        stop, = stops
     else:
-        base_iteation_count = ir.BinOp(span, step, "//")
-        test = ir.BinOp(span, step, "&")
-        fringe = ir.Ternary(test, ir.One, ir.Zero)
-        iter_count = ir.BinOp(base_iteation_count, fringe, "+")
-    return iter_count
-
-
-def flatten_min_expr(expr):
-    """
-    Flatten so that any single nested terms appear only once,
-    without removing possibly invalid terms.
-
-    """
-    assert isinstance(expr, ir.Min)
-    unpacked_min = set()
-    unpacked_max = set()
-    for term in expr.exprs:
-        if isinstance(term, ir.Min):
-            unpacked.update(unpack_integer_min_expr(term))
-        elif isinstance(term, ir.Max):
-            # can still optimize
-            unpacked_max.update(flatten_integer_max_expr(term))
-
-        else:
-            unpacked.add(term)
-
-    for term in unpacked_min:
-        # If term appears on its own in both unpacked_min and unpacked_max, and term == max(unpacked_max),
-        # then "term" is considered twice in the enclosing min expression.
-        # Otherwise if term != max(unpacked_max) and therefore cannot provide a solution to the sub-problem.
-        #
-        # We would still miss some buried under large hierarchies, which could be improved.
-        #
-        unpacked_max.discard(term)
-
-    if unpacked_max:
-        if len(unpacked_max) == 1:
-            max_term, = unpacked_max
-        else:
-            max_term = ir.Max(tuple(unpacked_max))
-        unpacked_min.add(max_term)
-
-    return reduced
-
-
-def flatten_integer_max_expr(expr):
-    """
-    Flatten so that any single nested terms appear only once,
-    without removing possibly invalid terms.
-    """
-    assert isinstance(expr, ir.Min)
-    unpacked_min = set()
-    unpacked_max = set()
-    for term in expr.exprs:
-        if isinstance(term, ir.Max):
-            unpacked.update(unpack_integer_max_expr(term))
-        elif isinstance(term, ir.Min):
-            # can still optimize
-            unpacked_max.update(flatten_integer_min_expr(term))
-        else:
-            unpacked.add(term)
-
-    for term in unpacked_min:
-        # If this is exposed via unpacked min,
-        # then min(unpacked_min) >= max(unpacked_max)
-        unpacked_max.discard(term)
-
-    if unpacked_min:
-        if len(unpacked_min) == 1:
-            min_term, = unpacked_min
-        else:
-            min_term = ir.Min(tuple(unpacked_min))
-        unpacked_max.add(min_term)
-
-    return unpacked
-
-
-def make_integer_min_expr(exprs):
-    unpacked = flatten_integer_min_expr(exprs)
-    # split symbolic and numerical
-    numerical = set()
-    reduced = set()
-    for expr in unpacked:
-        if expr.constant:
-            numerical.add(expr)
-        else:
-            reduced.add(expr)
-    if any(not isinstance(n, ir.IntConst) for n in numerical):
-        msg = "Encountered non-integer value {n.value} in strictly integer min expression."
-        raise ValueError(msg)
-    if numerical:
-        numerical_min = wrap_constant(min(numerical))
-        reduced.add(numerical_min)
-    if len(reduced) == 1:
-        output, = reduced
-    else:
-        output = ir.Min(tuple(reduced))
-    return output
-
-
-def make_integer_max_expr(exprs):
-    unpacked = flatten_integer_max_expr(exprs)
-    numerical = set()
-    reduced = set()
-    for expr in reduced:
-        if expr.constant:
-            numerical.add(expr)
-        else:
-            reduced.add(expr)
-    if any(not isinstance(n, ir.IntConst) for n in numerical):
-        msg = "Encountered non-integer value {n.value} in strictly integer min expression."
-        raise ValueError(msg)
-    if numerical:
-        numerical_max = wrap_constant(max(numerical))
-        reduced.add(numerical_max)
-    if len(reduced) == 1:
-        output, = reduced
-    else:
-        output = ir.Max(tuple(reduced))
-    return output
-
-
-def reduce_start_stop_intervals(intervals):
-    if len(intervals) == 1:
-        return intervals
-    by_start = defaultdict(set)
-    by_stop = defaultdict(set)
-    for start, stop in intervals:
-        by_start[start].add(stop)
-        by_stop[stop].add(start)
-    intervals = []
-    if len(by_start) <= len(by_stop):
-        for start, stops in by_start.items():
-            stop = make_integer_min_expr(stops)
-            intervals.append((start,stop))
-    else:
-        for stop, starts in by_stop.items():
-            start = make_integer_max_expr(starts)
-            intervals.append(start, stop)
-        intervals = tuple(intervals)
-    return intervals
+        widths = set()
+        for start, stop in start_stop:
+            if start == ir.Zero:
+                widths.add(stop)
+            else:
+                d = ir.BinOp(stop, start, "-")
+                widths.add(d)
+        start = ir.Zero
+        stop = ir.Min(tuple(spans))
+    return start, stop
 
 
 def make_loop_counter(iterables, syms):
@@ -422,30 +295,47 @@ def make_loop_counter(iterables, syms):
 
     """
 
-    counters = set()
-
-    for iterable in iterables:
-        c = make_affine_counter(counter)
-        counters.add(c)
-
-    # Optimize around step first since normalizing
-    # step requires integer division (mainly a concern on short loops).
-    # Track unique (start, stop) pairs.
-
     by_step = defaultdict(set)
-    start_stop = set()
+    starts = set()
+    stops = set()
 
-    for c in counters:
-        ss = (c.start, c.stop)
-        start_stop.add(ss)
-        by_step[c.step].add(ss)
+    for interval in intervals:
+        (start, stop, step) = interval
+        ss = (start, stop)
+        starts.add(start)
+        stops.add(stop)
+        by_step[step].add(ss)
 
-    # Now determine
+    # If we have one step size
+    # make it the loop variable step
 
-    reduced = defaultdict(set)
+    intervals = {}
 
+    # reduce to one interval per step
     for step, start_stop in by_step.items():
-        intervals = reduce_intervals(start_stop)
+        start, stop = find_min_interval(start_stop)
+        intervals[step] = (start, stop)
+
+    if len(intervals) == 1:
+        step, (start, stop) = intervals.popitem()
+    else:
+        # compute interval count explicitly
+        reduce = set()
+        for step, (start, stop) in intervals:
+            if start == ir.Zero:
+                diff = stop
+            else:
+                diff = ir.BinOp(stop, start, "-")
+            clamped = ir.Max(diff, ir.Zero)
+            base_count = ir.BinOp(diff, step, "//")
+            rem = ir.BinOp(diff, step, "&")
+            fringe = ir.Ternary(ir.BinOp(rem, ir.Zero, ">"), ir.One, ir.Zero)
+            count = ir.BinOp(base_count, fringe, "+")
+            reduce.add(count)
+        start = ir.Zero
+        stop = ir.Min(tuple(reduce))
+        step = ir.One
+    counter = ir.AffineSeq(start, stop, step)
 
     return counter
 
