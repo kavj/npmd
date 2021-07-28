@@ -75,14 +75,23 @@ def unpackable_length(iterable: ir.Call):
 
 
 def unpack_iterated(target, iterable, pos):
-    if isinstance(target, ir.Tuple):
-        # Tuples are only supported here with full unpacking,
-        # so either this succeeds or we issue a compile time error.
-        if len(target.elements) != unpackable_length(iterable):
-            msg = f"Cannot generate unpacking for {iterable} using {target}."
+    if isinstance(iterable, ir.Zip):
+        # must unpack
+        if isinstance(target, ir.Tuple):
+            if len(target.elements) == len(iterable.elements):
+                for t, v in zip(target.elements, iterable.elements):
+                    yield from unpack_iterated(t, v, pos)
+            else:
+                msg = f"Mismatched unpacking counts for {target} and {iterable}, {len(target.elements)} " \
+                      f"and {(len(iterable.elements))}."
+                raise ValueError(msg)
+        else:
+            msg = f"Zip construct {iterable} requires a tuple for unpacking."
             raise ValueError(msg)
-        for t, v in zip(target.subexprs, iterable.subexprs):
-            yield from unpack_iterated(t, v, pos)
+
+    else:
+        # Array or sequence reference, with a single opaque target.
+        yield target, iterable
 
 
 def unpack_assignment(target, value, pos):
@@ -489,11 +498,6 @@ class TreeBuilder(ast.NodeVisitor):
         if prefix is None:
             # Use a common prefix if a suitable name was not found.
             prefix = "i"
-        for target, iterable in unpack_iterated(target_node, iter_node, pos):
-            targets.append(target)
-            iterables.append(iterable)
-        # Todo: This should just pass the prefix. Otherwise it's mangled twice.
-        #       I probably wrote it some time ago before changes in symbol table structure.
         loop_index = self.symbols.make_unique_name(prefix)
         # make_loop_interval(targets, iterables, self.symbols, loop_index)
 
@@ -516,7 +520,7 @@ class TreeBuilder(ast.NodeVisitor):
             if prefix is None:
                 prefix = "i"
             loop_index = self.symbols.add_scalar(prefix, self.symbols.default_int, added=True)
-            loop_counter = make_loop_interval(targets, iterables, self.symbols, loop_index)
+            loop_counter = make_loop_interval(iterables, loop_index)
 
             for stmt in node.body:
                 self.visit(stmt)

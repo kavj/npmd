@@ -420,11 +420,11 @@ def ZipBuilder(node: ir.Call):
     Zip takes an arbitrary number of positional arguments, something which we don't generally support.
 
     """
-    assert (node.func == "zip")
+    assert (node.func.name == "zip")
     if node.keywords:
         raise ValueError("Zip does not accept keyword arguments.")
-
-    return ir.Zip(tuple(arg for arg in node.args))
+    args = tuple(arg for arg in node.args)
+    return ir.Zip(args)
 
 
 def RangeBuilder(node: ir.Call):
@@ -486,7 +486,7 @@ builders = {"enumerate": CallSpecialize(name="enumerate",
 
 
 def replace_builtin_call(node: ir.Call):
-    handler = builders.get(node.func)
+    handler = builders.get(node.func.name)
     if handler is None:
         return node
     return handler(node)

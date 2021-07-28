@@ -212,10 +212,14 @@ def discard_unbounded(iterables):
 
 
 @singledispatch
-def make_affine_counter(iterable, symbols):
+def make_affine_counter(iterable):
     msg = f"No method to make counter for {iterable}."
     raise NotImplementedError(msg)
 
+
+@make_affine_counter.register
+def _(iterable: ir.AffineSeq):
+    return iterable
 
 @make_affine_counter.register
 def _(iterable: ir.NameRef):
@@ -399,8 +403,12 @@ def make_explicit_iter_count(counter):
     return count
 
 
-def make_loop_interval(targets, iterables, symbols, loop_index):
-    counters = {make_affine_counter(iterable, symbols) for iterable in iterables}
+def make_loop_interval(iterables, loop_index):
+    counters = set()
+    for iterable in iterables:
+        ac = make_affine_counter(iterable)
+        counters.add(ac)
+        # {make_affine_counter(iterable, symbols) for iterable in iterables}
     # This has the annoying effect of dragging around the symbol table.
     # Since we need to be able to reach an array definition along each path
     # and array names are not meant to be reassigned, we should be passing an array
