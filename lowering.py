@@ -1,4 +1,5 @@
 import numbers
+import math
 import operator
 import typing
 
@@ -82,24 +83,131 @@ def is_pow(expr):
     return isinstance(expr, ir.BinOp) and expr.op in ("**", "**=")
 
 
-def rewrite_if_matches_square_root(expr):
-    if is_pow(expr):
-        repl = expr
-        coeff = expr.right
-        if coeff == ir.FloatConst(0.5):
-            # Todo: needs a namespace or direct specialization
-            repl = ir.Call("sqrt", (expr.left), ())
-    return repl
+def rewrite_pow(expr):
+    if not is_pow(expr):
+        return expr
+    coeff = expr.right
+    if coeff == ir.Zero:
+        return ir.One
+    elif coeff == ir.One:
+        return expr.left
+    elif coeff == ir.IntConst(-1):
+        op = "/=" if expr.in_place else "/"
+        return ir.BinOp(ir.One, expr.left, op)
+    elif coeff == ir.IntConst(-2):
+        op = "/=" if expr.in_place else "/"
+        return ir.BinOp(ir.One, ir.BinOp(expr.left, expr.left, "*"), op)
+    elif coeff == ir.IntConst(2):
+        op = "*=" if expr.in_place else "*"
+        return ir.BinOp(expr.left, expr.left, op)
+    elif coeff == ir.FloatConst(0.5):
+        return ir.Call("sqrt", (expr.left,), ())
+    else:
+        return expr
 
 
-def rewrite_if_matches_square(expr):
-    repl = expr
+# Trivial rewriting
+# This stuff is sometimes introduced by other transforms.
+
+@singledispatchmethod
+def fold_arithmetic(expr):
+    return expr
+
+
+@fold_arithmetic.register
+def _(expr: ir.BinOp):
     if is_pow(expr):
-        coeff = expr.right
-        if (coeff == ir.IntConst(2)) or (coeff == ir.FloatConst(2.0)):
-            op = "*=" if expr.in_place else "*"
-            repl = ir.BinOp(expr.left, expr.left, op)
-    return repl
+        expr = rewrite_pow(expr)
+    left = fold_identity(expr.left)
+    right = fold_identity(expr.right)
+    op = expr.op
+    if left.constant and right.constant:
+        oper = binops[op]
+        value = oper(left.value, right.value)
+        value = wrap_constant(value)
+    if op in ("*", "*="):
+        if left == ir.One:
+            return eright
+        elif right == ir.One:
+            return left
+        elif left == ir.Zero or right == ir.Zero:
+            return ir.Zero
+        elif left == ir.IntConst(-1):
+            return ir.UnaryOp(right, "-")
+        elif right == ir.IntConst(-1):
+            return ir.UnaryOp(left, "-")
+    elif op in ("+", "+="):
+        if left == ir.Zero:
+            return right
+        elif right == ir.Zero:
+            return left
+    elif op in ("-", "-="):
+        if left == ir.Zero:
+            return ir.UnaryOp(right, "-")
+        elif right == ir.Zero:
+            return left
+        elif left == right:
+            return ir.Zero
+    elif op in ("//", "//="):
+        if right == ir.One:
+            return left
+    else:
+        return expr
+
+
+@fold_arithmetic.register
+def _(expr: ir.UnaryOp):
+    operand = fold_arithmetic(expr.operand)
+    if operand.constant:
+        oper = unaryops[op]
+        value = oper(expr.value)
+        return wrap_constant(value)
+    elif op == "+":
+        return operand
+    elif op == "-":
+        if isinstance(operand, ir.UnaryOp) and operand.op == "-":
+            return operand.operand
+    else:
+        return expr
+
+
+@fold_arithmetic.register
+def _(expr: ir.Ternary):
+    # Fold if both sides match
+    # Fold to min or max if matches ordered form
+    # a few others
+    pass
+
+
+@fold_arithmetic.register
+def _(expr: ir.Max):
+    # remove nesting and duplicates
+    repl = set()
+    numeric = None
+    contains_nan = False
+    contains_fp_consts = False
+    contains_int_consts = False
+    nested_mins = []
+    # Todo: need a flattening step for nested max exprs
+    for elem in expr.exprs:
+        if elem.constant and not contains_nan:
+            if math.isnan(elem.value):
+                contains_nan = True
+                numeric = math.nan
+            elif numeric is None:
+                numeric = elem.value
+            else:
+                numeric = max(numeric, elem.value)
+        elif isinstance(elem, ir.Max):
+            repl.update(elem.exprs)
+        else:
+            repl.append(elem)
+    return
+
+
+@fold_arithmetic.register
+def _(expr: ir.Min):
+    pass
 
 
 def rewrite_if_matches_sign_flip(expr):
