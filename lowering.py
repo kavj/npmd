@@ -254,71 +254,6 @@ def get_sequence_step(iterable):
     return ir.One
 
 
-# Todo: fill in stubs. These are needed to avoid sensitivity in ordering of
-#       min/max expression creation for integer expressions.
-def merge_integer_min(a: ir.Min, b: ir.Min):
-    raise NotImplementedError
-
-
-def merge_integer_max():
-    raise NotImplementedError
-
-
-def merge_counters(intervals):
-    """
-
-    """
-    lower_bounds = set()
-    upper_bounds = set()
-    fold_if_constant = ConstFolder()
-
-    for lower, upper in intervals:
-        lower_bounds.add(lower)
-        upper_bounds.add(upper)
-
-    unique_upper_count = len(upper_bounds)
-    unique_lower_count = len(lower_bounds)
-
-    if unique_upper_count == unique_lower_count == 1:
-        lower, = lower_bounds
-        upper, = upper_bounds
-        diff_expr = ir.BinOp(upper, lower, "-")
-        min_interval_width = fold_if_constant(expr)
-        assert isinstance(min_interval_width, ir.IntConst) or not min_interval_width.constant
-    elif unique_upper_count == 1:
-        lower = ir.Max(lower_bounds)
-        upper, = upper_bounds
-        min_interval_width = ir.BinOp(upper, lower, "-")
-    elif unique_lower_count == 1:
-        lower, = lower_bounds
-        upper = ir.Min(upper_bounds)
-        min_interval_width = ir.BinOp(upper, lower, "-")
-    else:
-        # reduce over all pairs
-        interval_widths = set()
-        numeric_min = None
-        for lower, upper in intervals:
-            width = ir.BinOp(upper, lower, "-")
-            width = fold_if_constant(width)
-            if width.constant:
-                assert isinstance(width, ir.IntConst)
-                if numeric_min is None:
-                    numeric_min = width.value
-                else:
-                    numeric_min = min(width.value, numeric_min)
-            else:
-                interval_widths.add(width)
-        if numeric_min is None:
-            min_interval_width = ir.Min(interval_widths)
-        elif numeric_min <= 0:
-            # avoid clamping here
-            min_interval_width = wrap_constant(numeric_min)
-        else:
-            interval_widths.add(wrap_constant(numeric_min))
-            min_interval_width = ir.Min(interval_widths)
-    return min_interval_width
-
-
 def make_iter_count_expr(span, step):
     if step == ir.Zero:
         # catches some cases which are not folded, with a more detailed message
@@ -341,10 +276,11 @@ def make_iter_count_expr(span, step):
     return iter_count
 
 
-def flatten_integer_min_expr(expr):
+def flatten_min_expr(expr):
     """
-    Unpack terms and combine like terms without reducing.
-    This avoids hiding invalid terms.
+    Flatten so that any single nested terms appear only once,
+    without removing possibly invalid terms.
+
     """
     assert isinstance(expr, ir.Min)
     unpacked_min = set()
@@ -360,31 +296,54 @@ def flatten_integer_min_expr(expr):
             unpacked.add(term)
 
     for term in unpacked_min:
-        # If term == max(unpacked_max), then it appears in the min expression twice with one being redundant.
-        # Otherwise term != max(unpacked_max) and therefore cannot be a solution to max(unpacked_max) but can
-        # still be one for unpacked_min, which takes precedence here.
+        # If term appears on its own in both unpacked_min and unpacked_max, and term == max(unpacked_max),
+        # then "term" is considered twice in the enclosing min expression.
+        # Otherwise if term != max(unpacked_max) and therefore cannot provide a solution to the sub-problem.
+        #
+        # We would still miss some buried under large hierarchies, which could be improved.
+        #
         unpacked_max.discard(term)
 
     if unpacked_max:
-        max_term = ir.Max(tuple(unpacked_max))
+        if len(unpacked_max) == 1:
+            max_term, = unpacked_max
+        else:
+            max_term = ir.Max(tuple(unpacked_max))
         unpacked_min.add(max_term)
-
-    if len(unpacked_min) == 1:
-        reduced, = unpacked_min
-    else:
-        reduced = ir.Min(tuple(unpacked_min))
 
     return reduced
 
 
 def flatten_integer_max_expr(expr):
-    assert isinstance(expr, ir.Max)
-    unpacked = set()
+    """
+    Flatten so that any single nested terms appear only once,
+    without removing possibly invalid terms.
+    """
+    assert isinstance(expr, ir.Min)
+    unpacked_min = set()
+    unpacked_max = set()
     for term in expr.exprs:
         if isinstance(term, ir.Max):
-            unpacked.update(unpack_integer_min_expr(term))
+            unpacked.update(unpack_integer_max_expr(term))
+        elif isinstance(term, ir.Min):
+            # can still optimize
+            unpacked_max.update(flatten_integer_min_expr(term))
         else:
             unpacked.add(term)
+
+    for term in unpacked_min:
+        # If this is exposed via unpacked min,
+        # then min(unpacked_min) >= max(unpacked_max)
+        unpacked_max.discard(term)
+
+    if unpacked_min:
+        if len(unpacked_min) == 1:
+            min_term, = unpacked_min
+        else:
+            min_term = ir.Min(tuple(unpacked_min))
+        unpacked_max.add(min_term)
+
+    return unpacked
 
 
 def make_integer_min_expr(exprs):
@@ -392,7 +351,7 @@ def make_integer_min_expr(exprs):
     # split symbolic and numerical
     numerical = set()
     reduced = set()
-    for expr in exprs:
+    for expr in unpacked:
         if expr.constant:
             numerical.add(expr)
         else:
@@ -403,15 +362,36 @@ def make_integer_min_expr(exprs):
     if numerical:
         numerical_min = wrap_constant(min(numerical))
         reduced.add(numerical_min)
-    return reduced
+    if len(reduced) == 1:
+        output, = reduced
+    else:
+        output = ir.Min(tuple(reduced))
+    return output
 
 
 def make_integer_max_expr(exprs):
-    pass
+    unpacked = flatten_integer_max_expr(exprs)
+    numerical = set()
+    reduced = set()
+    for expr in reduced:
+        if expr.constant:
+            numerical.add(expr)
+        else:
+            reduced.add(expr)
+    if any(not isinstance(n, ir.IntConst) for n in numerical):
+        msg = "Encountered non-integer value {n.value} in strictly integer min expression."
+        raise ValueError(msg)
+    if numerical:
+        numerical_max = wrap_constant(max(numerical))
+        reduced.add(numerical_max)
+    if len(reduced) == 1:
+        output, = reduced
+    else:
+        output = ir.Max(tuple(reduced))
+    return output
 
 
-
-def reduce_intervals(intervals):
+def reduce_start_stop_intervals(intervals):
     if len(intervals) == 1:
         return intervals
     by_start = defaultdict(set)
@@ -419,33 +399,15 @@ def reduce_intervals(intervals):
     for start, stop in intervals:
         by_start[start].add(stop)
         by_stop[stop].add(start)
-    if len(by_start) == 1:
-        start, stops = by_start.popitem()
-        if len(stops) == 1:
-            stop, = stops
-        else:
-            stop = ir.Min(tuple(stops))
-        intervals = (ir.AffineSeq(start, stop, step),)
-    elif len(by_stop) == 1:
-        stop, starts = by_stop.popitem()
-        start = ir.Max(tuple(starts))
-        intervals = (ir.AffineSeq(start, stop, step),)
+    intervals = []
+    if len(by_start) <= len(by_stop):
+        for start, stops in by_start.items():
+            stop = make_integer_min_expr(stops)
+            intervals.append((start,stop))
     else:
-        intervals = []
-        if len(by_start) <= len(by_stop):
-            for start, stops in by_start.items():
-                if len(stops) == 1:
-                    stop, = stops
-                else:
-                    stop = ir.Min(tuple(stops))
-                intervals.append((start,stop))
-        else:
-            for stop, starts in by_stop.items():
-                if len(starts) == 1:
-                    start, = starts
-                else:
-                    start = ir.Max(tuple(starts))
-                intervals.append(start, stop)
+        for stop, starts in by_stop.items():
+            start = make_integer_max_expr(starts)
+            intervals.append(start, stop)
         intervals = tuple(intervals)
     return intervals
 
@@ -466,25 +428,24 @@ def make_loop_counter(iterables, syms):
         c = make_affine_counter(counter)
         counters.add(c)
 
-    # group (start, stop) pairs by step
+    # Optimize around step first since normalizing
+    # step requires integer division (mainly a concern on short loops).
+    # Track unique (start, stop) pairs.
+
     by_step = defaultdict(set)
+    start_stop = set()
 
     for c in counters:
-        by_step[c.step].add((c.start, c.stop))
+        ss = (c.start, c.stop)
+        start_stop.add(ss)
+        by_step[c.step].add(ss)
 
-    # Optimize around step first, since this avoids
-    # adding integer division calculations.
-    intervals = []
+    # Now determine
+
+    reduced = defaultdict(set)
+
     for step, start_stop in by_step.items():
-        starts = set()
-        stops = set()
-
-        for start, stop in start_stop:
-            starts.add(start)
-            stops.add(stop)
-
-        start_count = len(starts)
-        stop_count = len(stops)
+        intervals = reduce_intervals(start_stop)
 
     return counter
 

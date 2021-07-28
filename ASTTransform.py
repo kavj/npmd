@@ -10,7 +10,7 @@ from contextlib import contextmanager
 import ir
 from symbol_table import symbol_table_from_pysymtable, wrap_input
 from Canonicalize import replace_builtin_call
-from lowering import make_loop_interval, ConstFolder
+from lowering import ConstFolder
 
 binaryops = {ast.Add: "+",
              ast.Sub: "-",
