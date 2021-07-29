@@ -10,7 +10,7 @@ from contextlib import contextmanager
 import ir
 from symbol_table import symbol_table_from_pysymtable, wrap_input
 from Canonicalize import replace_builtin_call
-from lowering import ConstFolder
+from lowering import const_folding
 
 binaryops = {ast.Add: "+",
              ast.Sub: "-",
@@ -215,7 +215,7 @@ class TreeBuilder(ast.NodeVisitor):
         self.enclosing_loop = None
         self.symbols = None
         self.renaming = None
-        self.fold_if_constant = ConstFolder()
+        self.fold_if_constant = const_folding()
 
 
     @contextmanager

@@ -73,32 +73,28 @@ def is_pow(expr):
     return isinstance(expr, ir.BinOp) and expr.op in ("**", "**=")
 
 
-def is_safe_fma_pattern(expr):
+def is_fma_pattern(expr):
     """
-    For simplicity, we follow Python semantics when it comes to order of evaluation, which
-    implies
+    This ignores safety issues, which may be addressed later for anything
+    that looks like a * b - c * d.
 
-    a * b + c
-
-    but
-
-    c + a * b
-
-    is not, because a * b must be evaluated second.
-
-    This is just to check if something should be kept together.
 
     """
 
     if isinstance(expr, ir.BinOp) and expr.op in ("+", "+=", "-", "-="):
         left = expr.left
         right = expr.right
-        if isinstance(left, ir.BinOp):
-            if left.op == "*":
-                return True
-        elif isinstance(left, ir.UnaryOp):
-            if isinstance(left.operand, ir.BinOp) and left.operand.op == "*":
-                return True
+        for operand in (left, right):
+            if isinstance(operand, ir.BinOp):
+                if operand.op == "*":
+                    return True
+            elif isinstance(operand, ir.UnaryOp):
+                # Expression simplifiers should have already folded any multiple
+                # nestings of unary -
+                if (operand.op == "-"
+                        and isinstance(operand.operand, ir.BinOp)
+                        and operand.operand.op == "*"):
+                    return True
     return False
 
 
@@ -451,34 +447,35 @@ def get_sequence_step(iterable):
     return ir.One
 
 
-def find_min_interval(spans):
+def find_min_interval_width(spans):
     starts = set()
     stops = set()
     for start, stop in spans:
-        starts.add(start)
-        stops.add(stop)
+        # we ignore anything unbounded
+        # since it doesn't affect iteration count
+        if stop is not None:
+            starts.add(start)
+            stops.add(stop)
 
-    # ignore unbounded
-    stops.discard(None)
-
-    start_count = len(starts)
     stop_count = len(stops)
+    if stop_count == 0:
+        # unbounded
+        return
 
-    if start_count == 1 and stop_count <= 1:
-        start, = starts
-        if stops:
+    single_start = len(starts) == 1
+    single_stop = stop_count == 1
+
+    if single_start or single_stop:
+        if single_start and single_stop:
+            start, = starts
             stop, = stops
+        elif single_start:
+            start, = starts
+            stop = ir.Min(tuple(stops))
         else:
-            stop = None
-    elif start_count == 1:
-        start, = starts
-        stop = ir.Min(tuple(stops)) if stops else None
-    elif stop_count <= 1:
-        start = ir.Max(tuple(starts))
-        if stops:
+            start = ir.Max(tuple(starts))
             stop, = stops
-        else:
-            stop = None
+        min_width = ir.BinOp(stop, start, "-")
     else:
         widths = set()
         for start, stop in start_stop:
@@ -487,9 +484,8 @@ def find_min_interval(spans):
             elif stop is not None:
                 d = ir.BinOp(stop, start, "-")
                 widths.add(d)
-        start = ir.Zero
-        stop = ir.Min(tuple(spans))
-    return start, stop
+        min_width = ir.Min(tuple(widths))
+    return width
 
 
 def make_loop_counter(iterables, syms):
@@ -509,44 +505,57 @@ def make_loop_counter(iterables, syms):
         from_iterable = split_intervals(iterable)
         intervals.update(from_iterable)
 
-    by_step = defaultdict(set)
+    unique_starts = set()
+    unique_stops = set()
+    unique_steps = set()
 
-    # expand all a
+    for start, stop, step in intervals:
+        unique_starts.add(start)
+        unique_stops.add(stop)
+        unique_steps.add(step)
 
-    for interval in intervals:
-        (start, stop, step) = interval
-        ss = (start, stop)
-        by_step[step].add(ss)
+    have_unique_start = len(unique_starts) == 1
+    have_unique_stop = len(unique_stops) == 1
+    have_unique_step = len(unique_steps) == 1
 
-    intervals = {}
-
-    # reduce to one interval per step
-    for step, start_stop in by_step.items():
-        start, stop = find_min_interval(start_stop)
-        intervals[step] = (start, stop)
-
-    if len(intervals) == 1:
-        step, (start, stop) = intervals.popitem()
-    else:
-        # compute interval count explicitly
-        reduce = set()
-        for step, (start, stop) in intervals:
-            if stop is None:
-                # This still requires a compatible step,
-                # but it doesn't bound anything.
-                continue
-            elif start == ir.Zero:
-                diff = stop
+    if have_unique_step:
+        step, = unique_steps
+        if have_unique_start:
+            # simple case
+            start, = unique_starts
+            if have_unique_stop:
+                stop, = unique_stops
             else:
-                diff = ir.BinOp(stop, start, "-")
-            base_count = ir.BinOp(diff, step, "//")
-            rem = ir.BinOp(diff, step, "&")
-            fringe = ir.Ternary(ir.BinOp(rem, ir.Zero, ">"), ir.One, ir.Zero)
-            count = ir.BinOp(base_count, fringe, "+")
-            reduce.add(count)
-        start = ir.Zero
-        stop = ir.Min(tuple(reduce))
-        step = ir.One
-    counter = ir.AffineSeq(start, stop, step)
+                stop = ir.Min(tuple(unique_stops))
+        elif have_unique_stop:
+            # Normalize bounds but fold step
+            max_start = ir.Max(tuple(unique_starts))
+            start = ir.Zero
+            stop = ir.BinOp(stop, max_start, "-")
+        else:
+            # Normalize bounds after reducing over all bounds
+            # but still fold step
+            widths = set()
+            for start, stop, _ in intervals:
+                widths.add(ir.BinOp(stop, start, "-"))
+            start = ir.Zero
+            stop = ir.Min(tuple(widths))
+        counter = ir.AffineSeq(start, stop, step)
+    else:
+        # Normalize range and step, but try to reduce
+        # arithmetic needed to compute iteration count for each
+        # possibly unique step size
+        by_step = defaultdict(set)
+        counts = set()
 
+        for start, stop, step in intervals:
+            by_step[step].add((start, stop))
+
+        for step, starts_stops in by_step.items():
+            min_width = find_min_interval_width(starts_stops)
+            base_count = ir.BinOp(min_width, step, "//")
+            fringe_test = ir.BinOp(min_width, step, "&")
+            fringe_count = ir.Ternary(fringe_test, ir.One, ir.Zero)
+            counts.add(ir.BinOp(base_count, fringe_count, "+"))
+        counter = ir.AffineSeq(ir.Zero, ir.Min(tuple(counts)), ir.One)
     return counter
