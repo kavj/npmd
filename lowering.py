@@ -73,12 +73,52 @@ def is_pow(expr):
     return isinstance(expr, ir.BinOp) and expr.op in ("**", "**=")
 
 
+def is_safe_fma_pattern(expr):
+    """
+    For simplicity, we follow Python semantics when it comes to order of evaluation, which
+    implies
+
+    a * b + c
+
+    but
+
+    c + a * b
+
+    is not, because a * b must be evaluated second.
+
+    This is just to check if something should be kept together.
+
+    """
+
+    if isinstance(expr, ir.BinOp) and expr.op in ("+", "+=", "-", "-="):
+        left = expr.left
+        right = expr.right
+        if isinstance(left, ir.BinOp):
+            if left.op == "*":
+                return True
+        elif isinstance(left, ir.UnaryOp):
+            if isinstance(left.operand, ir.BinOp) and left.operand.op == "*":
+                return True
+    return False
+
+
 def rewrite_pow(expr):
     if not is_pow(expr):
         return expr
     coeff = expr.right
+    base = expr.left
     if coeff == ir.Zero:
         return ir.One
+    elif base == ir.Zero:
+        # checking for weird errors more than anything
+        if coeff.constant:
+            if operator.lt(coeff.value, 0):
+                # this isn't intended to catch all edge cases, just an obvious
+                # one that may come up after folding
+                msg = f"raises 0 to a negative power {expr}."
+                raise ValueError(msg)
+            else:
+                return ir.Zero
     elif coeff == ir.One:
         return expr.left
     elif coeff == ir.IntConst(-1):
@@ -96,18 +136,30 @@ def rewrite_pow(expr):
         return expr
 
 
+class flatten_exprs(ExpressionVisitor):
+
+    def __init__(self, syms, min_max_is_ordered=True):
+        self._min_max_is_ordered = min_max_is_ordered
+        self.syms = syms
+
+    def __call__(self, expr):
+        return self.lookup(expr)
+
+    # remove nesting from min/max where possible
+    # de-nest boolean expressions
+
+
 class simplify_exprs(ExpressionVisitor):
     """
-    This class helps clean up composite adjustments made by other visitors.
-    Placing it here helps omit having to perform an excessive number of checks in each
-    individual expression rewrite. This is meant to run on expression hierarchies prior
-    to scheduling the introduction of temporary variables.
-
-    This contains some parts for associative ops, which should be disabled with floating point types.
+    This and constant folding are meant as helper classes.
+    User code doesn't always include a lot of immediate opportunity for folding, but other
+    passes may generate redundancy in expression hierarchies. Running simplify on these expressions
+    avoids ever instantiating temporary variables
 
     """
 
-    def __init__(self, syms):
+    def __init__(self, syms, min_max_is_ordered=True):
+        self._min_max_is_ordered = min_max_is_ordered
         self.syms = syms
 
     def __call__(self, expr):
@@ -183,7 +235,42 @@ class simplify_exprs(ExpressionVisitor):
         # Fold if both sides match
         # Fold to min or max if matches ordered form
         # a few others
-        pass
+        test = self.lookup(expr.test)
+        if_expr = self.lookup(expr.if_expr)
+        else_expr = self.lookup(expr.else_expr)
+        if isinstance(test, ir.BinOp):
+            # Todo: This needs a flag of some sort, since this only applies
+            #       if min and max semantics are of the common non-IEEE variety
+            if self._min_max_is_ordered:
+                if test.op in ("<", "<="):
+                    if if_expr == test.left and else_expr == test.right:
+                        return ir.Min((if_expr, else_expr))
+                elif test.op in (">", ">="):
+                    if if_expr == test.left and else_expr == test.right:
+                        return ir.Max((if_expr, else_expr))
+        return expr
+
+    @visit.register
+    def _(self, expr: ir.AND):
+        seen = set()
+        repl = []
+        for operand in expr.operands:
+            operand = self.lookup(operand)
+            if operand not in seen:
+                seen.add(operand)
+                repl.append(operand)
+        return ir.AND(tuple(repl))
+
+    @visit.register
+    def _(self, expr: ir.OR):
+        seen = set()
+        repl = []
+        for operand in expr.operands:
+            operand = self.lookup(operand)
+            if operand not in seen:
+                seen.add(operand)
+                repl.append(operand)
+        return ir.OR(tuple(repl))
 
     @visit.register
     def _(expr: ir.Max):
@@ -424,13 +511,12 @@ def make_loop_counter(iterables, syms):
 
     by_step = defaultdict(set)
 
+    # expand all a
+
     for interval in intervals:
         (start, stop, step) = interval
         ss = (start, stop)
         by_step[step].add(ss)
-
-    # If we have one step size
-    # make it the loop variable step
 
     intervals = {}
 
