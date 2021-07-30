@@ -315,7 +315,7 @@ class const_folding(ExpressionVisitor):
 
     @singledispatchmethod
     def visit(self, expr):
-        super().visit(expr)
+        return super().visit(expr)
 
     @visit.register
     def _(self, expr: ir.BinOp):
@@ -377,12 +377,12 @@ class const_folding(ExpressionVisitor):
                     return ir.BoolConst(True)
             else:
                 operands.append(operand)
-        if len(operands) >= 2:
-            operands = tuple(operands)
-            return ir.OR(operands)
+        if len(operands) > 1:
+            repl = ir.OR(tuple(operands))
         else:
-            operands = operands.pop()
-            return ir.TRUTH(operands)
+            operand = operands.pop()
+            repl = ir.TRUTH(operand)
+        return repl
 
     @visit.register
     def _(self, expr: ir.XOR):
