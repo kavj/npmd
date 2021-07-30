@@ -406,23 +406,26 @@ def discard_unbounded(iterables):
 
 class interval_splitting(ExpressionVisitor):
 
+    def __call__(self, expr):
+        return self.lookup(expr)
+
     @singledispatchmethod
-    def visit(iterable):
+    def visit(self, iterable):
         msg = f"No method to make counter for {iterable}."
         raise NotImplementedError(msg)
 
     @visit.register
-    def _(iterable: ir.NameRef):
+    def _(self, iterable: ir.NameRef):
         return {(ir.Zero, ir.Length(iterable), ir.One)}
 
     @visit.register
-    def _(iterable: ir.AffineSeq):
+    def _(self, iterable: ir.AffineSeq):
         # Note: we have to return an interval even if the stop parameter is None
         # Without this, the
         return {(iterable.start, iterable.stop, iterable.step)}
 
     @visit.register
-    def _(iterable: ir.Subscript):
+    def _(self, iterable: ir.Subscript):
         if isinstance(iterable.slice, ir.Slice):
             # We can convert iteration over a sliced array
             # to affine parameters with respect to the base array.
@@ -499,7 +502,7 @@ def make_loop_counter(iterables, syms):
     """
 
     intervals = set()
-    split_intervals = interval_splitting.lookup
+    split_intervals = interval_splitting()
 
     for iterable in iterables:
         from_iterable = split_intervals(iterable)

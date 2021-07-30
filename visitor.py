@@ -32,6 +32,8 @@ class ExpressionVisitor:
 
     @lru_cache
     def lookup(self, expr):
+        import pdb
+        pdb.set_trace()
         repl = self.visit(expr)
         # prefer the original rather over an identical copy
         return expr if expr == repl else repl

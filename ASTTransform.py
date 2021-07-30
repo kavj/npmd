@@ -10,7 +10,7 @@ from contextlib import contextmanager
 import ir
 from symbol_table import symbol_table_from_pysymtable, wrap_input
 from Canonicalize import replace_builtin_call
-from lowering import const_folding
+from lowering import const_folding, make_loop_counter
 
 binaryops = {ast.Add: "+",
              ast.Sub: "-",
@@ -520,7 +520,7 @@ class TreeBuilder(ast.NodeVisitor):
             if prefix is None:
                 prefix = "i"
             loop_index = self.symbols.add_scalar(prefix, self.symbols.default_int, added=True)
-            loop_counter = make_loop_interval(iterables, loop_index)
+            loop_counter = make_loop_counter(iterables, loop_index)
 
             for stmt in node.body:
                 self.visit(stmt)
