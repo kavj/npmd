@@ -1,9 +1,12 @@
 import itertools
 
+from contextlib import contextmanager
 from collections import defaultdict
 from functools import singledispatch, singledispatchmethod
 
 import ir
+
+from visitor import walk, StmtVisitor
 
 # These yield everything including the original expression
 # This way we can remove a lot of type checks from common paths.
@@ -11,6 +14,12 @@ import ir
 
 def is_control_flow(node):
     return isinstance(node, (ir.IfElse, ir.ForLoop, ir.WhileLoop, ir.Break, ir.Continue))
+
+
+def walk_params(expr):
+    for subexpr in walk(expr):
+        if isinstance(subexpr, ir.NameRef):
+            yield subexpr
 
 
 class scoped:
@@ -42,11 +51,8 @@ class scoped:
 
     @register_read.register
     def _(self, target: ir.ValueRef):
-        for subexpr in walk(target):
-            if isinstance(subexpr, ir.NameRef):
-                self.register_read(subexpr)
-        # or subexpr in walk_expr_params(target):
-        #    self.register_read(subexpr)
+        for subexpr in walk_params(target):
+            self.register_read(subexpr)
 
     def register_write(self, target):
         if isinstance(target, ir.NameRef):
@@ -68,8 +74,11 @@ def _(node: ir.ForLoop):
 @find_upward_exposed.register
 def _(node: ir.WhileLoop):
     uevs = find_upward_exposed(node.body)
-    for param in walk_expr_params(node.test):
-        uevs.add(param)
+    test = node.test
+    for subexpr in walk_params(test):
+        uevs.add(subexpr)
+    if isinstance(test, ir.NameRef):
+        uevs.add(test)
     return uevs
 
 
@@ -78,42 +87,39 @@ def _(node: ir.IfElse):
     uevs = find_upward_exposed(node.if_branch)
     else_branch = find_upward_exposed(node.else_branch)
     uevs.update(else_branch)
-    uevs.update(walk_expr_params(node.test))
+    test = node.test
+    for subexpr in walk_params(test):
+        uevs.add(subexpr)
+    if isinstance(test, ir.NameRef):
+        uevs.add(test)
 
 
 @find_upward_exposed.register
 def _(node: list):
     uevs = set()
     gen = set()
-    constants = set()
     for stmt in node:
         if is_control_flow(stmt):
             break
         if isinstance(stmt, ir.Assign):
             target = stmt.target
             value = stmt.value
-            for param in walk_expr_params(value):
-                if param.constant:
-                    constants.add(param)
-                elif param not in gen:
+            if isinstance(value, ir.NameRef) and value not in gen:
+                uevs.add(value)
+            else:
+                for param in walk_params(value):
                     uevs.add(param)
             if isinstance(stmt.target, ir.NameRef):
                 gen.add(target)
             else:
-                for param in walk_expr_params(target):
-                    if param.constant:
-                        constants.add(param)
-                    elif param not in gen:
-                        uevs.add(param)
+                for param in walk_params(target):
+                    uevs.add(param)
         else:
             # assume SingleExpr
             expr = stmt.expr
-            for param in walk_expr_params(expr):
-                if param.constant:
-                    constants.add(param)
-                elif param not in gen:
-                    uevs.add(param)
-    return uevs, gen, constants
+            for param in walk_params(expr):
+                uevs.add(param)
+    return uevs, gen
 
 
 def enumerate_values(values, counter):
@@ -219,8 +225,45 @@ class ValueTracking:
         self.mem_writes.append(target_id)
 
 
-def contains_loops(node):
-    return any(isinstance(stmt, (ir.ForLoop, ir.WhileLoop)) for stmt in walk_branches(node))
+class numbering_visitor(StmtVisitor):
+
+    def __init__(self):
+        self.inputs = None
+        self.numbered = None
+        self.labeler = None
+
+    @contextmanager
+    def numbering_context(self, inputs, numbered, labeler):
+        self.inputs = inputs
+        self.numbered = numbered
+        self.labeler = labeler
+        yield
+        self.inputs = None
+        self.numbered = None
+        self.labeler = None
+
+    def __call__(self, node, inputs, numbered, labeler):
+        with self.numbering_context(inputs, numbered, labeler):
+            self.visit(node)
+
+    @singledispatchmethod
+    def visit(self, node):
+        super().visit(node)
+
+    # don't enter loops
+
+    @visit.register
+    def _(self, node: ir.ForLoop):
+        pass
+
+    @visit.register
+    def _(self, node: ir.WhileLoop):
+        pass
+
+    @visit.register
+    def _(self, node: ir.Assign):
+        pass
+
 
 
 def number_local_values(node: list, inputs, numbered, labeler):
@@ -235,8 +278,8 @@ def number_local_values(node: list, inputs, numbered, labeler):
         if is_control_flow(stmt):
             raise TypeError
     local_numbering = ValueTracking(inputs, numbered, labeler)
-    for target, value in walk_assigns(node):
-        local_numbering.register_assignment(target, value)
+    # for target, value in walk_assigns(node):
+    #    local_numbering.register_assignment(target, value)
     return local_numbering
 
 
@@ -272,31 +315,31 @@ def partition_by_control_flow(stmts):
     return partitions
 
 
-def get_shared_target_names(node: ir.IfElse):
-    """
-    Find targets that may require ternary ops and/or renaming.
+# def get_shared_target_names(node: ir.IfElse):
+#    """
+#    Find targets that may require ternary ops and/or renaming.
 
-    """
-    if any(is_control_flow(stmt) for stmt in itertools.chain(node.if_branch, node.else_branch)):
-        raise ValueError
-    if_targets = set()
-    else_targets = set()
-    for target, value in walk_assigns(node.if_branch):
-        if isinstance(target, ir.NameRef):
-            if_targets.add(target)
-    for target, value in walk_assigns(node.else_branch):
-        if isinstance(target, ir.NameRef):
-            else_targets.add(target)
-    shared = if_targets.intersection(else_targets)
-    return shared
+#    """
+#    if any(is_control_flow(stmt) for stmt in itertools.chain(node.if_branch, node.else_branch)):
+#        raise ValueError
+#    if_targets = set()
+#    else_targets = set()
+#    for target, value in walk_assigns(node.if_branch):
+#        if isinstance(target, ir.NameRef):
+#            if_targets.add(target)
+#    for target, value in walk_assigns(node.else_branch):
+#        if isinstance(target, ir.NameRef):
+#            else_targets.add(target)
+#    shared = if_targets.intersection(else_targets)
+#    return shared
 
 
-def get_final_assignments(stmts):
-    assigns = {}
-    for target, value in walk_assigns(stmts, reverse=True):
-        if isinstance(target, ir.NameRef) and target not in assigns:
-            assigns[target] = value
-    return assigns
+# def get_final_assignments(stmts):
+#    assigns = {}
+#    for target, value in walk_assigns(stmts, reverse=True):
+#        if isinstance(target, ir.NameRef) and target not in assigns:
+#            assigns[target] = value
+#    return assigns
 
 
 def predicate_branch(branch, local_if, local_else, combine_writes=False):
@@ -315,7 +358,7 @@ def if_conversion(node: ir.IfElse, local_name_gen):
         numbered_uevs[v] = i
     local_if = number_local_values(node.if_branch, numbered_uevs, numbered_uevs, labeler)
     local_else = number_local_values(node.else_branch, numbered_uevs, local_if.numbered, labeler)
-    shared, reassigned = get_shared_target_names(node)
+    # shared, reassigned = get_shared_target_names(node)
     repl = []
     test = ir.Assign(local_name_gen.make_name(), node.test, node.pos)
     repl.append(test)

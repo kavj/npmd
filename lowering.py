@@ -407,7 +407,8 @@ def discard_unbounded(iterables):
 class interval_splitting(ExpressionVisitor):
 
     def __call__(self, expr):
-        return self.lookup(expr)
+        repl = self.lookup(expr)
+        return repl
 
     @singledispatchmethod
     def visit(self, iterable):
@@ -516,6 +517,11 @@ def make_loop_counter(iterables, syms):
         unique_starts.add(start)
         unique_stops.add(stop)
         unique_steps.add(step)
+
+    unique_stops.discard(None)
+
+    # This should never fail.
+    assert unique_stops
 
     have_unique_start = len(unique_starts) == 1
     have_unique_stop = len(unique_stops) == 1
