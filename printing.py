@@ -8,7 +8,7 @@ import ir
 from visitor import ExpressionVisitor
 
 
-class pretty_formatter(ExpressionVisitor):
+class pretty_formatter:
     """
     The pretty printer is intended as a way to show the state of the IR in a way that resembles a
     typical source representation.
@@ -16,16 +16,27 @@ class pretty_formatter(ExpressionVisitor):
     
     """
 
+    def __init__(self):
+        self.add_parentheses = False
+
     def __call__(self, node):
+        assert self.add_parentheses is False
         expr = self.visit(node)
         return expr
 
-    def parenthesize_expr(self, node):
-        expr = self.lookup(node)
-        if isinstance(node, ir.Expression):
-            if not isinstance(node, (ir.Call, ir.Subscript, ir.AffineSeq, ir.Min, ir.Max, ir.Length)):
-                expr = f"({expr})"
-        return expr
+    @contextmanager
+    def parenthesized(self):
+        stashed = self.add_parentheses
+        self.add_parentheses = True
+        yield
+        self.add_parentheses = stashed
+
+    @contextmanager
+    def no_parentheses(self):
+        stashed = self.add_parentheses
+        self.add_parentheses = False
+        yield
+        self.add_parentheses = stashed
 
     @singledispatchmethod
     def visit(self, node):
@@ -34,25 +45,29 @@ class pretty_formatter(ExpressionVisitor):
 
     @visit.register
     def _(self, node: ir.Length):
-        expr = self.lookup(node.value)
+        with self.no_parentheses():
+             expr = self.visit(node.value)
         return f"len({expr})"
 
     @visit.register
     def _(self, node: ir.Max):
-        args = ", ".join(self.parenthesize_expr(arg) for arg in node.subexprs)
+        with self.no_parentheses():
+            args = ", ".join(self.visit(arg) for arg in node.values)
         return f"max({args})"
 
     @visit.register
     def _(self, node: ir.Min):
-        args = ", ".join(self.parenthesize_expr(arg) for arg in node.subexprs)
+        with self.no_parentheses():
+            args = ", ".join(self.visit(arg) for arg in node.values)
         return f"min({args})"
 
     @visit.register
     def _(self, node: ir.Ternary):
-        s = f"{self.visit(node.if_expr)} if {self.visit(node.test)}"
-        if node.else_expr is not None:
-            s += f" {self.visit(node.else_expr)}"
-        return s
+        with self.no_parentheses():
+            expr = f"{self.visit(node.if_expr)} if {self.visit(node.test)} else {self.visit(node.else_expr)}"
+        if self.add_parentheses:
+            expr = f"({expr})"
+        return expr
 
     @visit.register
     def _(self, node: ir.BoolConst):
@@ -68,18 +83,27 @@ class pretty_formatter(ExpressionVisitor):
 
     @visit.register
     def _(self, node: ir.BinOp):
-        left = self.parenthesize_expr(node.left)
-        right = self.parenthesize_expr(node.right)
-        return f"{left} {node.op} {right}"
+        left = self.visit(node.left)
+        right = self.visit(node.right)
+        expr = f"{left} {node.op} {right}"
+        if self.add_parentheses:
+            expr = f"({expr})"
+        return expr
 
     @visit.register
     def _(self, node: ir.AND):
-        expr = " and".join(self.parenthesize_expr(operand) for operand in node.operands)
+        with self.parenthesized():
+            expr = " and ".join(self.visit(operand) for operand in node.operands)
+        if self.add_parentheses:
+            expr = f"({expr})"
         return expr
 
     @visit.register
     def _(self, node: ir.OR):
-        expr = " or".join(self.parenthesize_expr(operand) for operand in node.operands)
+        with self.parenthesized():
+            expr = " or ".join(self.visit(operand) for operand in node.operands)
+        if self.add_parentheses:
+            expr = f"({expr})"
         return expr
 
     @visit.register
@@ -91,7 +115,7 @@ class pretty_formatter(ExpressionVisitor):
     def _(self, node: ir.Call):
         func_name = self.visit(node.func)
         if node.args:
-            args = ", ".join(self.lookup(arg) for arg in node.args)
+            args = ", ".join(self.visit(arg) for arg in node.args)
             func = f"{func_name}({args}):"
         else:
             func = f"{func_name}():"
@@ -110,14 +134,14 @@ class pretty_formatter(ExpressionVisitor):
     def _(self, node: ir.AffineSeq):
         # Initial input source may not be easily disernible,
         # print as range
-        start = self.lookup(node.start)
-        stop = self.lookup(node.stop) if node.stop is not None else f"None"
-        step = self.lookup(node.step)
+        start = self.visit(node.start)
+        stop = self.visit(node.stop) if node.stop is not None else f"None"
+        step = self.visit(node.step)
         return f"range({start}, {stop}, {step})"
 
     @visit.register
     def _(self, node: ir.Tuple):
-        s = ", ".join(self.parenthesize_expr(e) for e in node.subexprs)
+        s = ", ".join(self.visit(e) for e in node.subexprs)
         return s
 
     @visit.register
@@ -125,7 +149,7 @@ class pretty_formatter(ExpressionVisitor):
         op = node.op
         operand = node.operand
         if op == "not":
-            expr = f"not {self.parenthesize_expr(operand)}"
+            expr = f"not {self.visit(operand)}"
         else:
             expr = f"{op}{self.visit(operand)}"
         return expr
@@ -145,7 +169,7 @@ class printtree:
         self.format = pretty_formatter()
 
     def __call__(self, tree):
-        self.indent_by = 0
+        assert self.indent == ""
         self.visit(tree)
 
     @contextmanager
