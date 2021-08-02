@@ -4,7 +4,7 @@ import numpy as np
 import numbers
 import operator
 import typing
-from abc import ABC
+from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import cached_property
@@ -173,6 +173,14 @@ class ValueRef(ABC):
         return self
 
 
+class Expression(ValueRef):
+
+    @property
+    @abstractmethod
+    def subexprs(self):
+        raise NotImplementedError
+
+
 class Constant(ValueRef):
     """
     Base class for anything that can be the target of an assignment. 
@@ -219,7 +227,7 @@ One = IntConst(1)
 
 
 @dataclass(frozen=True)
-class NameRef:
+class NameRef(ValueRef):
     # variable name ref
     name: str
 
@@ -269,7 +277,7 @@ class ViewRef:
 
 
 @dataclass(frozen=True)
-class Length(ValueRef):
+class Length(Expression):
     value: ValueRef
 
     @property
@@ -278,7 +286,7 @@ class Length(ValueRef):
 
 
 @dataclass(frozen=True)
-class Subscript(ValueRef):
+class Subscript(Expression):
     value: ValueRef
     slice: ValueRef
 
@@ -289,7 +297,7 @@ class Subscript(ValueRef):
 
 
 @dataclass(frozen=True)
-class Min(ValueRef):
+class Min(Expression):
     """
     Min iteration count over a number of counters
     """
@@ -302,7 +310,7 @@ class Min(ValueRef):
 
 
 @dataclass(frozen=True)
-class Max(ValueRef):
+class Max(Expression):
     """
     Max iteration count over a number of counters
     """
@@ -333,7 +341,7 @@ class Module:
 
 
 @dataclass(frozen=True)
-class Slice(ValueRef):
+class Slice(Expression):
     """
     IR representation of a slice.
 
@@ -353,7 +361,7 @@ class Slice(ValueRef):
 
 
 @dataclass(frozen=True)
-class Tuple(ValueRef):
+class Tuple(Expression):
     elements: typing.Tuple[ValueRef, ...]
 
     def __post_init__(self):
@@ -373,7 +381,7 @@ Targetable = typing.TypeVar('Targetable', NameRef, Subscript, Tuple)
 
 
 @dataclass(frozen=True)
-class BinOp(ValueRef):
+class BinOp(Expression):
     left: ValueRef
     right: ValueRef
     op: str
@@ -400,7 +408,7 @@ class BinOp(ValueRef):
 
 
 @dataclass(frozen=True)
-class CompareOp(ValueRef):
+class CompareOp(Expression):
     left: ValueRef
     right: ValueRef
     op: str
@@ -411,7 +419,7 @@ class CompareOp(ValueRef):
 
 
 @dataclass(frozen=True)
-class OR(ValueRef):
+class OR(Expression):
     """
     Boolean OR
     """
@@ -428,7 +436,7 @@ class OR(ValueRef):
 
 
 @dataclass(frozen=True)
-class AND(ValueRef):
+class AND(Expression):
     """
     Boolean AND
     """
@@ -445,7 +453,7 @@ class AND(ValueRef):
 
 
 @dataclass(frozen=True)
-class XOR(ValueRef):
+class XOR(Expression):
     """
     Boolean XOR
     """
@@ -462,7 +470,7 @@ class XOR(ValueRef):
 
 
 @dataclass(frozen=True)
-class TRUTH(ValueRef):
+class TRUTH(Expression):
     """
     Truth test single operand
     """
@@ -474,7 +482,7 @@ class TRUTH(ValueRef):
 
 
 @dataclass(frozen=True)
-class BoolOp(ValueRef):
+class BoolOp(Expression):
     """
     Boolean operation using a single logical operation and an arbitrary
     number of operands. 
@@ -497,7 +505,7 @@ class BoolOp(ValueRef):
 
 
 @dataclass(frozen=True)
-class Call(ValueRef):
+class Call(Expression):
     """
     An arbitrary call node. This can be replaced
     in cases where it matches an optimizable built in.
@@ -524,7 +532,7 @@ class Call(ValueRef):
 
 
 @dataclass(frozen=True)
-class AffineSeq(ValueRef):
+class AffineSeq(Expression):
     """
     This captures range, enumerate, and some generated access functions.
     """
@@ -545,7 +553,7 @@ class AffineSeq(ValueRef):
 
 
 @dataclass(frozen=True)
-class Ternary(ValueRef):
+class Ternary(Expression):
     """
     A Python if expression.
     
@@ -563,7 +571,7 @@ class Ternary(ValueRef):
 
 
 @dataclass(frozen=True)
-class Reversed(ValueRef):
+class Reversed(Expression):
     """
     Sentinel for a "reversed" object
 
@@ -577,7 +585,7 @@ class Reversed(ValueRef):
 
 
 @dataclass(frozen=True)
-class UnaryOp(ValueRef):
+class UnaryOp(Expression):
     operand: ValueRef
     op: str
 
@@ -590,7 +598,7 @@ class UnaryOp(ValueRef):
 
 
 @dataclass(frozen=True)
-class Zip(ValueRef):
+class Zip(Expression):
     """
     High level sentinel representing a zip object. This is the only unpackable iterator type in this IR.
     Enumerate(object) is handled by Zip(AffineSeq, object).
@@ -612,7 +620,7 @@ class Zip(ValueRef):
 
 
 @dataclass(frozen=True)
-class InductionVar(ValueRef):
+class InductionVar(Expression):
     # Note: These must already be linearized, because
     # this won't recursively unpack subexpressions.
     targets: ValueRef
@@ -706,27 +714,3 @@ class WhileLoop(StmtBase):
     test: ValueRef
     body: typing.List[Statement]
     pos: Position
-
-
-# utility nodes
-
-@dataclass(frozen=True)
-class Max(ValueRef):
-    exprs: typing.Tuple[typing.Union[NameRef, ValueRef], ...]
-
-    def subexprs(self):
-        for subexpr in self.exprs:
-            yield subexpr
-
-
-@dataclass(frozen=True)
-class Min(ValueRef):
-    exprs: typing.Tuple[typing.Union[NameRef, ValueRef], ...]
-
-    @property
-    def subexprs(self):
-        if isinstance(self.exprs, Iterable):
-            for subexpr in self.exprs:
-                yield subexpr
-        else:
-            yield self.exprs
