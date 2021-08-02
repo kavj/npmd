@@ -1,11 +1,7 @@
-import textwrap
-
 from functools import singledispatchmethod
 from contextlib import contextmanager
 
 import ir
-
-from visitor import ExpressionVisitor
 
 
 class pretty_formatter:
@@ -188,17 +184,24 @@ class printtree:
 
     @visit.register
     def _(self, node: ir.ModImport):
-        if node.asname:
-            return f"import {node.mod} as {node.asname}"
+        module = self.format(node.module)
+        module_alias = self.format(node.as_name)
+        if module == module_alias:
+            as_str = f"import {module}"
         else:
-            return f"import {node.mod}"
+            as_str = f"import {module} as {module_alias}"
+        self.print_line(as_str)
 
     @visit.register
     def _(self, node: ir.NameImport):
-        if node.asname:
-            return f"from {node.mod} import {node.name}"
+        module = self.visit(node.module)
+        imported_name = self.visit(node.name)
+        import_alias = self.visit(node.as_name)
+        if imported_name == import_alias:
+            as_str = f"from {module} import {imported_name}"
         else:
-            return f"from {node.mod} import {node.name} as {node.asname}"
+            as_str = f"from {module} import {imported_name} as {import_alias}"
+        self.print_line(as_str)
 
     @visit.register
     def _(self, node: ir.Return):

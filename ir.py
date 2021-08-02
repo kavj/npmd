@@ -658,14 +658,14 @@ class IfElse(StmtBase):
 
 @dataclass
 class ModImport(StmtBase):
-    mod: NameRef
+    module: NameRef
     as_name: NameRef
     pos: Position
 
 
 @dataclass
 class NameImport(StmtBase):
-    mod: NameRef
+    module: NameRef
     name: NameRef
     as_name: NameRef
     pos: Position
