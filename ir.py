@@ -5,7 +5,7 @@ import numbers
 import operator
 import typing
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Hashable
 from dataclasses import dataclass
 from functools import cached_property
 
@@ -63,61 +63,12 @@ class Position:
 clscond = typing.ClassVar[bool]
 
 
-class Int32:
-    bits = 32
-    min_value = -2**31
-    max_value = 2**31-1
+@dataclass(frozen=True)
+class ScalarType:
 
-    def __hash__(self):
-        return hash((self.__class__.__name__, self.bits))
-
-
-class Int64:
-    bits = 64
-    min_value = -2**63
-    max_value = 2**63-1
-
-    def __hash__(self):
-        return hash((self.__class__.__name__, self.bits))
-
-
-class Float32:
-    bits = 64
-    min_value = np.finfo(np.float32).min
-    max_value = np.finfo(np.float32).max
-
-    def __hash__(self):
-        return hash((self.__class__.__name__, self.bits))
-
-
-class Float64:
-    bits = 64
-    min_value = np.finfo(np.float64).min
-    max_value = np.finfo(np.float64).max
-
-    def __hash__(self):
-        return hash((self.__class__.__name__, self.bits))
-
-
-class Predicate32:
-    bits = 32
-
-    def __hash__(self):
-        return hash((self.__class__.__name__, 64))
-
-
-class Predicate64:
-    bits = 64
-
-    def __hash__(self):
-        return hash((self.__class__.__name__, 64))
-
-
-class BoolType:
-    bits = 8
-
-    def __hash__(self):
-        return hash((self.__class__.__name__, 8))
+    bits: int
+    integral: bool
+    boolean: bool
 
 
 class StmtBase:

@@ -9,9 +9,9 @@ import operator
 import numpy as np
 
 from functools import singledispatch, singledispatchmethod
-from symtable import symtable
 
 import ir
+import type_resolution as tr
 
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
 
@@ -103,9 +103,9 @@ def map_alias_to_qualified_names(import_nodes):
     qual_names = {}
     for node in import_nodes:
         if isinstance(node, ir.NameImport):
-            qual_names[node.asname] = f"{node.mod}.{node.name}"
+            qual_names[node.as_name] = f"{node.module}.{node.name}"
         elif isinstance(node, ir.ModImport):
-            qual_names[node.asname] = node.mod
+            qual_names[node.as_name] = node.module
         else:
             raise ValueError
 
@@ -141,7 +141,7 @@ class symbol:
 
     @property
     def is_integer(self):
-        return isinstance(self.type_, (ir.Int32, ir.Int64))
+        return isinstance(self.type_, (tr.Int32, tr.Int64))
 
 
 # array creation nodes
@@ -178,14 +178,11 @@ class symboltable:
     type_by_name = {"int": int, "float": float, "numpy.int32": np.int32, "numpy.int64": np.int64,
                     "numpy.float32": np.float32, "numpy.float64": np.float64}
 
-    scalar_ir_types = frozenset({ir.Int32, ir.Int64, ir.Float32, ir.Float64, ir.Predicate32, ir.Predicate64})
-
-    _scalar_lookup = {int: ir.Int64, float: ir.Float64, np.int32: ir.Int32, np.int64: ir.Int64, np.float32: ir.Float32,
-                      np.float64: ir.Float64}
+    scalar_ir_types = frozenset({tr.Int32, tr.Int64, tr.Float32, tr.Float64, tr.Predicate32, tr.Predicate64})
 
     def __init__(self, scope_name, src_locals, import_map):
         self.symbols = {}
-        self.scalar_type_map = symboltable._scalar_lookup.copy()
+        self.scalar_type_map = tr.scalar_type_map.copy()
         self.src_locals = src_locals
         self.import_map = import_map
         self.scope_name = scope_name
