@@ -48,15 +48,6 @@ class pretty_formatter(ExpressionVisitor):
         return f"min({args})"
 
     @visit.register
-    def _(self, node: ir.Assign):
-        target = self.visit(node.target)
-        value = self.visit(node.value)
-        if node.in_place:
-            return self.visit(node.value)
-        else:
-            return f"{target} = {value}"
-
-    @visit.register
     def _(self, node: ir.Ternary):
         s = f"{self.visit(node.if_expr)} if {self.visit(node.test)}"
         if node.else_expr is not None:
