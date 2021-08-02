@@ -176,34 +176,31 @@ class ImportHandler(ast.NodeVisitor):
 
     def visit_Import(self, node):
         # import modules only
-        imported_name = None
+        imported_mods = set()
+        pos = extract_positional_info(node)
         for name in node.names:
             module_name = ir.NameRef(name.name)
-            module_alias = ir.NameRef(name.asname) if hasattr(name, "asname") else None
-            bound_name = module_alias if module_alias is not None else module_name
-            if bound_name in self.bound_names:
-                if module_alias is None:
-                    msg = f"Module name {module_name.name} shadows a previously bound name."
-                else:
-                    msg = f"Module alias {module_alias.name} to module {module_name.name}" \
-                          f" shadows a previously bound name."
+            module_alias = ir.NameRef(name.asname) if hasattr(name, "asname") else module_name
+            if module_alias in self.bound_names:
+                msg = f"Module alias {module_alias.name} to module {module_name.name}" \
+                      f" shadows a previously bound name."
                 raise ValueError(msg)
-            import_ref = ir.ImportRef(module_name, imported_name, module_alias)
-            self.import_map[bound_name] = import_ref
-            self.bound_names.add(bound_name)
+            mod_import = ir.ModImport(module_name, module_alias, pos)
+            self.import_map[module_alias] = mod_import
+            self.bound_names.add(module_alias)
 
     def visit_ImportFrom(self, node):
         module_name = ir.NameRef(node.module)
+        pos = extract_positional_info(node)
         for name in node.names:
             # assume alias node
             imported_name = ir.NameRef(name.name)
-            import_alias = ir.NameRef(name.asname) if hasattr(name, "asname") else None
-            bound_name = import_alias if import_alias is not None else imported_name
-            if bound_name in self.bound_names:
+            import_alias = ir.NameRef(name.asname) if hasattr(name, "asname") else imported_name
+            if import_alias in self.bound_names:
                 msg = "Name {import_alias} overwrites an existing assignment."
                 raise ValueError(msg)
-            import_ref = ir.ImportRef(module_name, imported_name, import_alias)
-            self.import_map[bound_name] = import_ref
+            import_ref = ir.NameImport(module_name, imported_name, import_alias, pos)
+            self.import_map[import_alias] = import_ref
             self.bound_names.add(import_alias)
 
 
@@ -216,7 +213,6 @@ class TreeBuilder(ast.NodeVisitor):
         self.symbols = None
         self.renaming = None
         self.fold_if_constant = const_folding()
-
 
     @contextmanager
     def function_context(self, entry, symbols):

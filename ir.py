@@ -63,33 +63,6 @@ class Position:
 clscond = typing.ClassVar[bool]
 
 
-@dataclass(frozen=True)
-class ImportRef:
-    """
-    module_name: Name of a module, which may be package.subpackage.module
-    imported_name: Name to import from this module, if any. If nothing is imported, this means only the module
-                 name enters scope.
-    as_name: Alias used to refer to the module or imported name in place of the original name.
-    """
-    module_name: NameRef
-    imported_name: typing.Optional[NameRef]
-    as_name: typing.Optional[NameRef]
-
-    @property
-    def is_module(self):
-        return self.imported_name is None
-
-    @property
-    def bound_name(self):
-        return (self.as_name if self.as_name is not None
-                else self.imported_name if self.imported_name is not None
-                else self.module_name)
-
-
-# Types are subject to change.
-# Predicate types included for bookkeeping, as mask types used in SIMD ISAs
-# are not always compatible with C99 bool.
-
 class Int32:
     bits = 32
     min_value = -2**31
@@ -685,16 +658,16 @@ class IfElse(StmtBase):
 
 @dataclass
 class ModImport(StmtBase):
-    mod: str
-    asname: str
+    mod: NameRef
+    as_name: NameRef
     pos: Position
 
 
 @dataclass
 class NameImport(StmtBase):
-    mod: str
-    name: str
-    asname: str
+    mod: NameRef
+    name: NameRef
+    as_name: NameRef
     pos: Position
 
 

@@ -116,9 +116,9 @@ class pretty_formatter:
         func_name = self.visit(node.func)
         if node.args:
             args = ", ".join(self.visit(arg) for arg in node.args)
-            func = f"{func_name}({args}):"
+            func = f"{func_name}({args})"
         else:
-            func = f"{func_name}():"
+            func = f"{func_name}()"
         return func
 
     @visit.register
