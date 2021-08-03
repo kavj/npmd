@@ -175,17 +175,24 @@ class pretty_formatter:
 
     @visit.register
     def _(self, node: ir.Tuple):
-        s = ", ".join(self.visit(e) for e in node.subexprs)
+        elements = []
+        for e in node.elements:
+            expr = self.visit(e)
+            # parenthesize nested tuples, leave everything else
+            if isinstance(e, ir.Tuple):
+                expr = f"({expr})"
+            elements.append(expr)
+        s = ", ".join(e for e in elements)
         return s
 
     @visit.register
     def _(self, node: ir.UnaryOp):
         op = node.op
-        operand = node.operand
-        if op == "not":
-            expr = f"not {self.visit(operand)}"
+        operand = self.visit(node.operand)
+        if check_precedence(node) < check_precedence(node.operand):
+            expr = f"{op}({operand})"
         else:
-            expr = f"{op}{self.visit(operand)}"
+            expr = f"{op}{operand}"
         return expr
 
 
