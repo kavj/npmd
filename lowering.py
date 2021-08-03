@@ -69,6 +69,38 @@ def wrap_constant(c):
         raise NotImplementedError(msg)
 
 
+def unpack_assignment(target, value, pos):
+    if isinstance(target, ir.Tuple) and isinstance(value, ir.Tuple):
+        if target.length != value.length:
+            msg = f"Cannot unpack {value} with {value.length} elements using {target} with {target.length} elements: " \
+                  f"line {pos.line_begin}."
+            raise ValueError(msg)
+        for t, v in zip(target.subexprs, value.subexprs):
+            yield from unpack_assignment(t, v, pos)
+    else:
+        yield target, value
+
+
+def unpack_iterated(target, iterable, pos):
+    if isinstance(iterable, ir.Zip):
+        # must unpack
+        if isinstance(target, ir.Tuple):
+            if len(target.elements) == len(iterable.elements):
+                for t, v in zip(target.elements, iterable.elements):
+                    yield from unpack_iterated(t, v, pos)
+            else:
+                msg = f"Mismatched unpacking counts for {target} and {iterable}, {len(target.elements)} " \
+                      f"and {(len(iterable.elements))}."
+                raise ValueError(msg)
+        else:
+            msg = f"Zip construct {iterable} requires a tuple for unpacking."
+            raise ValueError(msg)
+
+    else:
+        # Array or sequence reference, with a single opaque target.
+        yield target, iterable
+
+
 def is_pow(expr):
     return isinstance(expr, ir.BinOp) and expr.op in ("**", "**=")
 

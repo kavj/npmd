@@ -10,7 +10,7 @@ from contextlib import contextmanager
 import ir
 from symbol_table import symbol_table_from_pysymtable, wrap_input
 from Canonicalize import replace_builtin_call
-from lowering import const_folding, make_loop_counter
+from lowering import const_folding, make_loop_counter, unpack_assignment, unpack_iterated
 
 binaryops = {ast.Add: "+",
              ast.Sub: "-",
@@ -61,49 +61,6 @@ compareops = {ast.Eq: "==",
 
 supported_builtins = {"iter", "range", "enumerate", "zip", "all", "any", "max", "min", "abs", "pow",
                       "round", "reversed"}
-
-
-def unpackable_length(iterable: ir.Call):
-    func_name = iterable.func
-    if func_name.name == "zip":
-        assert len(iterable.keywords) == 0
-        return len(iterable.args)
-    elif func_name.name == "enumerate":
-        return 2
-    else:
-        return 0
-
-
-def unpack_iterated(target, iterable, pos):
-    if isinstance(iterable, ir.Zip):
-        # must unpack
-        if isinstance(target, ir.Tuple):
-            if len(target.elements) == len(iterable.elements):
-                for t, v in zip(target.elements, iterable.elements):
-                    yield from unpack_iterated(t, v, pos)
-            else:
-                msg = f"Mismatched unpacking counts for {target} and {iterable}, {len(target.elements)} " \
-                      f"and {(len(iterable.elements))}."
-                raise ValueError(msg)
-        else:
-            msg = f"Zip construct {iterable} requires a tuple for unpacking."
-            raise ValueError(msg)
-
-    else:
-        # Array or sequence reference, with a single opaque target.
-        yield target, iterable
-
-
-def unpack_assignment(target, value, pos):
-    if isinstance(target, ir.Tuple) and isinstance(value, ir.Tuple):
-        if target.length != value.length:
-            msg = f"Cannot unpack {value} with {value.length} elements using {target} with {target.length} elements: " \
-                  f"line {pos.line_begin}."
-            raise ValueError(msg)
-        for t, v in zip(target.subexprs, value.subexprs):
-            yield from unpack_assignment(t, v, pos)
-    else:
-        yield target, value
 
 
 def is_ellipsis(node):

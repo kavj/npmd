@@ -9,6 +9,8 @@ from collections.abc import Hashable
 from dataclasses import dataclass
 from functools import cached_property
 
+import ir
+
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
 inplace_ops = frozenset({"+=", "-=", "*=", "/=", "//=", "%=", "**=", "<<=", ">>=", "|=", "^=", "&=", "@="})
 unaryops = frozenset({"+", "-", "~", "not"})
@@ -550,22 +552,6 @@ class Zip(Expression):
     @property
     def length(self):
         return len(self.elements)
-
-
-@dataclass(frozen=True)
-class InductionVar(Expression):
-    # Note: These must already be linearized, because
-    # this won't recursively unpack subexpressions.
-    targets: ValueRef
-    iterables: ValueRef
-
-    @property
-    def subexprs(self):
-        if hasattr(self.targets, 'subexprs') and hasattr(self.iterables, 'subexprs'):
-            for target, iterable in zip(self.targets.subexprs, self.iterables.subexprs):
-                yield target, iterable
-        else:
-            yield self.targets, self.iterables
 
 
 @dataclass
