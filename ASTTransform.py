@@ -292,11 +292,17 @@ class TreeBuilder(ast.NodeVisitor):
         pos = extract_positional_info(node)
         self.body.append(ir.SingleExpr(expr, pos))
 
-    def visit_UnaryOp(self, node: ast.UnaryOp) -> ir.UnaryOp:
+    def visit_UnaryOp(self, node: ast.UnaryOp) -> ir.ValueRef:
         op = unaryops.get(type(node.op))
         operand = self.visit(node.operand)
         operand = self.fold_if_constant(operand)
-        return ir.UnaryOp(operand, op) if op != "+" else operand
+        if op == "+":
+            expr = operand
+        elif op == "not":
+            expr = ir.NOT(operand)
+        else:
+            expr = ir.UnaryOp(operand, op)
+        return expr
 
     def visit_BinOp(self, node: ast.BinOp) -> ir.BinOp:
         op = binaryops.get(type(node.op))

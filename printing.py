@@ -4,12 +4,47 @@ from contextlib import contextmanager
 import ir
 
 
+#     https://docs.python.org/3/reference/expressions.html#operator-precedence
+
+binop_ordering = {"**": 1, "*": 3, "@": 3, "/": 3, "//": 3, "%": 3, "+": 4, "-": 4, "<<": 5, ">>": 5, "&": 6,
+                  "^": 7, "|": 8, "in": 9, "not in": 9, "<": 9, "<=": 9, ">": 9, ">=": 9, "!=": 9,
+                  "==": 9}
+
+# Todo: Given the boolean refactoring, not should probably derive from BoolOp, similar to TRUTH.
+
+# Note, python docs don't specify truth precedence, but it should match logical "not"
+
+
+def check_precedence(node):
+    if isinstance(node, ir.ValueRef) and not isinstance(node, ir.Expression):
+        prec = 0
+    elif isinstance(node, (ir.Subscript, ir.Call, ir.Max, ir.Min, ir.Reversed)):
+        prec = 0
+    elif isinstance(node, ir.BinOp):
+        op = node.op
+        prec = binop_ordering[op]
+    elif isinstance(node, ir.UnaryOp):
+        prec = 2
+    elif isinstance(node, (ir.TRUTH, ir.NOT)):
+        prec = 10
+    elif isinstance(node, (ir.AND, ir.OR)):
+        prec = 11
+    elif isinstance(node, ir.OR):
+        prec = 12
+    elif isinstance(node, ir.Ternary):
+        prec = 13
+    else:
+        msg = f"Unable to evaluate precedence for node {node} of type {type(node)}."
+        raise ValueError(msg)
+    return prec
+
+
 class pretty_formatter:
     """
     The pretty printer is intended as a way to show the state of the IR in a way that resembles a
     typical source representation.
 
-    
+
     """
 
     def __init__(self):
@@ -20,20 +55,6 @@ class pretty_formatter:
         expr = self.visit(node)
         return expr
 
-    @contextmanager
-    def parenthesized(self):
-        stashed = self.add_parentheses
-        self.add_parentheses = True
-        yield
-        self.add_parentheses = stashed
-
-    @contextmanager
-    def no_parentheses(self):
-        stashed = self.add_parentheses
-        self.add_parentheses = False
-        yield
-        self.add_parentheses = stashed
-
     @singledispatchmethod
     def visit(self, node):
         msg = f"No method to format node: {node}."
@@ -41,28 +62,31 @@ class pretty_formatter:
 
     @visit.register
     def _(self, node: ir.Length):
-        with self.no_parentheses():
-             expr = self.visit(node.value)
+        expr = self.visit(node.value)
         return f"len({expr})"
 
     @visit.register
     def _(self, node: ir.Max):
-        with self.no_parentheses():
-            args = ", ".join(self.visit(arg) for arg in node.values)
+        args = ", ".join(self.visit(arg) for arg in node.values)
         return f"max({args})"
 
     @visit.register
     def _(self, node: ir.Min):
-        with self.no_parentheses():
-            args = ", ".join(self.visit(arg) for arg in node.values)
+        args = ", ".join(self.visit(arg) for arg in node.values)
         return f"min({args})"
 
     @visit.register
     def _(self, node: ir.Ternary):
-        with self.no_parentheses():
-            expr = f"{self.visit(node.if_expr)} if {self.visit(node.test)} else {self.visit(node.else_expr)}"
-        if self.add_parentheses:
-            expr = f"({expr})"
+        test = self.visit(node.test)
+        if isinstance(node.test, ir.Ternary):
+            test = f"({test})"
+        if_expr = self.visit(node.if_expr)
+        if isinstance(node.if_expr, ir.Ternary):
+            if_expr = f"({if_expr})"
+        else_expr = self.visit(node.else_expr)
+        if isinstance(node.else_expr, ir.Ternary):
+            else_expr = f"({else_expr})"
+        expr = f"{if_expr} if {test} else {else_expr}"
         return expr
 
     @visit.register
@@ -81,25 +105,42 @@ class pretty_formatter:
     def _(self, node: ir.BinOp):
         left = self.visit(node.left)
         right = self.visit(node.right)
-        expr = f"{left} {node.op} {right}"
-        if self.add_parentheses:
-            expr = f"({expr})"
+        op = node.op
+        if not node.in_place:
+            node_order = check_precedence(node)
+            left_order = check_precedence(node.left)
+            right_order = check_precedence(node.right)
+            if node_order < left_order:
+                left = f"({left})"
+            if node_order < right_order:
+                right = f"({right})"
+        expr = f"{left} {op} {right}"
         return expr
 
     @visit.register
     def _(self, node: ir.AND):
-        with self.parenthesized():
-            expr = " and ".join(self.visit(operand) for operand in node.operands)
-        if self.add_parentheses:
-            expr = f"({expr})"
+        node_order = check_precedence(node)
+        operands = []
+        for operand in node.operands:
+            formatted = self.visit(operand)
+            order = check_precedence(operand)
+            if node_order < order:
+                formatted = f"({formatted})"
+            operands.append(formatted)
+        expr = " and ".join(operand for operand in operands)
         return expr
 
     @visit.register
     def _(self, node: ir.OR):
-        with self.parenthesized():
-            expr = " or ".join(self.visit(operand) for operand in node.operands)
-        if self.add_parentheses:
-            expr = f"({expr})"
+        node_order = check_precedence(node)
+        operands = []
+        for operand in node.operands:
+            formatted = self.visit(operand)
+            order = check_precedence(operand)
+            if node_order < order:
+                formatted = f"({formatted})"
+            operands.append(formatted)
+        expr = " or ".join(operand for operand in operands)
         return expr
 
     @visit.register
@@ -110,11 +151,8 @@ class pretty_formatter:
     @visit.register
     def _(self, node: ir.Call):
         func_name = self.visit(node.func)
-        if node.args:
-            args = ", ".join(self.visit(arg) for arg in node.args)
-            func = f"{func_name}({args})"
-        else:
-            func = f"{func_name}()"
+        args = ", ".join(self.visit(arg) for arg in node.args)
+        func = f"{func_name}({args})"
         return func
 
     @visit.register

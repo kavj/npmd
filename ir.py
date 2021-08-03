@@ -406,6 +406,15 @@ class TRUTH(Expression):
 
 
 @dataclass(frozen=True)
+class NOT(Expression):
+    """
+    Boolean not
+    """
+
+    operand: ValueRef
+
+
+@dataclass(frozen=True)
 class BoolOp(Expression):
     """
     Boolean operation using a single logical operation and an arbitrary
