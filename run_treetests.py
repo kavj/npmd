@@ -32,17 +32,29 @@ array_n = ArrayRef(ir.NameRef("blah"), (ir.NameRef("n"),), np.float64)
 #       For now, make a second tuple to inject type info and extend
 #       the printer to handle operator precedence and generation of annotations.
 
-uws_types = ({"something": {"x": array_n,
-                            "y": array_n,
-                            "z": array_n},
-              "test_n": {"n": int,
-                         "m": int,
-                         "p": int}
-              })
+# "test_forifcont.py", "test_nested.py", "test_cascade_if.py", "test_dead.py", "test_dead2.py"
+
+uws_types = {"test_forifcont.py": {"something": {"x": array_n,
+                                                 "y": array_n,
+                                                 "z": array_n}
+                                   },
+             "test_nested.py": {"test_n": {"n": int,
+                                           "m": int,
+                                           "p": int}
+                                },
+             "test_cascade_if.py": {"examp": {"a": int, "b": float, "c": float}
+                                    },
+
+             "test_dead.py": {"blah": {"a": array_n, "b": array_n}
+                              },
+
+             "test_dead2.py": {"blah": {"a": array_n, "b": array_n}
+                               }
+             }
 
 Type_Info = {}
 
-P = printtree()
+pretty_print = printtree()
 
 for i, t in enumerate(tests):
     print(t)
@@ -52,6 +64,10 @@ for i, t in enumerate(tests):
         src = reader.read()
     print(src)
     print("\n\nOUTPUT\n\n")
-    mod = rtp(filepath, uws_types)
-    P(mod)
+    types = uws_types.get(t)
+    if types is None:
+        msg = f"Unable to load types for test file {t}."
+        raise RuntimeError(msg)
+    module = rtp(filepath, types)
+    pretty_print(module)
     print('\n\n\n')

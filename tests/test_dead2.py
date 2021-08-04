@@ -4,10 +4,12 @@
 def blah(a, b):
     for u, v in zip(a, b):
         break
-        print('should be removed')
+        # dead code
         print(u)
         print(v)
         c = a - b
     for v in range(53):
         continue
-        print('should also be removed')
+        # dead code
+        return v
+        v *= 2

@@ -201,8 +201,7 @@ class pretty_formatter:
             first, second = node.elements
             if isinstance(first, ir.AffineSeq):
                 if first.stop is None:
-                    # This is implicitly convertible to an
-                    # enumerate expression
+                    # This is implicitly convertible to an enumerate expression.
                     inner_expr = self.visit(second)
                     if first.start == ir.Zero:
                         # ignore default value
@@ -339,7 +338,7 @@ class printtree:
     @visit.register
     def _(self, node: ir.Assign):
         if node.in_place:
-            stmt = self.format(node.target)
+            stmt = self.format(node.value)
         else:
             stmt = f"{self.format(node.target)} = {self.format(node.value)}"
         self.print_line(stmt)
