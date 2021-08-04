@@ -360,8 +360,17 @@ class const_folding(ExpressionVisitor):
         left = self.lookup(expr.left)
         right = self.lookup(expr.right)
         if left.constant and right.constant:
-            # Todo: Negative shifts should be caught as compiler errors.
             op = binops[expr.op]
+            if op in ("<<", ">>", "<<=", ">>="):
+                 if not isinstance(right, ir.IntConst):
+                     msg = f"Cannot safely evaluate shifts by non-integral amounts: {left.value}  {op} {right.value}."
+                     raise ValueError(msg)
+                 elif operator.eq(right.value, 0):
+                     msg = f"Shift by zero error: {left.value} {op} {right.value}"
+                     raise ValueError(msg)
+                 elif operator.lt(right.value, 0):
+                     msg = f"Shift amount cannot be negative: {left.value} {op} {right.value}"
+                     raise ValueError(msg)
             value = op(left.value, right.value)
             result = wrap_constant(value)
             return result
