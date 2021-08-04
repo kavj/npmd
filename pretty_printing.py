@@ -231,7 +231,7 @@ class pretty_formatter:
             if isinstance(elem, ir.Tuple):
                 # This nesting is unsupported elsewhere, but this
                 # would be a confusing place to throw an error.
-                formatted = f"({formatted})"
+                formatted = parenthesized(formatted)
             exprs.append(formatted)
         # handle case of enumerate
         expr = ", ".join(e for e in exprs)
