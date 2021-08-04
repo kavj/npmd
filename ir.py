@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import numpy as np
 import numbers
 import operator
 import typing
 from abc import ABC, abstractmethod
-from collections.abc import Hashable
 from dataclasses import dataclass
 from functools import cached_property
 
-import ir
 
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
 inplace_ops = frozenset({"+=", "-=", "*=", "/=", "//=", "%=", "**=", "<<=", ">>=", "|=", "^=", "&=", "@="})
@@ -262,7 +259,7 @@ class Module:
 
     """
 
-    funcs: typing.List[Function]
+    functions: typing.List[Function]
     imports: typing.List[typing.Any]
 
 

@@ -2,6 +2,7 @@ from functools import singledispatchmethod
 from contextlib import contextmanager
 
 import ir
+import type_resolution as tr
 
 
 #     https://docs.python.org/3/reference/expressions.html#operator-precedence
@@ -13,6 +14,31 @@ binop_ordering = {"**": 1, "*": 3, "@": 3, "/": 3, "//": 3, "%": 3, "+": 4, "-":
 # Todo: Given the boolean refactoring, not should probably derive from BoolOp, similar to TRUTH.
 
 # Note, python docs don't specify truth precedence, but it should match logical "not"
+
+scalar_pretty_types = {tr.Int32: "numpy.int32",
+                       tr.Int64: "numpy.int64",
+                       tr.Float32: "numpy.float32",
+                       tr.Float64: "numpy.float64",
+                       tr.Predicate32: "32_bit_mask",
+                       tr.Predicate64: "64_bit_mask",
+                       tr.BoolType: "bool"}
+
+
+def get_pretty_scalar_type(t):
+    scalar_type = scalar_pretty_types.get(t)
+    if scalar_type is None:
+        msg = f"Pretty printer's formatter encountered unsupported type annotation"
+        raise ValueError(msg)
+    return scalar_type
+
+
+def get_pretty_type(t):
+    if isinstance(t, ir.ArrayType):
+        scalar_type = get_pretty_scalar_type(t.dtype)
+        pt = f"numpy.ndarray[{scalar_type}]"
+    else:
+        pt = get_pretty_scalar_type(t)
+    return pt
 
 
 def check_precedence(node):
@@ -224,22 +250,32 @@ class pretty_formatter:
         return expr
 
 
-class printtree:
+class pretty_printer:
     """
     Pretty prints tree. 
     Inserts pass on empty if statements or for/while loops.
 
     """
 
-    def __init__(self, single_indent="    "):
+    def __init__(self, single_indent="    ", print_annotations=True):
         self.indent = ""
         self._increment = len(single_indent)
         self._single_indent = single_indent
+        self.print_annotations = print_annotations
         self.format = pretty_formatter()
+        self.symbols = None
 
-    def __call__(self, tree):
+    def __call__(self, tree, symbols):
         assert self.indent == ""
-        self.visit(tree)
+        with self.symbols_loaded(symbols):
+            self.visit(tree)
+
+    @contextmanager
+    def symbols_loaded(self, symbols):
+        assert self.symbols is None
+        self.symbols = symbols
+        yield
+        self.symbols = None
 
     @contextmanager
     def indented(self):
@@ -250,6 +286,24 @@ class printtree:
     def print_line(self, as_str):
         line = f"{self.indent}{as_str}"
         print(line)
+
+    def make_elif(self, node: ir.IfElse):
+        assert isinstance(node, ir.IfElse)
+        test = self.format(node.test)
+        if_expr = f"elif {test}:"
+        self.print_line(if_expr)
+        with self.indented():
+            self.visit(node.if_branch)
+        if node.else_branch:
+            # Make another elif if all conditions are met
+            if len(node.else_branch) == 1:
+                first, = node.else_branch
+                if isinstance(first, ir.IfElse):
+                    self.make_elif(first)
+                    return
+            self.print_line("else:")
+            with self.indented():
+                self.visit(node.else_branch)
 
     @singledispatchmethod
     def visit(self):
@@ -287,7 +341,7 @@ class printtree:
 
     @visit.register
     def _(self, node: ir.Module):
-        for f in node.funcs:
+        for f in node.functions:
             print('\n')
             self.visit(f)
             print('\n')
@@ -331,6 +385,12 @@ class printtree:
         with self.indented():
             self.visit(node.if_branch)
         if node.else_branch:
+            # Make elif if all conditions are met
+            if len(node.else_branch) == 1:
+                first, = node.else_branch
+                if isinstance(first, ir.IfElse):
+                    self.make_elif(first)
+                    return
             self.print_line("else:")
             with self.indented():
                 self.visit(node.else_branch)
@@ -340,7 +400,18 @@ class printtree:
         if node.in_place:
             stmt = self.format(node.value)
         else:
-            stmt = f"{self.format(node.target)} = {self.format(node.value)}"
+            target = node.target
+            formatted_target = self.format(node.target)
+            formatted_value = self.format(node.value)
+            if self.print_annotations and isinstance(target, ir.NameRef):
+                symbol = self.symbols.lookup(target)
+                if symbol is not None:
+                    # This is None if no typed symbol is registered
+                    # This will be an error later.
+                    type_ = symbol.type_
+                    pretty_type = get_pretty_type(type_)
+                    formatted_target = f"{formatted_target}: {pretty_type}"
+            stmt = f"{formatted_target} = {formatted_value}"
         self.print_line(stmt)
 
     @visit.register

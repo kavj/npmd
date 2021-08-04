@@ -3,7 +3,7 @@ import os.path
 from ASTTransform import build_module_ir
 from Canonicalize import RemoveContinues, MergePaths
 from reachingcheck import ReachingCheck
-from printing import printtree
+from pretty_printing import pretty_printer
 
 
 def run_tree_pipeline(pth, types):
@@ -14,11 +14,11 @@ def run_tree_pipeline(pth, types):
     reaching_check = ReachingCheck()
     merge_paths = MergePaths()
     filename = os.path.basename(pth)
-    mod = build_module_ir(r, filename, types)
+    module, symbol_tables = build_module_ir(r, filename, types)
     repl = []
-    P = printtree()
-    for func in mod.funcs:
-        P(func)
+    pp = pretty_printer()
+    for func in module.functions:
+        pp(func, symbol_tables[func.name])
         print("\n\n")
         # func = merge_paths(func)
         # P(func)
@@ -35,9 +35,9 @@ def run_tree_pipeline(pth, types):
         # func = remove_continues(func)
         # repl.append(func)
 
-    mod.funcs = repl
+    module.functions = repl
     unbound = []
-    for func in mod.funcs:
+    for func in module.functions:
         u = reaching_check(func)
         unbound.append(u)
     for u in unbound:
@@ -48,4 +48,4 @@ def run_tree_pipeline(pth, types):
             print("used:", key, "\n")
         for key in war:
             print("overwritten after read:", key, "\n")
-    return mod
+    return module, symbol_tables
