@@ -179,10 +179,13 @@ class flatten_exprs(ExpressionVisitor):
 
 class simplify_exprs(ExpressionVisitor):
     """
-    This and constant folding are meant as helper classes.
-    User code doesn't always include a lot of immediate opportunity for folding, but other
-    passes may generate redundancy in expression hierarchies. Running simplify on these expressions
-    avoids ever instantiating temporary variables
+    Fold redundancy, typically stuff that is added by another pass, since it's not necessarily
+    tractable to catch every case of expression blowup where it occurs.
+
+    References
+
+    LIVINSKII et. al, Random Testing for C and C++ Compilers with YARPGen
+
 
     """
 
@@ -341,6 +344,9 @@ def simplify_binop(expr: ir.BinOp):
 
 
 class const_folding(ExpressionVisitor):
+    # These don't reject large integer values, since they may be intermediate values.
+    # It only matters if they are explicitly bound to a fixed width data type that
+    # cannot contain them.
 
     def __call__(self, expr):
         return self.lookup(expr)
@@ -354,6 +360,7 @@ class const_folding(ExpressionVisitor):
         left = self.lookup(expr.left)
         right = self.lookup(expr.right)
         if left.constant and right.constant:
+            # Todo: Negative shifts should be caught as compiler errors.
             op = binops[expr.op]
             value = op(left.value, right.value)
             result = wrap_constant(value)
@@ -365,6 +372,8 @@ class const_folding(ExpressionVisitor):
     def _(self, expr: ir.UnaryOp):
         operand = self.lookup(expr.operand)
         if operand.constant:
+            # If this folds a value equivalent to MIN_INTEGER(Int64)
+            # it should fail during code generation.
             op = unaryops[expr.op]
             value = op(operand.value)
             result = wrap_constant(value)
@@ -526,13 +535,56 @@ def find_min_interval_width(spans):
 
 def make_loop_counter(iterables, syms):
     """
+
     Map a combination of array iterators and range and enumerate calls to a set of counters,
     which capture the appropriate intervals.
 
-    In the case of arrays, this refers to the possibly non-linear
-    index into the array at each step, which should be taken by the iterator at runtime.
+    This carries the requirement that all parameters have non-negative values and that step parameters
+    are strictly positive. Without that, it would take too much arithmetic to sanitize all cases at runtime
+    in a way that doesn't rely on things such as non-portable saturating arithmetic routines.
+
+    For example, suppose we have
+
+    for u, v in zip(array0[i::k], array1[j::k]):
+        ...
+
+    where its known at compile time that n == len(array0) == len(array1)
+
+    This means we have intervals
+
+    (i, n, k), (j, n, k)
+
+    which results in a loop counter with parameters:
+
+    (max(i, j), n, k)
+
+    Ignoring the issue of sanitizing the loop step there against overflow, we need an exact iteration count
+    so that the corresponding lowering looks like
+
+    array0[i + loop_index * k]
+    array1[j + loop_index * k]
+
+    which is unsafe if we cannot safely compute n - max(i, j) at runtime
+
+    If all bound variable are non-negative, we can always safely compute this stuff, and
+    sanitizing a non-unit step can be done by computing:
+        stop = max(start, stop)
+        stop -= (stop - start) % step
+
+    Without this, we have greater complexity in order to avoid injecting unsafe behavior during lowering
+    that was safe in the original source.
+
+    References:
+        LIVINSKII et. al, Random Testing for C and C++ Compilers with YARPGen
+        Bachmann et. al, Chains of Recurrences - a method to expedite the evaluation of closed-form functions
+        https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html
+        https://developercommunity.visualstudio.com/t/please-implement-integer-overflow-detection/409051
+        https://numpy.org/doc/stable/user/building.html
 
     """
+
+    # Todo: This should be a loop transform pass, since it needs to inject error handling for complicated parameters
+    #       and eventually handle reversal.
 
     intervals = set()
     split_intervals = interval_splitting()
@@ -569,23 +621,22 @@ def make_loop_counter(iterables, syms):
             else:
                 stop = ir.Min(tuple(unique_stops))
         elif have_unique_stop:
-            # Normalize bounds but fold step
-            max_start = ir.Max(tuple(unique_starts))
-            start = ir.Zero
-            stop = ir.BinOp(stop, max_start, "-")
+            # Always safe for {start, stop} >= 0
+            start = ir.Max(tuple(unique_starts))
+            stop = ir.BinOp(stop, start, "-")
         else:
             # Normalize bounds after reducing over all bounds
-            # but still fold step
+            # but still fold step. This is unsafe if parameters
+            # may be negative.
             widths = set()
             for start, stop, _ in intervals:
-                widths.add(ir.BinOp(stop, start, "-"))
+                safe_stop = ir.Max(start, stop)
+                widths.add(ir.BinOp(safe_stop, start, "-"))
             start = ir.Zero
             stop = ir.Min(tuple(widths))
+            # Todo: This needs a sanitizer check for MAX_INT - stop < step
         counter = ir.AffineSeq(start, stop, step)
     else:
-        # Normalize range and step, but try to reduce
-        # arithmetic needed to compute iteration count for each
-        # possibly unique step size
         by_step = defaultdict(set)
         counts = set()
 
@@ -593,10 +644,15 @@ def make_loop_counter(iterables, syms):
             by_step[step].add((start, stop))
 
         for step, starts_stops in by_step.items():
+            # again, safe with
             min_width = find_min_interval_width(starts_stops)
-            base_count = ir.BinOp(min_width, step, "//")
-            fringe_test = ir.BinOp(min_width, step, "&")
-            fringe_count = ir.Ternary(fringe_test, ir.One, ir.Zero)
-            counts.add(ir.BinOp(base_count, fringe_count, "+"))
+            if step == ir.One:
+                count = min_width
+            else:
+                base_count = ir.BinOp(min_width, step, "//")
+                fringe_test = ir.BinOp(min_width, step, "%")
+                fringe_count = ir.Ternary(fringe_test, ir.One, ir.Zero)
+                count = ir.BinOp(base_count, fringe_count, "+")
+            counts.add(count)
         counter = ir.AffineSeq(ir.Zero, ir.Min(tuple(counts)), ir.One)
     return counter

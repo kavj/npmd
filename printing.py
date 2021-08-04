@@ -195,6 +195,35 @@ class pretty_formatter:
             expr = f"{op}{operand}"
         return expr
 
+    @visit.register
+    def _(self, node: ir.Zip):
+        if len(node.elements) == 2:
+            first, second = node.elements
+            if isinstance(first, ir.AffineSeq):
+                if first.stop is None:
+                    # This is implicitly convertible to an
+                    # enumerate expression
+                    inner_expr = self.visit(second)
+                    if first.start == ir.Zero:
+                        # ignore default value
+                        expr = f"enumerate({inner_expr})"
+                    else:
+                        start = self.visit(first.start)
+                        expr = f"enumerate({inner_expr}, {start})"
+                    return expr
+        exprs = []
+        for elem in node.elements:
+            formatted = self.visit(elem)
+            if isinstance(elem, ir.Tuple):
+                # This nesting is unsupported elsewhere, but this
+                # would be a confusing place to throw an error.
+                formatted = f"({formatted})"
+            exprs.append(formatted)
+        # handle case of enumerate
+        expr = ", ".join(e for e in exprs)
+        expr = f"zip({expr})"
+        return expr
+
 
 class printtree:
     """

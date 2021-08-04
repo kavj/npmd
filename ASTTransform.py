@@ -81,26 +81,6 @@ def extract_positional_info(node):
                        col_end=node.end_col_offset)
 
 
-def extract_loop_indexer(node: ast.For):
-    """
-    Find cases of
-
-    for index_name, values in enumerate(...):
-        ...
-
-    Here we can reuse index_name as a loop index prefix, regardless
-    of clobbering.
-
-    """
-
-    target = node.target
-    iterable = node.iter
-    if isinstance(target, ast.Name) and isinstance(iterable, ast.Call):
-        if isinstance(iterable.func, ast.Name):
-            if iterable.func.id == "enumerate":
-                return target.id
-
-
 class ImportHandler(ast.NodeVisitor):
     """
     This is used to replace source aliases with fully qualified names.
@@ -451,42 +431,30 @@ class TreeBuilder(ast.NodeVisitor):
         iter_node = self.visit(node.iter)
         target_node = self.visit(node.target)
         pos = extract_positional_info(node)
-        targets = []
-        iterables = []
-        prefix = extract_loop_indexer(node)
-        if prefix is None:
-            # Use a common prefix if a suitable name was not found.
-            prefix = "i"
-        loop_index = self.symbols.make_unique_name(prefix)
-        # make_loop_interval(targets, iterables, self.symbols, loop_index)
-
-        with self.loop_region(node):
+        targets = set()
+        iterables = set()
+        # Do initial checks for weird issues that may arise here.
+        # We don't lower it fully at this point, because it injects
+        # additional arithmetic and not all variable types may be fully known
+        # at this point.
+        try:
             for target, iterable in unpack_iterated(target_node, iter_node, pos):
-                # map each assignment with respect to
-                if prefix is None and isinstance(iterable, ir.AffineSeq):
-                    if iterable.stop is None:
-                        # first enumerate encountered
-                        prefix = target
-                targets.append(target)
-                iterables.append(iterable)
-            conflicts = set(targets).intersection(iterables)
-            if conflicts:
-                conflict_names = ", ".join(c for c in conflicts)
-                msg = f"{conflict_names} appear in both the target an iterable sequences of a for loop, " \
-                      f"line {pos.line_begin}. This is not supported."
-                raise ValueError(msg)
-            # make a unique loop index name, which cannot escape the current scope
-            if prefix is None:
-                prefix = "i"
-            loop_index = self.symbols.add_scalar(prefix, self.symbols.default_int, added=True)
-            loop_counter = make_loop_counter(iterables, loop_index)
-
+                targets.add(target)
+                iterables.add(iterable)
+        except ValueError:
+            # Generator will throw an error on bad unpacking
+            msg = f"Cannot safely unpack for loop expression, line: {pos.line_begin}"
+            raise ValueError(msg)
+        conflicts = targets.intersection(iterables)
+        if conflicts:
+            conflict_names = ", ".join(c for c in conflicts)
+            msg = f"{conflict_names} appear in both the target an iterable sequences of a for loop, " \
+                  f"line {pos.line_begin}. This is not supported."
+            raise ValueError(msg)
+        with self.loop_region(node):
             for stmt in node.body:
                 self.visit(stmt)
-            # This can still be an ill formed loop, eg one with an unreachable latch.
-            # These are not supported, because they look weird after transformation to a legal one
-            # and raising an error is less mysterious. They should be be caught during tree validation checks.
-            loop = ir.ForLoop(loop_index, loop_counter, self.body, pos)
+            loop = ir.ForLoop(target_node, iter_node, self.body, pos)
         self.body.append(loop)
 
     def visit_While(self, node: ast.While):
