@@ -311,6 +311,11 @@ class BinOp(Expression):
 
     def __post_init__(self):
         assert (self.op in binaryops or self.op in inplace_ops or self.op in compareops)
+        if self.in_place:
+            # ensure things like -a += b are treated as compiler errors.
+            # These shouldn't even pass the parser if caught in source but
+            # could be accidentally created internally.
+            assert isinstance(self.left, (NameRef, Subscript))
 
     @property
     def subexprs(self):
@@ -341,8 +346,18 @@ class CompareOp(Expression):
         yield self.right
 
 
+class BoolOp(Expression):
+    """
+    Boolean operation using a single logical operation and an arbitrary
+    number of operands. Base class is used here to aggregate type checks.
+
+    """
+
+    pass
+
+
 @dataclass(frozen=True)
-class OR(Expression):
+class OR(BoolOp):
     """
     Boolean OR
     """
@@ -359,7 +374,7 @@ class OR(Expression):
 
 
 @dataclass(frozen=True)
-class AND(Expression):
+class AND(BoolOp):
     """
     Boolean AND
     """
@@ -376,7 +391,7 @@ class AND(Expression):
 
 
 @dataclass(frozen=True)
-class XOR(Expression):
+class XOR(BoolOp):
     """
     Boolean XOR
     """
@@ -393,47 +408,30 @@ class XOR(Expression):
 
 
 @dataclass(frozen=True)
-class TRUTH(Expression):
+class TRUTH(BoolOp):
     """
     Truth test single operand
     """
-    operand: ValueRef
+    operands: ValueRef
+
+    def __post_init__(self):
+        assert isinstance(self.operands, ValueRef)
 
     @property
     def subexprs(self):
-        yield self.operand
+        yield self.operands
 
 
 @dataclass(frozen=True)
-class NOT(Expression):
+class NOT(BoolOp):
     """
     Boolean not
     """
 
-    operand: ValueRef
-
-
-@dataclass(frozen=True)
-class BoolOp(Expression):
-    """
-    Boolean operation using a single logical operation and an arbitrary
-    number of operands. 
-
-    Comparisons between expressions are compared without modification.
-
-    """
-
-    operands: typing.Tuple[ValueRef, ...]
-    op: str
+    operands: ValueRef
 
     def __post_init__(self):
-        assert (isinstance(self.operands, tuple))
-        assert self.op in boolops
-
-    @property
-    def subexprs(self):
-        for operand in self.operands:
-            yield operand
+        assert isinstance(self.operands, ValueRef)
 
 
 @dataclass(frozen=True)

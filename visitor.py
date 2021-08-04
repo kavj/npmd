@@ -98,9 +98,29 @@ class ExpressionVisitor:
         return ir.Call(func, args, kws)
 
     @visit.register
-    def _(self, expr: ir.BoolOp):
+    def _(self, expr: ir.AND):
         operands = tuple(self.lookup(operand) for operand in expr.operands)
-        return ir.BoolOp(operands, expr.op)
+        return ir.AND(operands)
+
+    @visit.register
+    def _(self, expr: ir.OR):
+        operands = tuple(self.lookup(operand) for operand in expr.operands)
+        return ir.OR(operands)
+
+    @visit.register
+    def _(self, expr: ir.XOR):
+        operands = tuple(self.lookup(operand) for operand in expr.operands)
+        return ir.XOR(operands)
+
+    @visit.register
+    def _(self, expr: ir.TRUTH):
+        operand = self.lookup(expr.operands)
+        return ir.XOR(operand)
+
+    @visit.register
+    def _(self, expr: ir.NOT):
+        operand = self.lookup(expr.operands)
+        return ir.XOR(operand)
 
     @visit.register
     def _(self, expr: ir.AffineSeq):

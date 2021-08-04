@@ -227,6 +227,24 @@ class simplify_exprs(ExpressionVisitor):
                 return right
             elif right == ir.Zero:
                 return left
+            # sanitize some cases of potential intermediate overflow
+            elif isinstance(right, ir.UnaryOp):
+                if right.op == "-":
+                    if op == "+":
+                        return ir.BinOp(left, right.operand, "-")
+                    elif op == "-":
+                        return ir.BinOp(left, right.operand, "+")
+                    elif op == "+=":
+                        return ir.BinOp(left, right.operand, "-=")
+                    elif op == "-=":
+                        return ir.BinOp(left, right.operand, "+=")
+            elif isinstance(left, ir.UnaryOp):
+                # lower priority, since it inverts operand ordering
+                if left.op == "-":
+                    if op == "+":
+                        return ir.BinOp(right, left.operand, "-")
+                    elif op == "-":
+                        return ir.BinOp(right, left.operand, "-")
         elif op in ("-", "-="):
             if left == ir.Zero:
                 return ir.UnaryOp(right, "-")
@@ -237,8 +255,7 @@ class simplify_exprs(ExpressionVisitor):
         elif op in ("//", "//="):
             if right == ir.One:
                 return left
-        else:
-            return expr
+        return expr
 
     @visit.register
     def _(expr: ir.UnaryOp):
@@ -332,15 +349,6 @@ class simplify_exprs(ExpressionVisitor):
     @visit.register
     def _(expr: ir.Min):
         pass
-
-
-def simplify_binop(expr: ir.BinOp):
-    repl = rewrite_if_matches_square(expr)
-    repl = rewrite_if_matches_square_root(repl)
-    repl = rewrite_if_matches_sign_flip(repl)
-    if repl == expr:
-        repl = expr
-    return repl
 
 
 class const_folding(ExpressionVisitor):

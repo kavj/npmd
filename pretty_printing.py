@@ -41,28 +41,8 @@ def get_pretty_type(t):
     return pt
 
 
-def check_precedence(node):
-    if isinstance(node, ir.ValueRef) and not isinstance(node, ir.Expression):
-        prec = 0
-    elif isinstance(node, (ir.Subscript, ir.Call, ir.Max, ir.Min, ir.Reversed)):
-        prec = 0
-    elif isinstance(node, ir.BinOp):
-        op = node.op
-        prec = binop_ordering[op]
-    elif isinstance(node, ir.UnaryOp):
-        prec = 2
-    elif isinstance(node, (ir.TRUTH, ir.NOT)):
-        prec = 10
-    elif isinstance(node, (ir.AND, ir.OR)):
-        prec = 11
-    elif isinstance(node, ir.OR):
-        prec = 12
-    elif isinstance(node, ir.Ternary):
-        prec = 13
-    else:
-        msg = f"Unable to evaluate precedence for node {node} of type {type(node)}."
-        raise ValueError(msg)
-    return prec
+def parenthesized(formatted):
+    return f"({formatted})"
 
 
 class pretty_formatter:
@@ -70,14 +50,12 @@ class pretty_formatter:
     The pretty printer is intended as a way to show the state of the IR in a way that resembles a
     typical source representation.
 
+    Note: This will parenthesize Tuples even in cases where they aren't really supported by the rest of
+    the code base. This is to avoid confusing formatting errors here.
 
     """
 
-    def __init__(self):
-        self.add_parentheses = False
-
     def __call__(self, node):
-        assert self.add_parentheses is False
         expr = self.visit(node)
         return expr
 
@@ -104,14 +82,14 @@ class pretty_formatter:
     @visit.register
     def _(self, node: ir.Ternary):
         test = self.visit(node.test)
-        if isinstance(node.test, ir.Ternary):
-            test = f"({test})"
+        if isinstance(node.test, (ir.Ternary, ir.Tuple)):
+            test = parenthesized(test)
         if_expr = self.visit(node.if_expr)
-        if isinstance(node.if_expr, ir.Ternary):
-            if_expr = f"({if_expr})"
+        if isinstance(node.if_expr, (ir.Ternary, ir.Tuple)):
+            if_expr = parenthesized(if_expr)
         else_expr = self.visit(node.else_expr)
-        if isinstance(node.else_expr, ir.Ternary):
-            else_expr = f"({else_expr})"
+        if isinstance(node.else_expr, (ir.Ternary, ir.Tuple)):
+            else_expr = parenthesized(else_expr)
         expr = f"{if_expr} if {test} else {else_expr}"
         return expr
 
@@ -133,38 +111,44 @@ class pretty_formatter:
         right = self.visit(node.right)
         op = node.op
         if not node.in_place:
-            node_order = check_precedence(node)
-            left_order = check_precedence(node.left)
-            right_order = check_precedence(node.right)
-            if node_order < left_order:
-                left = f"({left})"
-            if node_order < right_order:
-                right = f"({right})"
+            op_ordering = binop_ordering[op]
+            if isinstance(node.left, ir.BinOp):
+                if op_ordering < binop_ordering[left.op]:
+                    left = parenthesized(left)
+            elif isinstance(node.left, ir.UnaryOp):
+                if op == "**":
+                    left = parenthesized(left)
+            elif isinstance(node.left, (ir.BoolOp, ir.Ternary, ir.Tuple)):
+                left = parenthesized(left)
+            if isinstance(node.right, ir.BinOp):
+                if op_ordering < binop_ordering[right.op]:
+                    left = parenthesized(right)
+            elif isinstance(node.right, ir.UnaryOp):
+                if op == "**":
+                    left = parenthesized(left)
+            elif isinstance(node.right, (ir.BoolOp, ir.Ternary, ir.Tuple)):
+                right = parenthesized(right)
         expr = f"{left} {op} {right}"
         return expr
 
     @visit.register
     def _(self, node: ir.AND):
-        node_order = check_precedence(node)
         operands = []
         for operand in node.operands:
             formatted = self.visit(operand)
-            order = check_precedence(operand)
-            if node_order < order:
-                formatted = f"({formatted})"
+            if isinstance(operand, (ir.OR, ir.Ternary, ir.Tuple)):
+                formatted = parenthesized(formatted)
             operands.append(formatted)
         expr = " and ".join(operand for operand in operands)
         return expr
 
     @visit.register
     def _(self, node: ir.OR):
-        node_order = check_precedence(node)
         operands = []
         for operand in node.operands:
             formatted = self.visit(operand)
-            order = check_precedence(operand)
-            if node_order < order:
-                formatted = f"({formatted})"
+            if isinstance(operand, (ir.Ternary, ir.Tuple)):
+                formatted = parenthesized(formatted)
             operands.append(formatted)
         expr = " or ".join(operand for operand in operands)
         return expr
@@ -206,7 +190,7 @@ class pretty_formatter:
             expr = self.visit(e)
             # parenthesize nested tuples, leave everything else
             if isinstance(e, ir.Tuple):
-                expr = f"({expr})"
+                expr = parenthesized(expr)
             elements.append(expr)
         s = ", ".join(e for e in elements)
         return s
@@ -215,10 +199,15 @@ class pretty_formatter:
     def _(self, node: ir.UnaryOp):
         op = node.op
         operand = self.visit(node.operand)
-        if check_precedence(node) < check_precedence(node.operand):
-            expr = f"{op}({operand})"
-        else:
-            expr = f"{op}{operand}"
+        if isinstance(node.operand, ir.BinOp) and not node.operand.in_place:
+            if node.operand.op != "**":
+                operand = parenthesized(operand)
+        elif isinstance(node.operand, (ir.UnaryOp, ir.BoolOp, ir.Ternary)):
+            # if we have an unfolded double unary expression such as --,
+            # '--expr' would be correct but it's visually jarring. Adding
+            # unnecessary parentheses makes it '-(-expr)'.
+            operand = parenthesized(operand)
+        expr = f"{op}({operand})"
         return expr
 
     @visit.register
@@ -350,7 +339,7 @@ class pretty_printer:
     def _(self, node: ir.Function):
         name = node.name
         args = ", ".join(self.format(arg) for arg in node.args)
-        header = f"{name}({args}):"
+        header = f"def {name}({args}):"
         self.print_line(header)
         with self.indented():
             self.visit(node.body)

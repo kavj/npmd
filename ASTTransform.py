@@ -281,7 +281,7 @@ class TreeBuilder(ast.NodeVisitor):
                 expr = ir.OR(operands)
         return expr
 
-    def visit_Compare(self, node: ast.Compare) -> typing.Union[ir.BinOp, ir.BoolOp, ir.BoolConst]:
+    def visit_Compare(self, node: ast.Compare) -> typing.Union[ir.BinOp, ir.AND, ir.BoolConst]:
         left = self.visit(node.left)
         right = self.visit(node.comparators[0])
         op = compareops[type(node.ops[0])]
@@ -306,7 +306,7 @@ class TreeBuilder(ast.NodeVisitor):
                     # duplicate expressions.
                     seen.add(cmp)
                     compares.append(cmp)
-        return ir.BoolOp(tuple(compares), "and")
+        return ir.AND(tuple(compares))
 
     def visit_Call(self, node: ast.Call) -> typing.Union[ir.ValueRef, ir.NameRef, ir.Call]:
         if isinstance(node.func, ast.Name):
