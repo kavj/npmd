@@ -118,7 +118,7 @@ class pretty_formatter:
             elif isinstance(node.left, ir.UnaryOp):
                 if op == "**":
                     left = parenthesized(left)
-            elif isinstance(node.left, (ir.BoolOp, ir.Ternary, ir.Tuple)):
+            elif isinstance(node.left, (ir.BoolOp_, ir.Ternary, ir.Tuple)):
                 left = parenthesized(left)
             if isinstance(node.right, ir.BinOp):
                 if op_ordering < binop_ordering[right.op]:
@@ -126,7 +126,7 @@ class pretty_formatter:
             elif isinstance(node.right, ir.UnaryOp):
                 if op == "**":
                     left = parenthesized(left)
-            elif isinstance(node.right, (ir.BoolOp, ir.Ternary, ir.Tuple)):
+            elif isinstance(node.right, (ir.BoolOp_, ir.Ternary, ir.Tuple)):
                 right = parenthesized(right)
         expr = f"{left} {op} {right}"
         return expr
@@ -202,7 +202,7 @@ class pretty_formatter:
         if isinstance(node.operand, ir.BinOp) and not node.operand.in_place:
             if node.operand.op != "**":
                 operand = parenthesized(operand)
-        elif isinstance(node.operand, (ir.UnaryOp, ir.BoolOp, ir.Ternary)):
+        elif isinstance(node.operand, (ir.UnaryOp, ir.BoolOp_, ir.Ternary)):
             # if we have an unfolded double unary expression such as --,
             # '--expr' would be correct but it's visually jarring. Adding
             # unnecessary parentheses makes it '-(-expr)'.

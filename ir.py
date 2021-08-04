@@ -346,7 +346,7 @@ class CompareOp(Expression):
         yield self.right
 
 
-class BoolOp(Expression):
+class BoolOp_(Expression):
     """
     Boolean operation using a single logical operation and an arbitrary
     number of operands. Base class is used here to aggregate type checks.
@@ -357,7 +357,7 @@ class BoolOp(Expression):
 
 
 @dataclass(frozen=True)
-class OR(BoolOp):
+class OR(BoolOp_):
     """
     Boolean OR
     """
@@ -374,7 +374,7 @@ class OR(BoolOp):
 
 
 @dataclass(frozen=True)
-class AND(BoolOp):
+class AND(BoolOp_):
     """
     Boolean AND
     """
@@ -391,7 +391,7 @@ class AND(BoolOp):
 
 
 @dataclass(frozen=True)
-class XOR(BoolOp):
+class XOR(BoolOp_):
     """
     Boolean XOR
     """
@@ -408,7 +408,7 @@ class XOR(BoolOp):
 
 
 @dataclass(frozen=True)
-class TRUTH(BoolOp):
+class TRUTH(BoolOp_):
     """
     Truth test single operand
     """
@@ -423,7 +423,7 @@ class TRUTH(BoolOp):
 
 
 @dataclass(frozen=True)
-class NOT(BoolOp):
+class NOT(BoolOp_):
     """
     Boolean not
     """

@@ -1,6 +1,6 @@
 import os.path
 
-from ASTTransform import build_module_ir
+from ASTTransform import parse_file
 from Canonicalize import RemoveContinues, MergePaths
 from reachingcheck import ReachingCheck
 from pretty_printing import pretty_printer
@@ -8,13 +8,9 @@ from pretty_printing import pretty_printer
 
 def run_tree_pipeline(pth, types):
     print("filepath: ", pth)
-    with open(pth) as r:
-        r = r.read()
-    remove_continues = RemoveContinues()
     reaching_check = ReachingCheck()
-    merge_paths = MergePaths()
     filename = os.path.basename(pth)
-    module, symbol_tables = build_module_ir(r, filename, types)
+    module, symbol_tables = parse_file(pth, types)
     repl = []
     pp = pretty_printer()
     for func in module.functions:

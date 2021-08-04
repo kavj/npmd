@@ -6,11 +6,13 @@ import symtable
 import warnings
 
 from contextlib import contextmanager
+from pathlib import Path
 
 import ir
+from errors import CompilerError
 from symbol_table import symbol_table_from_pysymtable, wrap_input
 from Canonicalize import replace_builtin_call
-from lowering import const_folding, make_loop_counter, unpack_assignment, unpack_iterated
+from lowering import const_folding, unpack_assignment, unpack_iterated
 
 binaryops = {ast.Add: "+",
              ast.Sub: "-",
@@ -514,7 +516,7 @@ def map_functions_by_name(node: ast.Module):
     return by_name
 
 
-def build_module_ir(src, file_name, type_map):
+def parse_file(file_name, type_map):
     """
     Module level point of entry for IR construction.
 
@@ -532,20 +534,27 @@ def build_module_ir(src, file_name, type_map):
    
     """
 
-    tree = ast.parse(src, filename=file_name)
-    tree = ast.fix_missing_locations(tree)
-    import_map = ImportHandler().visit(tree)
-    func_asts_by_name = map_functions_by_name(tree)
-    funcs = []
-    module_symtable = symtable.symtable(src, file_name, "exec")
-    build_func_ir = TreeBuilder()
-    symbol_tables = {}
-    for func_name, ast_entry_point in func_asts_by_name.items():
-        table = module_symtable.lookup(func_name).get_namespace()
-        func_type_map = type_map[func_name]
-        symbols = symbol_table_from_pysymtable(table, import_map, func_type_map, file_name)
-        symbol_tables[func_name] = symbols
-        func_ir = build_func_ir(ast_entry_point, symbols)
-        funcs.append(func_ir)
+    path = Path(file_name)
+    if not path.is_file():
+        msg = f"Cannot resolve path to source {path.absolute()}"
+        raise CompilerError(msg)
+
+    with open(path) as src_stream:
+        src_text = src_stream.read()
+        syntax_tree = ast.parse(src_text, filename=path.name)
+        syntax_tree = ast.fix_missing_locations(syntax_tree)
+        import_map = ImportHandler().visit(syntax_tree)
+        funcs_by_name = map_functions_by_name(syntax_tree)
+        funcs = []
+        module_symtable = symtable.symtable(src_text, file_name, "exec")
+        build_func_ir = TreeBuilder()
+        symbol_tables = {}
+        for func_name, ast_entry_point in funcs_by_name.items():
+            table = module_symtable.lookup(func_name).get_namespace()
+            func_type_map = type_map[func_name]
+            symbols = symbol_table_from_pysymtable(table, import_map, func_type_map, file_name)
+            symbol_tables[func_name] = symbols
+            func_ir = build_func_ir(ast_entry_point, symbols)
+            funcs.append(func_ir)
 
     return ir.Module(funcs, import_map), symbol_tables
