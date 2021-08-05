@@ -1,5 +1,2 @@
-
-
-def f(x,y):
-    print(x,y)
-
+def f(x, y):
+    print(x, y)

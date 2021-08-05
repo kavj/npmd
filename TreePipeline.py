@@ -1,32 +1,39 @@
-from ASTTransform import build_module_ir
+import os.path
+
+from ASTTransform import parse_file
 from Canonicalize import RemoveContinues, MergePaths
-from folding import fold_constant_expressions
 from reachingcheck import ReachingCheck
-from lowering import loop_lower
+from pretty_printing import pretty_printer
 
 
-def run_tree_pipeline(pth):
+def run_tree_pipeline(pth, types):
     print("filepath: ", pth)
-    with open(pth) as r:
-        r = r.read()
-    remove_continues = RemoveContinues()
     reaching_check = ReachingCheck()
-    merge_paths = MergePaths()
-    ll = loop_lower("lindex")
-    mod = build_module_ir(r)
+    filename = os.path.basename(pth)
+    module, symbol_tables = parse_file(pth, types)
     repl = []
-    for func in mod.funcs:
-        func = merge_paths(func)
-        func = fold_constant_expressions(func)
-        func = merge_paths(func)
-        func = fold_constant_expressions(func)
-        func = remove_continues(func)
-        func = ll(func)
-        repl.append(func)
+    pp = pretty_printer()
+    for func in module.functions:
+        pp(func, symbol_tables[func.name])
+        print("\n\n")
+        # func = merge_paths(func)
+        # P(func)
+        # print("\n\n")
+        # func = fold_constant_expressions(func)
+        # P(func)
+        # print("\n\n")
+        # func = merge_paths(func)
+        # P(func)
+        # print("\n\n")
+        # func = fold_constant_expressions(func)
+        # P(func)
+        # print("\n\n")
+        # func = remove_continues(func)
+        # repl.append(func)
 
-    mod.funcs = repl
+    module.functions = repl
     unbound = []
-    for func in mod.funcs:
+    for func in module.functions:
         u = reaching_check(func)
         unbound.append(u)
     for u in unbound:
@@ -37,4 +44,4 @@ def run_tree_pipeline(pth):
             print("used:", key, "\n")
         for key in war:
             print("overwritten after read:", key, "\n")
-    return mod
+    return module, symbol_tables

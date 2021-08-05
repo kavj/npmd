@@ -1,19 +1,16 @@
-
-
-
-def both_term(a,b,c,d,e,f):
+def both_term(a, b, c, d, e, f):
     if a > b:
         for k in c:
             print(k)
             if k != 2:
                 continue
-                for m in n: 
+                for m in n:
                     print(m)
             else:
                 k += 3
                 for m in n:
                     print(m)
-                break    
+                break
             for m in n:
                 print("should not appear")
         return

@@ -1,17 +1,51 @@
 from __future__ import annotations
 
-import itertools
 import numbers
 import operator
 import typing
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from functools import cached_property
+
 
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
 inplace_ops = frozenset({"+=", "-=", "*=", "/=", "//=", "%=", "**=", "<<=", ">>=", "|=", "^=", "&=", "@="})
 unaryops = frozenset({"+", "-", "~", "not"})
-boolops = frozenset({"and", "or"})
+boolops = frozenset({"and", "or", "xor"})
 compareops = frozenset({"==", "!=", "<", "<=", ">", ">=", "is", "isnot", "in", "notin"})
+
+oop_to_inplace = {
+    "+": "+=",
+    "-": "-=",
+    "*": "*=",
+    "/": "/=",
+    "//": "//=",
+    "%": "%=",
+    "**": "**=",
+    "<<": "<<=",
+    ">>": ">>=",
+    "|": "|=",
+    "^": "^=",
+    "&": "&=",
+    "@": "@=",
+}
+
+inplace_to_oop = {
+    "+=": "+",
+    "-=": "-",
+    "*=": "*",
+    "/=": "/",
+    "//=": "//",
+    "%=": "%",
+    "**=": "**",
+    "<<=": "<<",
+    ">>=": ">>",
+    "|=": "|",
+    "^=": "^",
+    "&=": "&",
+    "@=": "@",
+}
+
 
 supported_builtins = frozenset({'iter', 'range', 'enumerate', 'zip', 'all', 'any', 'max', 'min', 'abs', 'pow',
                                 'round', 'reversed'})
@@ -28,142 +62,156 @@ class Position:
 clscond = typing.ClassVar[bool]
 
 
-class Walkable(ABC):
+@dataclass(frozen=True)
+class ScalarType:
 
-    @abstractmethod
-    def walk(self):
-        raise NotImplementedError
+    bits: int
+    integral: bool
+    boolean: bool
 
 
 class StmtBase:
-    is_loop_entry: clscond = False  # ForLoop, WhileLoop
-    is_terminator: clscond = False  # Continue, Break, Return
-    # statments that overwrite variable names or array indices within scope
-    clobbers: clscond = False  # Assign, ForLoop
+    pos = None
 
 
 Statement = typing.TypeVar('Statement', bound=StmtBase)
 
 
-class Expression:
+class ValueRef(ABC):
     """
     This is the start of a base class for expressions.
-    
-    For our purposes, we distinguish an expression from a value by asking whether it can be 
-    an assignment target. 
+
+    For our purposes, we distinguish an expression from a value by asking whether it can be
+    an assignment target.
 
     The term 'expression_like' is used elsewhere in the code to include mutable targets, where
     assignment alters a data structure as opposed to simply binding a value to a name.
 
     """
 
-    subscripted: clscond = False
+    constant: clscond = False
+
+    @property
+    def as_constant(self):
+        return self
+
+
+class Expression(ValueRef):
 
     @property
     @abstractmethod
     def subexprs(self):
         raise NotImplementedError
 
-    @property
-    def constant(self):
-        return all(se.constant for se in self.subexprs)
 
-    def post_order_walk(self):
-        """
-        Walk sub-expressions of node in post order, ignoring duplicates.
-
-        """
-
-        seen = set()
-        queued: typing.List[typing.Tuple[typing.Optional[Expression], typing.Generator]] = [(None, self.subexprs)]
-
-        while queued:
-            try:
-                e = next(queued[-1][1])
-                if e in seen:
-                    continue
-                seen.add(e)
-                if isinstance(e, Expression):
-                    queued.append((e, e.subexprs))
-                else:
-                    yield e
-            except StopIteration:
-                e, _ = queued.pop()
-                # ignore the original node we're walking
-                if queued:
-                    yield e
-
-
-class Constant:
+class Constant(ValueRef):
     """
     Base class for anything that can be the target of an assignment. 
 
     """
+    value: clscond = None
     constant: clscond = True
-    subscripted: clscond = False
-    value: typing.ClassVar = None
 
     def __bool__(self):
         return operator.truth(self.value)
 
 
 @dataclass(frozen=True)
-class AttributeRef:
-    """
-    Limited number of attributes are read only.
-
-    """
-    value: NameRef
-    attr: typing.Tuple[str]
-    constant: clscond = False
-
-
-@dataclass(frozen=True)
-class BoolNode(Constant):
+class BoolConst(Constant):
     value: bool
-    constant: clscond = True
+
+    def __post_init__(self):
+        assert isinstance(self.value, bool)
 
 
 @dataclass(frozen=True)
-class EllipsisNode(Constant):
-    # singleton class
-    value: typing.Any = Ellipsis
-
-
-@dataclass(frozen=True)
-class FloatNode(Constant):
+class FloatConst(Constant):
     value: numbers.Real
 
+    def __post_init__(self):
+        assert isinstance(self.value, numbers.Real)
+
 
 @dataclass(frozen=True)
-class IntNode(Constant):
+class IntConst(Constant):
     value: numbers.Integral
 
+    def __post_init__(self):
+        assert isinstance(self.value, numbers.Integral)
 
-@dataclass(frozen=True)
-class StringNode(Constant):
-    value: str
+
+# commonly used
+
+Zero = IntConst(0)
+One = IntConst(1)
 
 
 # Top Level
 
+
 @dataclass(frozen=True)
-class NameRef:
+class NameRef(ValueRef):
     # variable name ref
-    name: typing.Union[str, AttributeRef]
-    constant: clscond = False
-    subscripted: clscond = False
+    name: str
 
 
-ValueRef = typing.TypeVar('ValueRef', Expression, Constant, NameRef, AttributeRef)
+@dataclass(frozen=True)
+class ArrayType(ValueRef):
+    ndims: int
+    dtype: typing.Hashable
+
+
+@dataclass(frozen=True)
+class ArrayRef(ValueRef):
+    name: NameRef
+    dims: typing.Tuple[typing.Union[NameRef, IntConst], ...]
+    dtype: typing.Hashable
+
+    @property
+    def base(self):
+        return self
+
+    @property
+    def ndims(self):
+        return len(self.dims)
+
+
+@dataclass(frozen=True)
+class ViewRef:
+    # name: NameRef
+    base: typing.Union[ArrayRef, ViewRef]
+    slice: typing.Optional[typing.Union[IntConst, Slice, NameRef, BinOp, UnaryOp]]
+    transposed: bool
+
+    @cached_property
+    def dtype(self):
+        return self.base.dtype
+
+    @cached_property
+    def ndims(self):
+        if isinstance(self.slice, Slice):
+            return self.base.ndims
+        else:
+            return self.base.ndims - 1
+
+    @cached_property
+    def name(self):
+        return self.base.name
+
+
+@dataclass(frozen=True)
+class Length(Expression):
+    value: ValueRef
+
+    @property
+    def subexprs(self):
+        yield self.value
 
 
 @dataclass(frozen=True)
 class Subscript(Expression):
     value: ValueRef
     slice: ValueRef
-    constant: clscond = False
-    subscripted: clscond = True
 
     @property
     def subexprs(self):
@@ -172,81 +220,36 @@ class Subscript(Expression):
 
 
 @dataclass(frozen=True)
-class Argument:
-    name: NameRef
-    annot: str = None
-    commt: str = None
-    defaultvalue: typing.Any = None
-    constant: clscond = False
-    subscripted: clscond = False
-
-
-@dataclass(frozen=True)
-class ArrayType:
-    # This is necessary to easily describe the type of an otherwise anonymous subscript,
-    # particularly in cases of subscripts that are not bound to explicit array references.
-    ndims: int
-    dtype: type
-    constant: clscond = False
-    subscripted: clscond = False
-
-
-@dataclass(frozen=True)
-class ArrayRef:
-    atype: ArrayType
-    base: typing.Optional[typing.Union[NameRef, Subscript]] = None
-    # assume contiguous unless specified otherwise due to striding in
-    # array creation expression or input typing parameters
-    is_contiguous: bool = True
-    constant: clscond = False
-    subscripted: clscond = False
-
-    # def __post_init__(self):
-    #    assert (self.dims is None or (self.ndims == len(self.dims)))
-
-    @property
-    def is_view(self):
-        return self.base is not None
-
-    @property
-    def ndims(self):
-        return self.atype.ndims
-
-    @property
-    def dtype(self):
-        return self.atype.dtype
-
-
-@dataclass(frozen=True)
-class ShapeRef(Expression):
-    array: typing.Any
-    dim: typing.Optional[ValueRef] = None
-
-    @property
-    def ndims(self):
-        return self.array.ndims
+class Min(Expression):
+    """
+    Min iteration count over a number of counters
+    """
+    values: typing.Tuple[ValueRef, ...]
 
     @property
     def subexprs(self):
-        yield self.array
-        yield self.dim
+        for subexpr in self.values:
+            yield subexpr
 
-    # not quite constant since it can refer to single definitions
-    # which appear in loops
-    constant: typing.ClassVar[bool] = False
+
+@dataclass(frozen=True)
+class Max(Expression):
+    """
+    Max iteration count over a number of counters
+    """
+    values: typing.Tuple[ValueRef, ...]
+
+    @property
+    def subexprs(self):
+        for subexpr in self.values:
+            yield subexpr
 
 
 @dataclass
-class Function(Walkable):
+class Function:
     name: str
-    args: typing.List[Argument]
+    args: typing.List[NameRef]
     body: typing.List[Statement]
-    types: typing.List[type]
-    arrays: typing.List[ArrayRef]
-
-    def walk(self):
-        for n in self.body:
-            yield n
 
 
 @dataclass
@@ -256,7 +259,7 @@ class Module:
 
     """
 
-    funcs: typing.List[Function]
+    functions: typing.List[Function]
     imports: typing.List[typing.Any]
 
 
@@ -269,9 +272,9 @@ class Slice(Expression):
 
     """
 
-    start: typing.Union[NameRef, IntNode]
-    stop: typing.Optional[typing.Union[NameRef, IntNode]]
-    step: typing.Union[NameRef, IntNode]
+    start: typing.Union[NameRef, IntConst]
+    stop: typing.Optional[typing.Union[NameRef, IntConst]]
+    step: typing.Union[NameRef, IntConst]
 
     @property
     def subexprs(self):
@@ -281,39 +284,7 @@ class Slice(Expression):
 
 
 @dataclass(frozen=True)
-class Unsupported(Expression):
-    name: str
-    msg: str
-
-    # dummy class, just treats expression as a protocol
-    @property
-    def subexprs(self):
-        raise StopIteration
-
-
-@dataclass(frozen=True)
 class Tuple(Expression):
-    """
-    High level sentinel matching a tuple.
-    These cannot be directly assigned but may be unpacked as they enter scope.
-
-    They also arise in loop unpacking and variable permutations.
-
-    For example, constructs such as zip generate tuple valued outputs, which are typically immediately unpacked.
-
-    for u,v in zip(a,b):
-       ...
-
-    Tuples can also be used to indicate variable permutations.
-
-    b, a, d, c = a, b, c, d
-
-    Tuples are commonly used to hold array dimensions.
-
-    dim_zero, dim_one = array.shape
-
-    """
-
     elements: typing.Tuple[ValueRef, ...]
 
     def __post_init__(self):
@@ -323,6 +294,10 @@ class Tuple(Expression):
     def subexprs(self):
         for e in self.elements:
             yield e
+
+    @property
+    def length(self):
+        return len(self.elements)
 
 
 Targetable = typing.TypeVar('Targetable', NameRef, Subscript, Tuple)
@@ -336,42 +311,127 @@ class BinOp(Expression):
 
     def __post_init__(self):
         assert (self.op in binaryops or self.op in inplace_ops or self.op in compareops)
+        if self.in_place:
+            # ensure things like -a += b are treated as compiler errors.
+            # These shouldn't even pass the parser if caught in source but
+            # could be accidentally created internally.
+            assert isinstance(self.left, (NameRef, Subscript))
 
     @property
     def subexprs(self):
         yield self.left
         yield self.right
 
-    @property
+    @cached_property
     def is_compare_op(self):
         return self.op in compareops
 
-    @property
+    @cached_property
     def in_place(self):
         return self.op in inplace_ops
 
 
+# Compare ops are once again their own class,
+# since they cannot be in place like binops
+
+
 @dataclass(frozen=True)
-class BoolOp(Expression):
+class CompareOp(Expression):
+    left: ValueRef
+    right: ValueRef
+    op: str
+
+    def subexprs(self):
+        yield self.left
+        yield self.right
+
+
+class BoolOp_(Expression):
     """
     Boolean operation using a single logical operation and an arbitrary
-    number of operands. 
-
-    Comparisons between expressions are compared without modification.
+    number of operands. Base class is used here to aggregate type checks.
 
     """
 
+    pass
+
+
+@dataclass(frozen=True)
+class OR(BoolOp_):
+    """
+    Boolean OR
+    """
     operands: typing.Tuple[ValueRef, ...]
-    op: str
 
     def __post_init__(self):
         assert (isinstance(self.operands, tuple))
-        assert self.op in boolops
+        assert len(self.operands) >= 2
 
     @property
     def subexprs(self):
         for operand in self.operands:
             yield operand
+
+
+@dataclass(frozen=True)
+class AND(BoolOp_):
+    """
+    Boolean AND
+    """
+    operands: typing.Tuple[ValueRef, ...]
+
+    def __post_init__(self):
+        assert (isinstance(self.operands, tuple))
+        assert len(self.operands) >= 2
+
+    @property
+    def subexprs(self):
+        for operand in self.operands:
+            yield operand
+
+
+@dataclass(frozen=True)
+class XOR(BoolOp_):
+    """
+    Boolean XOR
+    """
+    operands: typing.Tuple[ValueRef, ...]
+
+    def __post_init__(self):
+        assert (isinstance(self.operands, tuple))
+        assert len(self.operands) >= 2
+
+    @property
+    def subexprs(self):
+        for operand in self.operands:
+            yield operand
+
+
+@dataclass(frozen=True)
+class TRUTH(BoolOp_):
+    """
+    Truth test single operand
+    """
+    operands: ValueRef
+
+    def __post_init__(self):
+        assert isinstance(self.operands, ValueRef)
+
+    @property
+    def subexprs(self):
+        yield self.operands
+
+
+@dataclass(frozen=True)
+class NOT(BoolOp_):
+    """
+    Boolean not
+    """
+
+    operands: ValueRef
+
+    def __post_init__(self):
+        assert isinstance(self.operands, ValueRef)
 
 
 @dataclass(frozen=True)
@@ -382,7 +442,7 @@ class Call(Expression):
 
     """
 
-    funcname: str
+    func: NameRef
     args: typing.Tuple[ValueRef, ...]
     # expressions must be safely hashable, so we can't use a dictionary here
     keywords: typing.Tuple[typing.Tuple[str, ValueRef], ...]
@@ -394,58 +454,25 @@ class Call(Expression):
     def subexprs(self):
         for arg in self.args:
             yield arg
-
-    @property
-    def arg_count(self):
-        return len(self.args)
-
-    @property
-    def kwarg_count(self):
-        return len(self.keywords)
+        for kw, arg in self.keywords:
+            yield arg
 
     def has_keyword(self, kw):
         return any(keyword == kw for (keyword, _) in self.keywords)
 
 
 @dataclass(frozen=True)
-class MinConstraint(Expression):
+class AffineSeq(Expression):
     """
-    used primarily for lowering for loops with zip and enumerate
+    This captures range, enumerate, and some generated access functions.
     """
-    constraints: set
-
-    @property
-    def subexprs(self):
-        for c in self.constraints:
-            yield c
-
-
-@dataclass(frozen=True)
-class Counter(Expression):
-    """
-    This is used to distinguish either an unpacked counter of an enumerate
-    expression or a range operation. For our purposes, the difference is that
-    range may have a non-unit step and must have a stop parameter.
-
-
-    This is used to distinguish an unpacked counter of an enumerate expression.
-    It's primarily used to assist in unpacking. Otherwise the common pattern
-
-    for index, value in enumerate(iterable):
-        ...
-
-    has the serialized header representation
-
-    [(index, Counter(IntNode(0), None, IntNode(1))), (value, iterable)]
-
-    """
-
     start: ValueRef
     stop: typing.Optional[ValueRef]
     step: ValueRef
 
-    is_iterator_like: clscond = True
-    is_counter: clscond = True
+    @property
+    def reversed(self):
+        raise NotImplementedError
 
     @property
     def subexprs(self):
@@ -456,7 +483,7 @@ class Counter(Expression):
 
 
 @dataclass(frozen=True)
-class IfExpr(Expression):
+class Ternary(Expression):
     """
     A Python if expression.
     
@@ -481,7 +508,6 @@ class Reversed(Expression):
     """
 
     iterable: ValueRef
-    is_iterator_like: clscond = True
 
     @property
     def subexprs(self):
@@ -505,7 +531,7 @@ class UnaryOp(Expression):
 class Zip(Expression):
     """
     High level sentinel representing a zip object. This is the only unpackable iterator type in this IR.
-    Enumerate(object) is handled by Zip(Counter, object).
+    Enumerate(object) is handled by Zip(AffineSeq, object).
     """
 
     elements: typing.Tuple[ValueRef, ...]
@@ -518,6 +544,10 @@ class Zip(Expression):
         for e in self.elements:
             yield e
 
+    @property
+    def length(self):
+        return len(self.elements)
+
 
 @dataclass
 class Assign(StmtBase):
@@ -529,10 +559,6 @@ class Assign(StmtBase):
     target: Targetable
     value: ValueRef
     pos: Position
-    # Record optional annotation, since we need to check
-    # reachability before applying.
-    annot: str = None
-    clobbers: clscond = True
 
     @property
     def in_place(self):
@@ -548,57 +574,41 @@ class SingleExpr(StmtBase):
 @dataclass
 class Break(StmtBase):
     pos: Position
-    is_terminator: clscond = True
 
 
 @dataclass
 class Continue(StmtBase):
     pos: Position
-    is_terminator: clscond = True
 
 
 @dataclass
-class ForLoop(StmtBase, Walkable):
-    assigns: typing.List[typing.Tuple[Targetable, ValueRef]]
+class ForLoop(StmtBase):
+    target: ValueRef
+    iterable: ValueRef
     body: typing.List[Statement]
     pos: Position
-    is_loop_entry: clscond = True
-    clobbers: clscond = True
-
-    def walk(self):
-        for stmt in self.body:
-            yield stmt
-
-    def walk_assignments(self):
-        for target, value in self.assigns:
-            yield target, value
 
 
 @dataclass
-class IfElse(StmtBase, Walkable):
+class IfElse(StmtBase):
     test: ValueRef
     if_branch: typing.List[Statement]
     else_branch: typing.List[Statement]
     pos: Position
-    is_conditional_branch: clscond = True
-
-    def walk(self):
-        for stmt in itertools.chain(self.if_branch, self.else_branch):
-            yield stmt
 
 
 @dataclass
 class ModImport(StmtBase):
-    mod: str
-    asname: str
+    module: NameRef
+    as_name: NameRef
     pos: Position
 
 
 @dataclass
 class NameImport(StmtBase):
-    mod: str
-    name: str
-    asname: str
+    module: NameRef
+    name: NameRef
+    as_name: NameRef
     pos: Position
 
 
@@ -611,55 +621,10 @@ class Pass(StmtBase):
 class Return(StmtBase):
     value: typing.Optional[ValueRef]
     pos: Position
-    is_terminator: clscond = True
 
 
 @dataclass
-class WhileLoop(StmtBase, Walkable):
+class WhileLoop(StmtBase):
     test: ValueRef
     body: typing.List[Statement]
     pos: Position
-    is_loop_entry: clscond = True
-
-    def walk(self):
-        for n in self.body:
-            yield n
-
-
-# utility nodes
-
-@dataclass(frozen=True)
-class IntegralType:
-    bit_width: int
-    is_numpy_dtype: bool
-    is_signed: bool
-
-
-@dataclass(frozen=True)
-class FloatType:
-    """
-    Used to aggregate numpy and python floating point types
-
-    """
-
-    bit_width: int
-    is_numpy_dtype: bool
-    is_signed: clscond = True
-
-
-@dataclass(frozen=True)
-class Cast(Expression):
-    expr: ValueRef
-    as_type: type
-
-    @property
-    def is_integral(self):
-        return issubclass(self.as_type, numbers.Integral)
-
-    @property
-    def is_float(self):
-        return issubclass(self.as_type, numbers.Real)
-
-    @property
-    def subexprs(self):
-        yield self.expr

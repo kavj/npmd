@@ -1,8 +1,7 @@
-
-
-def examp(a,b,c):
+def examp(a, b, c):
     if a < b:
+        a = a + 4
         print(a)
     elif c < b:
-        print(c)
-
+        b = a - 5
+        print(b, c)

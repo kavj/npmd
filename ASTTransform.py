@@ -1,10 +1,18 @@
 import ast
-import numbers
+import operator
 import sys
 import typing
+import symtable
+import warnings
+
+from contextlib import contextmanager
+from pathlib import Path
 
 import ir
-from replace_call import replace_builtin_call
+from errors import CompilerError
+from symbol_table import symbol_table_from_pysymtable, wrap_input
+from Canonicalize import replace_builtin_call
+from lowering import const_folding, unpack_assignment, unpack_iterated
 
 binaryops = {ast.Add: "+",
              ast.Sub: "-",
@@ -57,63 +65,6 @@ supported_builtins = {"iter", "range", "enumerate", "zip", "all", "any", "max", 
                       "round", "reversed"}
 
 
-def serialize_iterated_assignments(target, iterable) -> typing.List[typing.Tuple[ir.Targetable, ir.ValueRef]]:
-    """
-    Serializes (target, iterable) pairs by unpacking order
-    """
-    if (isinstance(target, ir.Tuple)
-            and isinstance(iterable, ir.Zip)
-            and len(target.elements) == len(iterable.elements)):
-
-        queued = [zip(target.elements, iterable.elements)]
-        assigns = []
-
-        while queued:
-            try:
-                t, v = next(queued[-1])
-                if (isinstance(t, ir.Tuple)
-                        and isinstance(v, ir.Zip)
-                        and len(t.elements) == len(v.elements)):
-                    queued.append(zip(t.elements, v.elements))
-                else:
-                    assigns.append((t, v))
-            except StopIteration:
-                queued.pop()
-    else:
-        assigns = [(target, iterable)]
-
-    return assigns
-
-
-def serialize_assignments(node: ir.Assign):
-    """
-    This is here to break things like
-
-    (a,b,c,d) = (b,d,c,a)
-
-    into a series of assignments, since these are somewhat rare, and explicitly lowering them
-    to shuffles is not worthwhile here.
-
-    """
-    if not isinstance(node.target, ir.Tuple) or not isinstance(node.value, ir.Tuple) \
-            or len(node.target.elements) != len(node.value.elements):
-        return [node]
-
-    queued = [zip(node.target.elements, node.value.elements)]
-    assigns = []
-    while queued:
-        try:
-            t, v = next(queued[-1])
-            if (isinstance(node.target, ir.Tuple)
-                    and isinstance(node.value, ir.Tuple)
-                    and len(node.target.elements) == len(node.value.elements)):
-                queued.append(zip(t.elements, v.elements))
-            else:
-                assigns.append(ir.Assign(t, v, node.pos))
-        except StopIteration:
-            queued.pop()
-
-
 def is_ellipsis(node):
     vi = sys.version_info
     if vi.major != 3 or vi.minor < 8:
@@ -125,24 +76,6 @@ def is_ellipsis(node):
     return False
 
 
-def build_func_params(node: ast.FunctionDef):
-    typer = AnnotationCollector()
-    params = []
-    default_value_count = len(node.args.defaults)
-    arg_count = len(node.args.args)
-    for i in range(arg_count):
-        arg = node.args.args[arg_count - i - 1]
-        if i < default_value_count:
-            dv = node.args.defaults[default_value_count - i - 1]
-        else:
-            dv = None
-        annot = typer(arg.annotation) if arg.annotation else None
-        commt = typer(arg.type_comment) if arg.type_comment else None
-        params.append(ir.Argument(ir.NameRef(arg.arg), annot, commt, dv))
-    params.reverse()
-    return params
-
-
 def extract_positional_info(node):
     return ir.Position(line_begin=node.lineno,
                        line_end=node.end_lineno,
@@ -150,109 +83,141 @@ def extract_positional_info(node):
                        col_end=node.end_col_offset)
 
 
-class AnnotationCollector(ast.NodeVisitor):
+class ImportHandler(ast.NodeVisitor):
     """
-    This tries to parse anything the grammar can handle.
+    This is used to replace source aliases with fully qualified names.
 
     """
 
-    def __call__(self, node):
-        return self.visit(node)
+    def __init__(self):
+        self.import_map = None
+        self.bound_names = None
 
-    def visit_Attribute(self, node: ast.Attribute):
-        value = self.visit(node.value)
-        if isinstance(value, ir.AttributeRef):
-            value = ir.AttributeRef(value.value, value.attr + node.attr)
-        else:
-            value = ir.AttributeRef(value, (node.attr,))
-        return value
+    @contextmanager
+    def make_context(self):
+        self.bound_names = set()
+        self.import_map = {}
+        yield
+        self.bound_names = None
+        self.import_map = None
 
-    def visit_Constant(self, node: ast.Constant):
-        if is_ellipsis(node.value):
-            raise NotImplementedError("Ellipsis is not yet supported.")
-        if isinstance(node.value, str):
-            return ir.StringNode(node.value)
-        elif isinstance(node.value, numbers.Integral):
-            return ir.IntNode(node.value)
-        elif isinstance(node.value, numbers.Real):
-            return ir.FloatNode(node.value)
-        else:
-            raise TypeError("unrecognized constant type")
-
-    def visit_Name(self, node: ast.Name):
-        return ir.NameRef(node.id)
-
-    def visit_Subscript(self, node: ast.Subscript):
-        if isinstance(node.value, ast.Subscript):
-            raise NotImplementedError("Annotations aren't supported with nested subscripts")
-        target = self.visit(node.value)
-        s = self.visit(node.slice)
-        if isinstance(target, ir.Subscript):
-            # annotations can't have consecutive subscripts like name[...][...]
-            raise ValueError
-        return ir.Subscript(target, s)
-
-    def visit_Index(self, node: ast.Index):
-        return self.visit(node.value)
-
-    def visit_Slice(self, node: ast.Slice):
-        lower = self.visit(node.lower) if node.lower is not None else None
-        upper = self.visit(node.upper) if node.upper is not None else None
-        step = self.visit(node.step) if node.step is not None else None
-        return ir.Slice(lower, upper, step)
+    def visit_Module(self, node):
+        with self.make_context():
+            for n in node.body:
+                if isinstance(n, (ast.Import, ast.ImportFrom)):
+                    self.visit(n)
+            import_map = self.import_map
+        return import_map
 
     def generic_visit(self, node):
-        raise NotImplementedError(f"{type(node)} is not supported here for type annotations.")
+        # ignore anything that isn't an import
+        pass
+
+    def visit_Import(self, node):
+        # import modules only
+        imported_mods = set()
+        pos = extract_positional_info(node)
+        for name in node.names:
+            module_name = ir.NameRef(name.name)
+            module_alias = ir.NameRef(name.asname) if hasattr(name, "asname") else module_name
+            if module_alias in self.bound_names:
+                msg = f"Module alias {module_alias.name} to module {module_name.name}" \
+                      f" shadows a previously bound name."
+                raise ValueError(msg)
+            mod_import = ir.ModImport(module_name, module_alias, pos)
+            self.import_map[module_alias] = mod_import
+            self.bound_names.add(module_alias)
+
+    def visit_ImportFrom(self, node):
+        module_name = ir.NameRef(node.module)
+        pos = extract_positional_info(node)
+        for name in node.names:
+            # assume alias node
+            imported_name = ir.NameRef(name.name)
+            import_alias = ir.NameRef(name.asname) if hasattr(name, "asname") else imported_name
+            if import_alias in self.bound_names:
+                msg = "Name {import_alias} overwrites an existing assignment."
+                raise ValueError(msg)
+            import_ref = ir.NameImport(module_name, imported_name, import_alias, pos)
+            self.import_map[import_alias] = import_ref
+            self.bound_names.add(import_alias)
 
 
 class TreeBuilder(ast.NodeVisitor):
 
-    def __call__(self, entry: ast.FunctionDef):
-        self.loops = []
-        self.nested_scopes = []
+    def __init__(self):
+        self.body = None
+        self.entry = None
+        self.enclosing_loop = None
+        self.symbols = None
+        self.renaming = None
+        self.fold_if_constant = const_folding()
+
+    @contextmanager
+    def function_context(self, entry, symbols):
+        self.enclosing_loop = None
         self.entry = entry
-        func = self.visit(entry)
-        assert (not self.loops)
-        return func, self.nested_scopes
+        self.symbols = symbols
+        self.renaming = {}
+        self.body = []
+        yield
+        assert self.enclosing_loop is None
+        self.entry = None
+        self.symbols = None
+        self.renaming = None
+        self.body = None
 
-    def visit_body(self, stmts: list):
-        body = []
-        for stmt in stmts:
-            ir_stmt = self.visit(stmt)
-            if isinstance(ir_stmt, list):
-                body.extend(ir_stmt)
-            else:
-                body.append(ir_stmt)
-        return body
+    def __call__(self, entry: ast.FunctionDef, symbols):
+        with self.function_context(entry, symbols):
+            func = self.visit(entry)
+        return func
 
-    def visit_Attribute(self, node: ast.Attribute) -> ir.AttributeRef:
+    @contextmanager
+    def loop_region(self, header):
+        stashed = self.body
+        enclosing = self.enclosing_loop
+        self.body = []
+        self.enclosing_loop = header
+        yield
+        self.enclosing_loop = enclosing
+        self.body = stashed
+
+    @contextmanager
+    def flow_region(self):
+        stashed = self.body
+        self.body = []
+        yield
+        self.body = stashed
+
+    def is_local_variable_name(self, name: ir.NameRef):
+        name = name.name
+        return name in self.symbols.src_locals
+
+    def visit_Attribute(self, node: ast.Attribute) -> ir.NameRef:
         value = self.visit(node.value)
-        if node.attr == "shape":
-            value = ir.ShapeRef(value)
-        elif isinstance(value, ir.AttributeRef):
-            value = ir.AttributeRef(value.value, value.attr + node.attr)
+        if isinstance(value, ir.NameRef):
+            name = f"{value.name}.{node.attr}"
+            value = ir.NameRef(name)
         else:
-            value = ir.AttributeRef(value, (node.attr,))
+            msg = f"Attributes are only supported when attached to names, like 'module.function', received {node}."
+            raise NotImplementedError(msg)
         return value
 
     def visit_Constant(self, node: ast.Constant) -> ir.Constant:
         if is_ellipsis(node.value):
-            raise TypeError
-        if isinstance(node.value, str):
-            return ir.StringNode(node.value)
-        elif isinstance(node.value, numbers.Integral):
-            return ir.IntNode(node.value)
-        elif isinstance(node.value, numbers.Real):
-            return ir.FloatNode(node.value)
-        else:
-            raise TypeError("unrecognized constant type")
+            msg = "Ellipses are not supported."
+            raise TypeError(msg)
+        elif isinstance(node.value, str):
+            msg = "String constants are not supported."
+            raise TypeError(msg)
+        return wrap_input(node.value)
 
     def visit_Tuple(self, node: ast.Tuple) -> ir.Tuple:
         # refactor seems to have gone wrong here..
-        #version = sys.version_info
-        #if (3, 9) <= (version.major, version.minor):
-            # 3.9 removes ext_slice in favor of a tuple of slices
-            # need to check a lot of cases for this            
+        # version = sys.version_info
+        # if (3, 9) <= (version.major, version.minor):
+        # 3.9 removes ext_slice in favor of a tuple of slices
+        # need to check a lot of cases for this
         #    raise NotImplementedError
         elts = tuple(self.visit(elt) for elt in node.elts)
         return ir.Tuple(elts)
@@ -260,60 +225,121 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_Name(self, node: ast.Name):
         return ir.NameRef(node.id)
 
-    def visit_Expr(self, node: ast.Expr) -> ir.SingleExpr:
+    def visit_Expr(self, node: ast.Expr):
+        # single expression statement
         expr = self.visit(node.value)
         pos = extract_positional_info(node)
-        return ir.SingleExpr(expr, pos)
+        self.body.append(ir.SingleExpr(expr, pos))
 
-    def visit_UnaryOp(self, node: ast.UnaryOp) -> ir.UnaryOp:
+    def visit_UnaryOp(self, node: ast.UnaryOp) -> ir.ValueRef:
         op = unaryops.get(type(node.op))
         operand = self.visit(node.operand)
-        return ir.UnaryOp(operand, op) if op != "+" else operand
+        operand = self.fold_if_constant(operand)
+        if op == "+":
+            expr = operand
+        elif op == "not":
+            expr = ir.NOT(operand)
+        else:
+            expr = ir.UnaryOp(operand, op)
+        return expr
 
     def visit_BinOp(self, node: ast.BinOp) -> ir.BinOp:
         op = binaryops.get(type(node.op))
         left = self.visit(node.left)
+        left = self.fold_if_constant(left)
         right = self.visit(node.right)
+        right = self.fold_if_constant(right)
         return ir.BinOp(left, right, op)
 
-    def visit_BoolOp(self, node: ast.BoolOp) -> ir.BoolOp:
+    def visit_BoolOp(self, node: ast.BoolOp) -> typing.Union[ir.BoolConst, ir.AND, ir.OR]:
         op = boolops[node.op]
-        operands = tuple(self.visit(value) for value in node.values)
-        return ir.BoolOp(operands, op)
+        operands = []
+        seen = set()
+        for value in node.values:
+            value = self.visit(value)
+            if value.constant:
+                if operator.truth(value):
+                    if op == "and":
+                        continue
+                    else:  # op == "or"
+                        return ir.BoolConst(True)
+                else:
+                    if op == "and":
+                        return ir.BoolConst(False)
+                    else:  # op == "or"
+                        continue
+            else:
+                if value not in seen:
+                    seen.add(value)
+                    operands.append(value)
+        if len(operands) == 1:
+            expr = operands.pop()
+            expr = ir.TRUTH(expr)
+        else:
+            operands = tuple(operands)
+            if op == "and":
+                expr = ir.AND(operands)
+            else:
+                expr = ir.OR(operands)
+        return expr
 
-    def visit_Compare(self, node: ast.Compare) -> typing.Union[ir.BinOp, ir.BoolOp]:
+    def visit_Compare(self, node: ast.Compare) -> typing.Union[ir.BinOp, ir.AND, ir.BoolConst]:
         left = self.visit(node.left)
         right = self.visit(node.comparators[0])
         op = compareops[type(node.ops[0])]
         initial_compare = ir.BinOp(left, right, op)
+        initial_compare = self.fold_if_constant(initial_compare)
         if len(node.ops) == 1:
             return initial_compare
         compares = [initial_compare]
+        seen = set()
         for index, ast_op in enumerate(node.ops[1:], 1):
-            # expressions are immutable, so we can safely reuse them
             left = right
             right = self.visit(node.comparators[index])
             op = compareops[type(ast_op)]
-            compares.append(ir.BinOp(left, right, op))
-        return ir.BoolOp(tuple(compares), "and")
+            cmp = ir.BinOp(left, right, op)
+            cmp = self.fold_if_constant(cmp)
+            if cmp.constant:
+                if not operator.truth(cmp):
+                    return ir.BoolConst(False)
+            else:
+                if cmp not in seen:
+                    # Preserve the original comparison order, ignoring
+                    # duplicate expressions.
+                    seen.add(cmp)
+                    compares.append(cmp)
+        return ir.AND(tuple(compares))
 
-    def visit_Call(self, node: ast.Call) -> typing.Union[ir.Expression, ir.NameRef]:
+    def visit_Call(self, node: ast.Call) -> typing.Union[ir.ValueRef, ir.NameRef, ir.Call]:
         if isinstance(node.func, ast.Name):
-            funcname = node.func.id
+            func_name = ir.NameRef(node.func.id)
         else:
-            funcname = self.visit(node.func)
+            func_name = self.visit(node.func)
         args = tuple(self.visit(arg) for arg in node.args)
         keywords = tuple((kw.arg, self.visit(kw.value)) for kw in node.keywords)
         # replace call should handle folding of casts
-        call_ = ir.Call(funcname, args, keywords)
-        func = replace_builtin_call(call_)
-        return func
 
-    def visit_IfExp(self, node: ast.IfExp) -> ir.IfExpr:
+        call_ = ir.Call(func_name, args, keywords)
+        # Todo: need a way to identify array creation
+        if not self.is_local_variable_name(func_name):
+            # Most of the time this kind of conflict is an error. For example
+            # we don't support overwriting zip, enumerate, etc. since we don't
+            # really support customized iterator protocols anyway.
+            call_ = replace_builtin_call(call_)
+        return call_
+
+    def visit_IfExp(self, node: ast.IfExp) -> ir.ValueRef:
         test = self.visit(node.test)
         on_true = self.visit(node.body)
         on_false = self.visit(node.orelse)
-        return ir.IfExpr(test, on_true, on_false)
+        if test.constant:
+            if operator.truth(test):
+                expr = on_true
+            else:
+                expr = on_false
+        else:
+            expr = ir.Ternary(test, on_true, on_false)
+        return expr
 
     def visit_Subscript(self, node: ast.Subscript) -> ir.Subscript:
         target = self.visit(node.value)
@@ -321,7 +347,7 @@ class TreeBuilder(ast.NodeVisitor):
         value = ir.Subscript(target, s)
         return value
 
-    def visit_Index(self, node: ast.Index) -> typing.Union[ir.Expression, ir.NameRef, ir.Constant]:
+    def visit_Index(self, node: ast.Index) -> typing.Union[ir.ValueRef, ir.NameRef, ir.Constant]:
         return self.visit(node.value)
 
     def visit_Slice(self, node: ast.Slice) -> ir.Slice:
@@ -330,113 +356,167 @@ class TreeBuilder(ast.NodeVisitor):
         step = self.visit(node.step) if node.step is not None else None
         return ir.Slice(lower, upper, step)
 
-    def visit_ExtSlice(self, node: ast.ExtSlice) -> ir.Unsupported:
+    def visit_ExtSlice(self, node: ast.ExtSlice):
         # This is probably never going to be supported, because it requires inlining
         # a large number of calculations in ways that may sometimes hamper performance.
-        return ir.Unsupported("ast.ExtSlice", msg="Extended slices are currently unsupported. This supports single"
-                                                  "slices per dimension")
+        raise TypeError("Extended slices are currently unsupported. This supports single"
+                        "slices per dimension")
 
-    def visit_AugAssign(self, node: ast.AugAssign) -> ir.Assign:
+    def visit_AugAssign(self, node: ast.AugAssign):
         target = self.visit(node.target)
         operand = self.visit(node.value)
         op = binary_inplace_ops.get(type(node.op))
         pos = extract_positional_info(node)
-        return ir.Assign(target, ir.BinOp(target, operand, op), pos)
+        assign = ir.Assign(target, ir.BinOp(target, operand, op), pos)
+        self.body.append(assign)
 
-    def visit_Assign(self, node: ast.Assign) -> typing.List[ir.Assign]:
+    def visit_Assign(self, node: ast.Assign):
+        # first convert locally to internal IR
         value = self.visit(node.value)
-        targets = [self.visit(t) for t in node.targets]
         pos = extract_positional_info(node)
-        # lower a = b = c into a = c; b = c
-        # (Notice Python uses cascading rules that differ from C, which would serialize
-        #  a = b = c into b = c; a = b;)
-        assigns = [ir.Assign(target, value, pos) for target in targets]
-        # Serialize the case of (a,b,c,d) = (e,f,g,h)
-        return assigns
+        for target in node.targets:
+            # break cascaded assignments into multiple assignments
+            target = self.visit(target)
+            for subtarget, subvalue in unpack_assignment(target, value, pos):
+                subassign = ir.Assign(subtarget, subvalue, pos)
+                self.body.append(subassign)
 
-    def visit_AnnAssign(self, node: ast.AnnAssign) -> ir.Assign:
+    def visit_AnnAssign(self, node: ast.AnnAssign):
         target = self.visit(node.target)
         value = self.visit(node.value)
         pos = extract_positional_info(node)
-        # This should be parsed here later on.
-        annot = node.annotation
-        return ir.Assign(target, value, pos, annot)
+        annotation = self.visit(node.annotation)
+        if isinstance(annotation, ir.NameRef):
+            # Check if type is recognized by name
+            type_ = self.symbols.type_by_name.get(annotation.name)
+            if type_ is None:
+                msg = f"Ignoring unrecognized annotation: {annotation}, line: {pos.line_begin}"
+                warnings.warn(msg)
+            else:
+                ir_type = self.symbols.get_ir_type(type_)
+                if isinstance(target, ir.NameRef):
+                    sym = self.symbols.lookup(target)
+                    existing_type = sym.type_
+                    # This is an error, since it's an actual conflict.
+                    if existing_type != ir_type:
+                        msg = f"IR type from type hint conflicts with existing " \
+                              f"(possibly inferred) type {existing_type}, line: {pos.line_begin}"
+                        raise ValueError(msg)
+        if node.value is not None:
+            # CPython will turn the syntax "var: annotation" into an AnnAssign node
+            # with node.value = None. If executed, this won't bind or update the value of var.
+            assign = ir.Assign(target, value, pos)
+            self.body.append(assign)
 
-    def visit_Pass(self, node: ast.Pass) -> ir.Pass:
+    def visit_Pass(self, node: ast.Pass):
         pos = extract_positional_info(node)
-        return ir.Pass(pos)
+        stmt = ir.Pass(pos)
+        return stmt
 
-    def visit_If(self, node: ast.If) -> ir.IfElse:
+    def visit_If(self, node: ast.If):
         pos = extract_positional_info(node)
         compare = self.visit(node.test)
-        on_true = self.visit_body(node.body)
-        on_false = self.visit_body(node.orelse)
+        with self.flow_region():
+            for stmt in node.body:
+                self.visit(stmt)
+            on_true = self.body
+        with self.flow_region():
+            for stmt in node.orelse:
+                self.visit(stmt)
+            on_false = self.body
         ifstat = ir.IfElse(compare, on_true, on_false, pos)
-        return ifstat
+        self.body.append(ifstat)
 
-    def visit_With(self, node: ast.With):
-        pass
-
-    def visit_For(self, node: ast.For) -> ir.ForLoop:
+    def visit_For(self, node: ast.For):
         if node.orelse:
             raise ValueError("or else clause not supported for for statements")
-        it = self.visit(node.iter)
-        target = self.visit(node.target)
+        iter_node = self.visit(node.iter)
+        target_node = self.visit(node.target)
         pos = extract_positional_info(node)
-        assigns = serialize_iterated_assignments(target, it)
-        self.loops.append(node)
-        body = self.visit_body(node.body)
-        self.loops.pop()
-        return ir.ForLoop(assigns, body, pos)
+        targets = set()
+        iterables = set()
+        # Do initial checks for weird issues that may arise here.
+        # We don't lower it fully at this point, because it injects
+        # additional arithmetic and not all variable types may be fully known
+        # at this point.
+        try:
+            for target, iterable in unpack_iterated(target_node, iter_node, pos):
+                targets.add(target)
+                iterables.add(iterable)
+        except ValueError:
+            # Generator will throw an error on bad unpacking
+            msg = f"Cannot safely unpack for loop expression, line: {pos.line_begin}"
+            raise ValueError(msg)
+        conflicts = targets.intersection(iterables)
+        if conflicts:
+            conflict_names = ", ".join(c for c in conflicts)
+            msg = f"{conflict_names} appear in both the target an iterable sequences of a for loop, " \
+                  f"line {pos.line_begin}. This is not supported."
+            raise ValueError(msg)
+        with self.loop_region(node):
+            for stmt in node.body:
+                self.visit(stmt)
+            loop = ir.ForLoop(target_node, iter_node, self.body, pos)
+        self.body.append(loop)
 
-    def visit_While(self, node: ast.While) -> ir.WhileLoop:
+    def visit_While(self, node: ast.While):
         if node.orelse:
             raise ValueError("or else clause not supported for for statements")
-        compare = self.visit(node.test)
+        test = self.visit(node.test)
         pos = extract_positional_info(node)
-        self.loops.append(node)
-        body = self.visit_body(node.body)
-        self.loops.pop()
-        return ir.WhileLoop(compare, body, pos)
+        with self.loop_region(node):
+            for stmt in node.body:
+                self.visit(stmt)
+            loop = ir.WhileLoop(test, self.body, pos)
+        self.body.append(loop)
 
     def visit_Break(self, node: ast.Break):
-        if self.loops:
-            pos = extract_positional_info(node)
-            stmt = ir.Break(pos)
-            return stmt
-        else:
+        if self.enclosing_loop is None:
             raise ValueError("Break encountered outside of loop.")
+        pos = extract_positional_info(node)
+        stmt = ir.Break(pos)
+        self.body.append(stmt)
 
-    def visit_Continue(self, node: ast.Continue) -> ir.Continue:
-        if self.loops:
-            # Add an edge without explicitly terminating the block.
-            pos = extract_positional_info(node)
-            return ir.Continue(pos)
-        else:
+    def visit_Continue(self, node: ast.Continue):
+        if self.enclosing_loop is None:
             raise ValueError("Continue encountered outside of loop.")
+        pos = extract_positional_info(node)
+        stmt = ir.Continue(pos)
+        self.body.append(stmt)
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> ir.Function:
+    def visit_FunctionDef(self, node: ast.FunctionDef):
         # can't check just self.blocks, since we automatically 
         # instantiate entry and exit
+        if node is not self.entry:
+            raise RuntimeError(f"Nested scopes are unsupported. line: {node.lineno}")
+        name = node.name
+        # Todo: warn about unsupported argument features
+        params = [ir.NameRef(arg.arg) for arg in node.args.args]
+        for stmt in node.body:
+            self.visit(stmt)
+        func = ir.Function(name, params, self.body)
+        return func
 
-        if node is self.entry:
-            name = node.name
-            args = build_func_params(node)
-            body = self.visit_body(node.body)
-            return ir.Function(name, args, body, [], [])
-        else:
-            self.nested_scopes.append(node)
-
-    def visit_Return(self, node: ast.Return) -> ir.Return:
+    def visit_Return(self, node: ast.Return):
         pos = extract_positional_info(node)
         value = self.visit(node.value) if node.value is not None else None
-        return ir.Return(value, pos)
+        stmt = ir.Return(value, pos)
+        self.body.append(stmt)
 
     def generic_visit(self, node):
         raise NotImplementedError(f"{type(node)} is unsupported")
 
 
-def build_module_ir(src):
+def map_functions_by_name(node: ast.Module):
+    by_name = {}
+    assert(isinstance(node, ast.Module))
+    for n in node.body:
+        if isinstance(n, ast.FunctionDef):
+            by_name[n.name] = n
+    return by_name
+
+
+def parse_file(file_name, type_map):
     """
     Module level point of entry for IR construction.
 
@@ -445,41 +525,36 @@ def build_module_ir(src):
 
     src: str
         Source code for the corresponding module
+
+    file_name:
+        File path we used to extract source. This is used for error reporting.
+
+    type_map:
+        Map of function parameters and local variables to numpy or python numeric types.
    
     """
-    # Type info helps annotate things that
-    # are not reasonable to type via annotations
-    # It's not optimal, but this isn't necessarily
-    # meant to be user facing.
-    tree = ast.parse(src)
-    tree = ast.fix_missing_locations(tree)
 
-    # scan module for functions
+    path = Path(file_name)
+    if not path.is_file():
+        msg = f"Cannot resolve path to source {path.absolute()}"
+        raise CompilerError(msg)
 
-    funcs = []
-    imports = []
-    unsupported = []
-    build_func_ir = TreeBuilder()
-    for stmt in tree.body:
-        if isinstance(stmt, ast.FunctionDef):
-            func, nested = build_func_ir(stmt)
-            funcs.append(func)
-        elif isinstance(stmt, ast.Import):
-            pos = extract_positional_info(stmt)
-            for imp in stmt.names:
-                imports.append(ir.ModImport(imp.name, imp.asname, pos))
-        elif isinstance(stmt, ast.ImportFrom):
-            mod = stmt.module
-            pos = extract_positional_info(stmt)
-            for name in stmt.names:
-                imports.append(ir.NameImport(mod, name.name, name.asname, pos))
-        else:
-            unsupported.append(stmt)
+    with open(path) as src_stream:
+        src_text = src_stream.read()
+        syntax_tree = ast.parse(src_text, filename=path.name)
+        syntax_tree = ast.fix_missing_locations(syntax_tree)
+        import_map = ImportHandler().visit(syntax_tree)
+        funcs_by_name = map_functions_by_name(syntax_tree)
+        funcs = []
+        module_symtable = symtable.symtable(src_text, file_name, "exec")
+        build_func_ir = TreeBuilder()
+        symbol_tables = {}
+        for func_name, ast_entry_point in funcs_by_name.items():
+            table = module_symtable.lookup(func_name).get_namespace()
+            func_type_map = type_map[func_name]
+            symbols = symbol_table_from_pysymtable(table, import_map, func_type_map, file_name)
+            symbol_tables[func_name] = symbols
+            func_ir = build_func_ir(ast_entry_point, symbols)
+            funcs.append(func_ir)
 
-    if unsupported:
-        # This is either a class, control flow, 
-        # or data flow at module scope.
-        # It should output formatted errors.
-        raise ValueError("Unsupported")
-
-    return ir.Module(funcs, imports)
+    return ir.Module(funcs, import_map), symbol_tables
