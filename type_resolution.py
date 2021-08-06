@@ -13,8 +13,8 @@ from visitor import StmtVisitor
 
 Float32 = ir.ScalarType(bits=32, integral=False, boolean=False)
 Float64 = ir.ScalarType(bits=64, integral=False, boolean=False)
-Int32 = ir.ScalarType(bits=32, integral=True, boolean=True)
-Int64 = ir.ScalarType(bits=64, integral=True, boolean=True)
+Int32 = ir.ScalarType(bits=32, integral=True, boolean=False)
+Int64 = ir.ScalarType(bits=64, integral=True, boolean=False)
 Predicate32 = ir.ScalarType(bits=32, integral=True, boolean=True)
 Predicate64 = ir.ScalarType(bits=64, integral=True, boolean=True)
 FPredicate32 = ir.ScalarType(bits=32, integral=False, boolean=True)

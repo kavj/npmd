@@ -141,7 +141,7 @@ class symbol:
 
     @property
     def is_integer(self):
-        return isinstance(self.type_, (tr.Int32, tr.Int64))
+        return self.type_ in (tr.Int32, tr.Int64)
 
 
 # array creation nodes
@@ -181,10 +181,10 @@ class symboltable:
     scalar_ir_types = frozenset({tr.Int32, tr.Int64, tr.Float32, tr.Float64, tr.Predicate32, tr.Predicate64})
 
     def __init__(self, scope_name, src_locals, import_map):
-        self.symbols = {}
+        self.symbols = {}   # name -> typed symbol entry
         self.scalar_type_map = tr.scalar_type_map.copy()
-        self.src_locals = src_locals
-        self.import_map = import_map
+        self.src_locals = src_locals # initially declared names
+        self.import_map = import_map # source name -> qualified name
         self.scope_name = scope_name
         self.prefixes = {}  # prefix for adding enumerated variable names
 
@@ -273,7 +273,7 @@ class symboltable:
     # In the case of is_added=False, this is the original name. Otherwise it
     # may be a unique variable name that instantiates some renaming or implementation binding.
 
-    def add_scalar(self, name, type_, added):
+    def add_typed_scalar(self, name, type_, added):
         # run type check by default, to avoid internal array types
         # with Python or numpy types as parameters.
 
@@ -281,7 +281,7 @@ class symboltable:
         if added:
             name = self.make_unique_name(name)
         if self.declares(name):
-            msg = f"Duplicate symbol declaration for variabl name '{name}'."
+            msg = f"Duplicate symbol declaration for variable name '{name}'."
             raise ValueError(msg)
         type_ = self.get_ir_type(type_)
         self.make_symbol(name, type_, added)
@@ -345,10 +345,15 @@ def symbol_table_from_pysymtable(func_table, import_map, type_map, file_name):
         raise TypeError(f"{func_name} in file {file_name} refers to a class rather than a function. This is "
                         f"unsupported.")
     missing = []
+    locals_from_source = set(func_table.get_locals())
+    table = symboltable(func_name, locals_from_source, import_map)
+
+    # register types
     for arg in func_table.get_parameters():
         # Check that all arguments have type info.
-        if arg not in type_map:
-            missing.append(arg)
+        type_ = type_map.get(arg)
+        table.add_typed_scalar(arg, type_, added=False)
+    s = table.symbols.get(ir.NameRef('a'))
     if missing:
         args = ", ".join(arg for arg in missing)
         msg = f"Function '{func_table.get_name()}' is missing type info for the following arguments: {args}."
@@ -357,5 +362,5 @@ def symbol_table_from_pysymtable(func_table, import_map, type_map, file_name):
     if func_table.get_name() in locals_from_source:
         msg = f"Function {func_table.get_name()} contains a local variable with the same name. This is unsupported."
         raise ValueError(msg)
-    table = symboltable(func_name, locals_from_source, import_map)
+
     return table

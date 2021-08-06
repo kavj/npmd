@@ -1,7 +1,6 @@
 import os.path
 
 from ASTTransform import parse_file
-from Canonicalize import RemoveContinues, MergePaths
 from reachingcheck import ReachingCheck
 from pretty_printing import pretty_printer
 
