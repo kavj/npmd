@@ -3,13 +3,14 @@ import math
 import operator
 import typing
 
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from functools import singledispatch, singledispatchmethod
 
 import ir
 import symbol_table
 
+from errors import CompilerError
 from visitor import StmtVisitor, ExpressionVisitor
 
 
@@ -91,10 +92,10 @@ def unpack_iterated(target, iterable, pos):
             else:
                 msg = f"Mismatched unpacking counts for {target} and {iterable}, {len(target.elements)} " \
                       f"and {(len(iterable.elements))}."
-                raise ValueError(msg)
+                raise CompilerError(msg)
         else:
             msg = f"Zip construct {iterable} requires a tuple for unpacking."
-            raise ValueError(msg)
+            raise CompilerError(msg)
 
     else:
         # Array or sequence reference, with a single opaque target.
@@ -130,9 +131,27 @@ def is_fma_pattern(expr):
     return False
 
 
+def is_addition(node):
+    return isinstance(node, ir.BinOp) and node.op in ("+", "+=")
+
+
+def is_subtraction(node):
+    return isinstance(node, ir.BinOp) and node.op in ("-", "-=")
+
+
+def is_multiplication(node):
+    return isinstance(node, ir.BinOp) and node.op in ("*", "*=")
+
+
+def is_division(node):
+    return isinstance(node, ir.BinOp) and node.op in ("/", "//", "/=", "//=")
+
+
+def is_unary_negate(node):
+    return isinstance(node, ir.UnaryOp) and node.op == "-"
+
+
 def rewrite_pow(expr):
-    if not is_pow(expr):
-        return expr
     coeff = expr.right
     base = expr.left
     if coeff == ir.Zero:
@@ -144,7 +163,7 @@ def rewrite_pow(expr):
                 # this isn't intended to catch all edge cases, just an obvious
                 # one that may come up after folding
                 msg = f"raises 0 to a negative power {expr}."
-                raise ValueError(msg)
+                raise CompilerError(msg)
             else:
                 return ir.Zero
     elif coeff == ir.One:
@@ -177,180 +196,6 @@ class flatten_exprs(ExpressionVisitor):
     # de-nest boolean expressions
 
 
-class simplify_exprs(ExpressionVisitor):
-    """
-    Fold redundancy, typically stuff that is added by another pass, since it's not necessarily
-    tractable to catch every case of expression blowup where it occurs.
-
-    References
-
-    LIVINSKII et. al, Random Testing for C and C++ Compilers with YARPGen
-
-
-    """
-
-    def __init__(self, syms, min_max_is_ordered=True):
-        self._min_max_is_ordered = min_max_is_ordered
-        self.syms = syms
-
-    def __call__(self, expr):
-        return self.lookup(expr)
-
-    @singledispatchmethod
-    def visit(self, expr):
-        super().visit(expr)
-
-    @visit.register
-    def _(self, expr: ir.BinOp):
-        if is_pow(expr):
-            expr = rewrite_pow(expr)
-        left = fold_identity(expr.left)
-        right = fold_identity(expr.right)
-        op = expr.op
-        if left.constant and right.constant:
-            oper = binops[op]
-            value = oper(left.value, right.value)
-            value = wrap_constant(value)
-        if op in ("*", "*="):
-            if left == ir.One:
-                return right
-            elif right == ir.One:
-                return left
-            elif left == ir.Zero or right == ir.Zero:
-                return ir.Zero
-            elif left == ir.IntConst(-1):
-                return ir.UnaryOp(right, "-")
-            elif right == ir.IntConst(-1):
-                return ir.UnaryOp(left, "-")
-        elif op in ("+", "+="):
-            if left == ir.Zero:
-                return right
-            elif right == ir.Zero:
-                return left
-            # sanitize some cases of potential intermediate overflow
-            elif isinstance(right, ir.UnaryOp):
-                if right.op == "-":
-                    if op == "+":
-                        return ir.BinOp(left, right.operand, "-")
-                    elif op == "-":
-                        return ir.BinOp(left, right.operand, "+")
-                    elif op == "+=":
-                        return ir.BinOp(left, right.operand, "-=")
-                    elif op == "-=":
-                        return ir.BinOp(left, right.operand, "+=")
-            elif isinstance(left, ir.UnaryOp):
-                # lower priority, since it inverts operand ordering
-                if left.op == "-":
-                    if op == "+":
-                        return ir.BinOp(right, left.operand, "-")
-                    elif op == "-":
-                        return ir.BinOp(right, left.operand, "-")
-        elif op in ("-", "-="):
-            if left == ir.Zero:
-                return ir.UnaryOp(right, "-")
-            elif right == ir.Zero:
-                return left
-            elif left == right:
-                return ir.Zero
-        elif op in ("//", "//="):
-            if right == ir.One:
-                return left
-        return expr
-
-    @visit.register
-    def _(expr: ir.UnaryOp):
-        if op == "+":
-            return operand
-        elif op == "-":
-            if isinstance(operand, ir.UnaryOp) and operand.op == "-":
-                return operand.operand
-        else:
-            return expr
-
-        repl = expr
-        if isinstance(expr, ir.BinOp) and op in ("*", "*="):
-            unary_minus_equiv = ir.IntConst(-1)
-            left = expr.left
-            right = expr.right
-            if left == unary_minus_equiv:
-                repl = ir.UnaryOp(right, "-")
-            elif right == unary_minus_equiv:
-                repl = ir.UnaryOp(left, "-")
-        return repl
-
-    @visit.register
-    def _(expr: ir.Ternary):
-        # Fold if both sides match
-        # Fold to min or max if matches ordered form
-        # a few others
-        test = self.lookup(expr.test)
-        if_expr = self.lookup(expr.if_expr)
-        else_expr = self.lookup(expr.else_expr)
-        if isinstance(test, ir.BinOp):
-            # Todo: This needs a flag of some sort, since this only applies
-            #       if min and max semantics are of the common non-IEEE variety
-            if self._min_max_is_ordered:
-                if test.op in ("<", "<="):
-                    if if_expr == test.left and else_expr == test.right:
-                        return ir.Min((if_expr, else_expr))
-                elif test.op in (">", ">="):
-                    if if_expr == test.left and else_expr == test.right:
-                        return ir.Max((if_expr, else_expr))
-        return expr
-
-    @visit.register
-    def _(self, expr: ir.AND):
-        seen = set()
-        repl = []
-        for operand in expr.operands:
-            operand = self.lookup(operand)
-            if operand not in seen:
-                seen.add(operand)
-                repl.append(operand)
-        return ir.AND(tuple(repl))
-
-    @visit.register
-    def _(self, expr: ir.OR):
-        seen = set()
-        repl = []
-        for operand in expr.operands:
-            operand = self.lookup(operand)
-            if operand not in seen:
-                seen.add(operand)
-                repl.append(operand)
-        return ir.OR(tuple(repl))
-
-    @visit.register
-    def _(expr: ir.Max):
-        # remove nesting and duplicates
-        repl = set()
-        numeric = None
-        contains_nan = False
-        contains_fp_consts = False
-        contains_int_consts = False
-        nested_mins = []
-        # Todo: need a flattening step for nested max exprs
-        for elem in expr.exprs:
-            if elem.constant and not contains_nan:
-                if math.isnan(elem.value):
-                    contains_nan = True
-                    numeric = math.nan
-                elif numeric is None:
-                    numeric = elem.value
-                else:
-                    numeric = max(numeric, elem.value)
-            elif isinstance(elem, ir.Max):
-                repl.update(elem.exprs)
-            else:
-                repl.append(elem)
-        return
-
-
-    @visit.register
-    def _(expr: ir.Min):
-        pass
-
-
 class const_folding(ExpressionVisitor):
     # These don't reject large integer values, since they may be intermediate values.
     # It only matters if they are explicitly bound to a fixed width data type that
@@ -381,9 +226,9 @@ class const_folding(ExpressionVisitor):
                      raise ValueError(msg)
             value = op(left.value, right.value)
             result = wrap_constant(value)
-            return result
         else:
-            return expr
+            result = ir.BinOp(left, right, expr.op)
+        return result
 
     @visit.register
     def _(self, expr: ir.UnaryOp):
@@ -395,8 +240,7 @@ class const_folding(ExpressionVisitor):
             value = op(operand.value)
             result = wrap_constant(value)
             return result
-        else:
-            return expr
+        return expr
 
     @visit.register
     def _(self, expr: ir.Ternary):
@@ -405,8 +249,7 @@ class const_folding(ExpressionVisitor):
         else_expr = self.lookup(expr.else_expr)
         if test.constant:
             return if_expr if operator.truth(test) else else_expr
-        else:
-            return ir.Ternary(test, if_expr, else_expr)
+        return ir.Ternary(test, if_expr, else_expr)
 
     @visit.register
     def _(self, expr: ir.AND):
@@ -418,12 +261,11 @@ class const_folding(ExpressionVisitor):
                     return ir.BoolConst(False)
             else:
                 operands.append(operand)
-        if len(operands) >= 2:
-            operands = tuple(operands)
-            return ir.AND(operands)
-        else:
-            operands = operands.pop()
-            return ir.TRUTH(operands)
+        if len(operands) == 1:
+            operand = operands.pop()
+            return ir.TRUTH(operand)
+        operands = tuple(operands)
+        return ir.AND(operands)
 
     @visit.register
     def _(self, expr: ir.OR):
@@ -455,6 +297,207 @@ class const_folding(ExpressionVisitor):
     @visit.register
     def _(self, expr: ir.Min):
         raise NotImplementedError
+
+
+class associative_arithmetic_folding(ExpressionVisitor):
+    """
+    Non-recursive visitor for folding identity ops
+
+    This does not respect unordered operands such as nans. It's primarily intended for integer
+    arithmetic.
+
+    """
+
+    def __call__(self, expr):
+        return self.lookup(expr)
+
+    @singledispatchmethod
+    def visit(self, expr):
+        raise NotImplementedError
+
+    @visit.register
+    def _(self, node: ir.BinOp):
+        left = node.left
+        right = node.right
+        # if a constant expression shows up here, treat it as an error since
+        # it's weirder to handle than it seems
+        assert not (left.constant and right.constant)
+        two = ir.IntConst(2)
+        negative_one = ir.IntConst(-1)
+
+        if is_pow(node):
+            if right == ir.Zero:
+                return ir.One
+            elif right == ir.One:
+                return left
+            elif right == two:
+                return ir.BinOp(left, left, "*=" if node.in_place else "*")
+            # square roots shouldn't come up here, given the associative qualifier
+        elif is_addition(node):
+            if left == ir.Zero:
+                return right
+            elif right == ir.Zero:
+                return left
+            elif is_unary_negate(right):
+                return ir.BinOp(left, right.operand, "-=" if node.in_place else "-")
+            elif is_unary_negate(left):
+                assert not node.in_place
+                return ir.BinOp(right, left.operand, "-")
+        elif is_subtraction(node):
+            if left == ir.Zero:
+                return ir.UnaryOp(right, "-")
+            elif right == ir.Zero:
+                return left
+            elif is_unary_negate(right):
+                return ir.BinOp(left, right.operand, "+=" if node.in_place else "+")
+            elif is_unary_negate(left):
+                assert not node.in_place
+                return ir.BinOp(right, left.operand, "+")
+        elif is_division(node):
+            if right == ir.Zero:
+                msg = f"Divide by zero error in expression {node}."
+                raise CompilerError(msg)
+            elif node.op in ("//", "//="):
+                # only safe to fold floor divide, ignore left == right since these might
+                # be zero. Constant cases should be handled by the const folder.
+                if left == ir.Zero or right == ir.One:
+                    return left
+        elif is_multiplication(node):
+            if left == ir.Zero or right == ir.Zero:
+                return left
+            elif left == ir.One:
+                return right
+            elif right == ir.One:
+                return left
+            elif left == negative_one:
+                if is_unary_negate(right):
+                    # -(-something)) is safe in Python but possibly unsafe in a fixed width
+                    # destination. Folding it should be considered safe.
+                    return right.operand
+                else:
+                    return ir.UnaryOp(right, "-")
+            elif right == negative_one:
+                if is_unary_negate(left):
+                    return left.operand
+                else:
+                    return ir.UnaryOp(left, "-")
+
+    @visit.register
+    def _(self, node: ir.UnaryOp):
+        if isinstance(node.operand, ir.UnaryOp) and node.operand == node.op:
+            return node.operand.operand
+        else:
+            return node
+
+    @visit.register
+    def _(self, node: ir.Max):
+        seen = set()
+        unique = deque()
+        # maintain ordering but associative optimizations
+        # allow removing duplicates. Also factor out constants
+        numeric = None
+        for value in node.values:
+            if value not in seen:
+                seen.add(value)
+                if value.constant:
+                    assert isinstance(value, ir.IntConst)
+                    if numeric is None:
+                        numeric = value
+                    else:
+                        numeric = max(numeric, value)
+                unique.append(value)
+        if numeric is not None:
+            numeric = wrap_constant(numeric)
+            unique.appendleft(numeric)
+        return ir.Max(tuple(unique))
+
+    @visit.register
+    def _(self, node: ir.Min):
+        seen = set()
+        unique = deque()
+        # maintain ordering but associative optimizations
+        # allow removing duplicates. Also factor out constants
+        numeric = None
+        for value in node.values:
+            if value not in seen:
+                seen.add(value)
+                if value.constant:
+                    assert isinstance(value, ir.IntConst)
+                    if numeric is None:
+                        numeric = value
+                    else:
+                        numeric = min(numeric, value)
+                unique.append(value)
+        if numeric is not None:
+            numeric = wrap_constant(numeric)
+            unique.appendleft(numeric)
+        return ir.Min(tuple(unique))
+
+    @visit.register
+    def _(self, node: ir.AND):
+        seen = set()
+        operands = []
+        for operand in node.operands:
+            # constant folding should be separate
+            # as it causes too many issues here
+            assert not operand.constant
+            if operand not in seen:
+                operands.append(operand)
+                seen.add(operand)
+        if len(operands) > 1:
+            return ir.AND(tuple(operands))
+        else:
+            operand, = operands
+            return ir.TRUTH(operand)
+
+    @visit.register
+    def _(self, node: ir.OR):
+        seen = set()
+        operands = []
+        for operand in node.operands:
+            assert not operand.constant
+            if operand not in seen:
+                operands.append(operand)
+                seen.add(operand)
+        if len(operands) > 1:
+            return ir.OR(tuple(operands))
+        else:
+            operand, = operands
+            return ir.TRUTH(operand)
+
+    @visit.register
+    def _(node: ir.Ternary):
+        if node.if_expr == node.else_expr:
+            return if_expr
+        elif node.test.constant:
+            return node.if_expr if operator.truth(node.test) else node.else_expr
+        test = node.test
+        if isinstance(test, ir.BinOp):
+            if_expr = node.if_expr
+            else_expr = node.else_expr
+            test = node.test
+            if test.op in ("<", "<="):
+                if if_expr == test.left and else_expr == test.right:
+                    return ir.Min((if_expr, else_expr))
+                elif else_expr == test.right and if_expr == test.left:
+                    # This is almost negated. The issue is if in the destination assembly:
+                    #
+                    #     min(a,b) is implemented as a if a <= b else b
+                    #     max(a,b) is implemented as a if a >= b else b
+                    #
+                    #  which is common, we reverse operand order to properly catch unordered cases
+                    #  This does not follow Python's min/max conventions, which are too error prone.
+                    #  Those can arbitrarily propagate or suppress nans as a side effect of
+                    #  determining type from the leading operand.
+                    return ir.Max((else_expr, if_expr))
+                    pass
+            elif test.op in (">", ">="):
+                if if_expr == test.left and else_expr == test.right:
+                    return ir.Max((if_expr, else_expr))
+                elif if_expr == test.right and else_expr == test.left:
+                    # right if left < right else left
+                    return ir.Min((else_expr, if_expr))
+        return node
 
 
 def discard_unbounded(iterables):
@@ -702,21 +745,20 @@ def sub_is_safe(a: ir.ValueRef, b: ir.ValueRef, p: int)-> typing.Union[bool, ir.
     imin = MIN_INT(p)
     imax = MAX_INT(p)
 
-    if a.constant and b.constant:
-        # Ignore overflowing arithmetic if the result is within bounds after folding.
-        c = operator.sub(a.value, b.value)
-        if imin.value <= c < imax.value:
-            return ir.BoolConst(True)
-        else:
-            return ir.BoolConst(False)
+    # Check for simple case, ignoring intermediate overflow
+    expr = fold_constants(ir.BinOp(a, b, "-"))
+
+    if expr.constant:
+        truth_value = imin.value <= expr.value <= imax.value
+        return ir.BoolConst(truth_value)
     elif b == ir.Zero:
         # It's always safe to compute a - 0
         # It's unsafe to compute 0 - MIN_INT(p)
         return ir.BoolConst(True)
     else:
-        # b == 0
-        # b > 0 and (a > 0 or INT_MIN(p) + b <= a)
-        # b < 0 and (a < 0 or a <= INT_MAX(p) + b)
+        # Check for
+        # b >= 0 and (a >= 0 or INT_MIN(p) + b <= a)
+        # b =< 0 and (a <= 0 or a <= INT_MAX(p) + b)
 
         b_ge_zero = ir.BinOp(b, ir.Zero, ">=")
         imin = MIN_INT(p)
@@ -742,7 +784,8 @@ def sub_is_safe(a: ir.ValueRef, b: ir.ValueRef, p: int)-> typing.Union[bool, ir.
 
         test_on_true = ir.OR((ir.BinOp(a, ir.Zero, ">="), ir.BinOp(ir.BinOp(b, imin, "+"), a, "<=")))
         test_on_false = ir.OR((ir.BinOp(a, ir.Zero, "<="), ir.BinOp(a, ir.BinOp(b, imax, "+"), "<=")))
-        return ir.Ternary(non_negative_b, test_on_pos, test_on_non_neg)
+        test = ir.Ternary(non_negative_b, test_on_pos, test_on_non_neg)
+        return ir.TRUTH(test)
 
 
 def make_loop_counter(iterables, syms):

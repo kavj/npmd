@@ -235,7 +235,7 @@ class TreeBuilder(ast.NodeVisitor):
         op = unaryops.get(type(node.op))
         operand = self.visit(node.operand)
         operand = self.fold_if_constant(operand)
-        if op == "+":
+        if op == "+":  # This is a weird noop that can be ignored.
             expr = operand
         elif op == "not":
             expr = ir.NOT(operand)

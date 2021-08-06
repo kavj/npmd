@@ -10,7 +10,7 @@ from functools import cached_property
 
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
 inplace_ops = frozenset({"+=", "-=", "*=", "/=", "//=", "%=", "**=", "<<=", ">>=", "|=", "^=", "&=", "@="})
-unaryops = frozenset({"+", "-", "~", "not"})
+unaryops = frozenset({"-", "~", "not"})
 boolops = frozenset({"and", "or", "xor"})
 compareops = frozenset({"==", "!=", "<", "<=", ">", ">=", "is", "isnot", "in", "notin"})
 
