@@ -183,19 +183,6 @@ def rewrite_pow(expr):
         return expr
 
 
-class flatten_exprs(ExpressionVisitor):
-
-    def __init__(self, syms, min_max_is_ordered=True):
-        self._min_max_is_ordered = min_max_is_ordered
-        self.syms = syms
-
-    def __call__(self, expr):
-        return self.lookup(expr)
-
-    # remove nesting from min/max where possible
-    # de-nest boolean expressions
-
-
 class const_folding(ExpressionVisitor):
     # These don't reject large integer values, since they may be intermediate values.
     # It only matters if they are explicitly bound to a fixed width data type that
@@ -225,10 +212,19 @@ class const_folding(ExpressionVisitor):
                      msg = f"Shift amount cannot be negative: {left.value} {op} {right.value}"
                      raise ValueError(msg)
             value = op(left.value, right.value)
-            result = wrap_constant(value)
+            return wrap_constant(value)
         else:
-            result = ir.BinOp(left, right, expr.op)
-        return result
+            # It's not possible to always place constants on the right or left due to
+            # non-commutative operators, but it's okay to standardize ordering of multiplication
+            # and addition with a single constant.
+            if is_addition(expr):
+                if left.constant:
+                    return ir.BinOp(right, left, expr.op)
+            elif is_multiplication(expr):
+                if right.constant:
+                    if not expr.in_place:
+                        return ir.BinOp(right, left, expr.op)
+            return ir.BinOp(left, right, expr.op)
 
     @visit.register
     def _(self, expr: ir.UnaryOp):
@@ -238,7 +234,13 @@ class const_folding(ExpressionVisitor):
             # it should fail during code generation.
             op = unaryops[expr.op]
             value = op(operand.value)
-            result = wrap_constant(value)
+            expr = wrap_constant(value)
+        elif isinstance(operand, ir.UnaryOp):
+            # either -(-something) or ~(~something)
+            # either way, may run afoul of undefined behavior
+            # if propagated
+            if operand.op == expr.op:
+                expr = operand.operand
             return result
         return expr
 
@@ -256,32 +258,27 @@ class const_folding(ExpressionVisitor):
         operands = []
         for operand in self.operands:
             operand = self.lookup(operand)
-            if operand.constant:
-                if not operator.truth(operand):
-                    return ir.BoolConst(False)
-            else:
-                operands.append(operand)
+            if operand.constant and not operator.truth(operand):
+                return ir.BoolConst(False)
+            operands.append(operand)
         if len(operands) == 1:
-            operand = operands.pop()
-            return ir.TRUTH(operand)
-        operands = tuple(operands)
-        return ir.AND(operands)
+            repl = ir.TRUTH(operands[0])
+        else:
+            repl = ir.AND(tuple(operands))
+        return repl
 
     @visit.register
     def _(self, expr: ir.OR):
         operands = []
         for operand in self.operands:
             operand = self.lookup(operand)
-            if operand.constant:
-                if operator.truth(operand):
-                    return ir.BoolConst(True)
-            else:
-                operands.append(operand)
-        if len(operands) > 1:
-            repl = ir.OR(tuple(operands))
+            if operand.constant and operator.truth(operand):
+                return ir.BoolConst(True)
+            operands.append(operand)
+        if len(operands) == 1:
+            repl = ir.TRUTH(operands[0])
         else:
-            operand = operands.pop()
-            repl = ir.TRUTH(operand)
+            repl = ir.OR(tuple(operands))
         return repl
 
     @visit.register
@@ -297,6 +294,81 @@ class const_folding(ExpressionVisitor):
     @visit.register
     def _(self, expr: ir.Min):
         raise NotImplementedError
+
+
+def simplify_integer_max(node, op):
+
+    numeric = set()
+    additions = defaultdict(set)
+    seen = set()
+    unique = deque()
+
+    # Find expressions that could be combined
+
+    for value in node.values:
+        if value.constant:
+            numeric.add(value)
+        elif is_addition(value):
+            additions[value.left].add(value.right)
+        elif value not in seen:
+            # note: not marking the others as seen
+            unique.append(value)
+            seen.add(value)
+
+    # reduce Max(i, i + 1, i + 2, i + 3, other_stuff) to Max(i + 3, other_stuff)
+    for left, rhs_terms in additions.items():
+        if len(rhs_items) > 1:
+            consts = deque()
+            collected = deque()
+            for r in rhs_terms:
+                if r.constant:
+                    assert isinstance(r, ir.IntConst)
+                    consts.append(r)
+                else:
+                    collected.append(r)
+            if consts:
+                m = wrap_constant(max(c.value for c in consts))
+                collected.appendleft(m)
+            if len(collected) == 1:
+                right = collected.pop()
+            else:
+                # on the off chance that the same additions are used before this
+                # we would still be stuck with computing the max anyway. Since it's
+                # unlikely to always be the case, might as well just take the max
+                right = ir.Max(tuple(collected))
+        else:
+            right = rhs_terms.pop()
+        unique.append(ir.BinOp(left, right, "+"))
+
+
+
+    unique = []
+
+
+    for value in node.values:
+        if value.constant:
+            assert isinstance(value, ir.IntConst)
+            if numeric is None:
+                numeric = value
+            else:
+                numeric = max(numeric, value.value)
+        elif value not in seen:
+            seen.add(value)
+            unique.append(value)
+        elif isinstance(value, ir.BinOp):
+            # This case comes up when simplifying interval constraints
+            # that rely on multiple offset views of one array
+            if value.left.constant:
+                assert isinstance(value, ir.IntConst)
+
+
+                pass
+            elif value.right.constant:
+                pass
+    if numeric is not None:
+        numeric = wrap_constant(numeric)
+        unique.appendleft(numeric)
+    return ir.Max(tuple(unique))
 
 
 class associative_arithmetic_folding(ExpressionVisitor):
@@ -334,9 +406,7 @@ class associative_arithmetic_folding(ExpressionVisitor):
                 return ir.BinOp(left, left, "*=" if node.in_place else "*")
             # square roots shouldn't come up here, given the associative qualifier
         elif is_addition(node):
-            if left == ir.Zero:
-                return right
-            elif right == ir.Zero:
+            if right == ir.Zero:
                 return left
             elif is_unary_negate(right):
                 return ir.BinOp(left, right.operand, "-=" if node.in_place else "-")
@@ -363,12 +433,10 @@ class associative_arithmetic_folding(ExpressionVisitor):
                 if left == ir.Zero or right == ir.One:
                     return left
         elif is_multiplication(node):
-            if left == ir.Zero or right == ir.Zero:
-                return left
+            if left == ir.Zero:
+                return ir.Zero
             elif left == ir.One:
                 return right
-            elif right == ir.One:
-                return left
             elif left == negative_one:
                 if is_unary_negate(right):
                     # -(-something)) is safe in Python but possibly unsafe in a fixed width
@@ -376,11 +444,6 @@ class associative_arithmetic_folding(ExpressionVisitor):
                     return right.operand
                 else:
                     return ir.UnaryOp(right, "-")
-            elif right == negative_one:
-                if is_unary_negate(left):
-                    return left.operand
-                else:
-                    return ir.UnaryOp(left, "-")
 
     @visit.register
     def _(self, node: ir.UnaryOp):
@@ -397,15 +460,22 @@ class associative_arithmetic_folding(ExpressionVisitor):
         # allow removing duplicates. Also factor out constants
         numeric = None
         for value in node.values:
-            if value not in seen:
+            if value.constant:
+                assert isinstance(value, ir.IntConst)
+                if numeric is None:
+                    numeric = value
+                else:
+                    numeric = max(numeric, value)
+            elif value not in seen:
                 seen.add(value)
-                if value.constant:
-                    assert isinstance(value, ir.IntConst)
-                    if numeric is None:
-                        numeric = value
-                    else:
-                        numeric = max(numeric, value)
                 unique.append(value)
+            elif isinstance(value, ir.BinOp):
+                # This case comes up when simplifying interval constraints
+                # that rely on multiple offset views of one array
+                if value.left.constant:
+                    pass
+                elif value.right.constant:
+                    pass
         if numeric is not None:
             numeric = wrap_constant(numeric)
             unique.appendleft(numeric)
