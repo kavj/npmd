@@ -550,6 +550,171 @@ def find_min_interval_width(spans):
     return width
 
 
+def unary_minus_is_safe(a: ir.ValueRef, p: int) -> ir.ValueRef:
+    assert p >= 0
+    min_int = -1 * operator.pow(2, p - 1)
+    if a.constant:
+        cond = operator.ne(a, min_int)
+    else:
+        cond = ir.BinOp(a, ir.IntConst(min_int), "!=")
+    return cond
+
+# Stubs for range checks, not always decidable
+# The expressions themselves should be evaluated as if safe and well defined.
+
+def is_non_negative(expr):
+    return NotImplemented
+
+
+def is_positive(expr):
+    return NotImplemented
+
+
+def is_negative(expr):
+    return NotImplemented
+
+
+def MIN_INT(p: int) -> ir.IntConst:
+    """
+    minimum integer with p bits
+    """
+
+    assert p > 0
+    value = -(2**p)
+    return ir.IntConst(value)
+
+
+def MAX_INT(p: int) -> ir.IntConst:
+    """
+    max integer with p bits
+    """
+
+    assert p > 0
+    value = 2**p - 1
+    return ir.IntConst(value)
+
+
+def add_is_safe(a: ir.ValueRef, b: ir.ValueRef, p: int) -> ir.ValueRef:
+    """
+    This is meant to test whether we can safely compute an expression at runtime, particularly
+    expressions that are generated during compile time lowering.
+
+    a + b can be safely evaluated at runtime if:
+    
+    Note that folding at compile time uses Python's arbitrary precision integers
+    
+    "a + b" can be safely evaluated at runtime if 
+    
+    INT_MIN(p) <= a + b <= INT_MAX(p)
+    
+    which holds if any of the following conditions hold. 
+    
+    Note the >= and <= are partially redundant with the first condition but still valid.
+    
+    (1) a == 0 or b == 0
+    
+    (2) a >= 0 and b <= MAX_INT(p) - a
+    
+    (3) a <= 0 and MIN_INT(p) - a <= b
+    
+    (4) b => 0 and a <= MAX_INT(p) - b
+    
+    (5) b <= 0 and MIN_INT(p) - b <= a
+    
+    References:
+        LIVINSKII et. al, Random Testing for C and C++ Compilers with YARPGen
+        Dietz et. al, Understanding Integer Overflow in C/C++
+        Bachmann et. al, Chains of Recurrences - a method to expedite the evaluation of closed-form functions
+        https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html
+        https://developercommunity.visualstudio.com/t/please-implement-integer-overflow-detection/409051
+        https://numpy.org/doc/stable/user/building.html
+    """
+    assert p > 0
+    mag = operator.pow(2, p)
+    imin = MIN_INT(p)
+    imax = MAX_INT(p)
+    if a == ir.Zero or b == ir.Zero:
+        # a == 0 or b == 0
+        return ir.BoolConst(True)
+    elif a.constant and b.constant:
+        # safely computable at compile time using arbitrary precision integers
+        res = operator.sub(a.value, b.value)
+        cond = (MIN_INT(p).value <= res <= MAX_INT(p).value)
+        return ir.BoolConst(cond)
+    # Todo: This can be optimized quite a bit if we can determine whether values are positive or negative here.
+    elif a.constant:
+        if operator.gt(a.value, imax.value):
+            # overflowing constant
+            return ir.BoolConst(False)
+        elif operator.gt(a.value, 0):
+            # a > 0 and b <= MAX_INT(p) - a
+            diff = ir.BinOp(imin.value, a, "-")
+            return ir.BinOp(b, diff, "<=")
+        else:
+            # a < 0 and MIN_INT(p) - a <= b
+            diff = ir.BinOp(imin.value, a, "-")
+            return ir.BinOp(diff, b, "<=")
+    elif b.constant:
+        if operator.gt(b.value, imax.value):
+            # overflowing constant
+            return ir.BoolConst(False)
+        if operator.gt(b.value, 0):
+            # b > 0 and a <= MAX_INT(p) - b
+            diff = ir.BinOp(imax.value, b, "-")
+            return ir.BinOp(a, diff, "<=")
+        else:
+            # b < 0 and MIN_INT(p) - b <= a
+            diff = ir.BinOp(imin.value, b, "-")
+            return ir.BinOp(diff, a, "<=")
+    else:
+        non_negative_a = ir.BinOp(a, ir.Zero, ">=")
+        cond_if_true = ir.BinOp(b, ir.BinOp(imax, a, "-"))
+        cond_if_false = ir.BinOp(ir.BinOp(imin, a, "-"), b, "<=")
+        return ir.Ternary(non_negative_a, cond_if_true, cond_if_false)
+
+
+def sub_is_safe(a: ir.ValueRef, b: ir.ValueRef, p: int)-> typing.Union[bool, ir.ValueRef]:
+    """
+
+    Note that folding at compile time uses Python's arbitrary precision integers
+
+    "a - b" can be safely evaluated at runtime if:
+
+        (b == 0) or (INT_MIN(p) <= a - b <= INT_MAX(p))
+
+        which implies a - b is safe if any of the following lines hold:
+            b == 0
+            b < 0 and (a < 0 or a <= INT_MAX(p) + b)
+            b > 0 and (a > 0 or INT_MIN(p) + b <= a)
+
+    This should convert to an OverflowError if something cannot be safely evaluated.
+
+    References:
+        LIVINSKII et. al, Random Testing for C and C++ Compilers with YARPGen
+        Dietz et. al, Understanding Integer Overflow in C/C++
+        Bachmann et. al, Chains of Recurrences - a method to expedite the evaluation of closed-form functions
+        https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html
+        https://developercommunity.visualstudio.com/t/please-implement-integer-overflow-detection/409051
+        https://numpy.org/doc/stable/user/building.html
+
+    """
+    assert p > 0
+
+    if a.constant and b.constant:
+        c = operator.sub(a.value, b.value)
+        k = operator.pow(2, p-1)
+        return -k <= c < k
+    elif b == ir.Zero:
+        # Note this is not safe if a == 0, since b == INT_MIN(p) would overflow.
+        # This is always safe and may be optimized away somewhere else.
+        return ir.BoolConst(True)
+    else:
+        # I'll probably need to change the signature here later, since this really needs
+        # dataflow information, which isn't really well established yet.
+        raise NotImplementedError
+    return ir.BoolConst(False)
+
+
 def make_loop_counter(iterables, syms):
     """
 
@@ -591,8 +756,10 @@ def make_loop_counter(iterables, syms):
     Without this, we have greater complexity in order to avoid injecting unsafe behavior during lowering
     that was safe in the original source.
 
+
     References:
         LIVINSKII et. al, Random Testing for C and C++ Compilers with YARPGen
+        Dietz et. al, Understanding Integer Overflow in C/C++
         Bachmann et. al, Chains of Recurrences - a method to expedite the evaluation of closed-form functions
         https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html
         https://developercommunity.visualstudio.com/t/please-implement-integer-overflow-detection/409051
@@ -638,7 +805,10 @@ def make_loop_counter(iterables, syms):
             else:
                 stop = ir.Min(tuple(unique_stops))
         elif have_unique_stop:
-            # Always safe for {start, stop} >= 0
+            # Todo: Even with step size > 0, we can't compute stop - start here unless we can prove
+            #       INT_MIN <= stop - start <= INT_MAX. It's probably worth checking this, since start
+            #       should virtually always be >= 0 in the absence of coding mistakes. Otherwise it pessimizes
+            #       code generation quite a bit. We could always enforce this.
             start = ir.Max(tuple(unique_starts))
             stop = ir.BinOp(stop, start, "-")
         else:

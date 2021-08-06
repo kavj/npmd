@@ -1,5 +1,4 @@
 from contextlib import contextmanager
-from inspect import getsourcelines
 
 
 # Skeleton
@@ -18,7 +17,7 @@ class CompilerError(Exception):
 
 
 @contextmanager
-def compiler_pass_context(entry, src, print_stack=False):
+def module_context(print_stack=False):
     try:
         yield
     except CompilerError as ce:

@@ -3,6 +3,7 @@ import sys
 
 from errors import CompilerError
 from ASTTransform import parse_file
+from errors import module_context
 from pretty_printing import pretty_printer
 
 version = sys.version_info
@@ -26,10 +27,10 @@ class CompilerContext:
         else:
             self.pipeline = [stage() for stage in CompilerContext.stages]
 
-    def run_pipeline(self, source, file_name, type_map):
+    def run_pipeline(self, file_name, type_map):
 
         with module_context():
-            module, symbols = parse_file(source, file_name, type_map)
+            module, symbols = parse_file(file_name, type_map)
 
             funcs = module.functions
 
@@ -46,8 +47,8 @@ class CompilerContext:
 
 
 def name_and_source_from_path(file_path):
-    with open(file_path) as input:
-        src = input.read()
+    with open(file_path) as src_stream:
+        src = src_stream.read()
     file_name = os.path.basename(file_path)
     return file_name, src
 
@@ -57,13 +58,11 @@ def compile(src, file_name, type_map, verbose=False, custom_pipeline=None):
     if verbose:
         if file_name:
             print(f"Compiling: {file_name}")
-    try:
-        tree, symbols = parse_file(src, file_name, type_map)
-        functions = []
-        for func in tree.functions:
-            for stage in pipeline:
-                func = stage(func, )
-
-    except CompilerError:
-        pass
-
+    tree, symbols = parse_file(src, type_map)
+    functions = []
+    cc = CompilerContext(verbose=True, pretty_print_ir=True, pipeline=None)
+    for func in tree.functions:
+        for stage in cc.pipeline:
+            syms = symbols[func.name]
+            func = stage(func, syms)
+            functions.append(func)
