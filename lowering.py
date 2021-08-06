@@ -699,20 +699,50 @@ def sub_is_safe(a: ir.ValueRef, b: ir.ValueRef, p: int)-> typing.Union[bool, ir.
 
     """
     assert p > 0
+    imin = MIN_INT(p)
+    imax = MAX_INT(p)
 
     if a.constant and b.constant:
+        # Ignore overflowing arithmetic if the result is within bounds after folding.
         c = operator.sub(a.value, b.value)
-        k = operator.pow(2, p-1)
-        return -k <= c < k
+        if imin.value <= c < imax.value:
+            return ir.BoolConst(True)
+        else:
+            return ir.BoolConst(False)
     elif b == ir.Zero:
-        # Note this is not safe if a == 0, since b == INT_MIN(p) would overflow.
-        # This is always safe and may be optimized away somewhere else.
+        # It's always safe to compute a - 0
+        # It's unsafe to compute 0 - MIN_INT(p)
         return ir.BoolConst(True)
     else:
-        # I'll probably need to change the signature here later, since this really needs
-        # dataflow information, which isn't really well established yet.
-        raise NotImplementedError
-    return ir.BoolConst(False)
+        # b == 0
+        # b > 0 and (a > 0 or INT_MIN(p) + b <= a)
+        # b < 0 and (a < 0 or a <= INT_MAX(p) + b)
+
+        b_ge_zero = ir.BinOp(b, ir.Zero, ">=")
+        imin = MIN_INT(p)
+        imax = MAX_INT(p)
+
+        fold_constants = const_folding()
+
+        a_ge_zero = fold_constants(ir.BinOp(a, ir.Zero, ">="))
+        a_le_zero = fold_constants(ir.BinOp(a, ir.Zero, "<="))
+
+        b_ge_zero = fold_constants(ir.BinOp(b, ir.Zero, ">="))
+
+        b_plus_min = fold_constants(ir.BinOp(b, imin, "+"))
+        b_plus_max = fold_constants(ir.BinOp(b, imax, "+"))
+
+        b_plus_min_le_a = fold_constants(ir.BinOp(b_plus_min, a, "<="))
+        a_le_b_plus_max = fold_constants(ir.BinOp(a, b_plus_max, "<="))
+
+        on_true = ir.OR((a_ge_zero, b_plus_min_le_a))
+        on_false = ir.OR((a_le_zero, a_le_b_plus_max))
+        test = ir.Ternary(b_ge_zero, )
+        on_true = ir.OR(a_ge_zero, on_true, on_false)
+
+        test_on_true = ir.OR((ir.BinOp(a, ir.Zero, ">="), ir.BinOp(ir.BinOp(b, imin, "+"), a, "<=")))
+        test_on_false = ir.OR((ir.BinOp(a, ir.Zero, "<="), ir.BinOp(a, ir.BinOp(b, imax, "+"), "<=")))
+        return ir.Ternary(non_negative_b, test_on_pos, test_on_non_neg)
 
 
 def make_loop_counter(iterables, syms):
