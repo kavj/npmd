@@ -268,16 +268,15 @@ class symboltable:
         prefix = extract_name(prefix)
         if self.declares(prefix):
             gen = self._get_num_generator(prefix)
-            name = f"{prefix}_{next(gen)}"
-            while self.declares(name):
-                name = f"{prefix}_{next(gen)}"
-            name = ir.NameRef(name)
+            name = wrap_input(f"{prefix}_{next(gen)}")
+            while name in self.symbols:
+                name = wrap_input(f"{prefix}_{next(gen)}")
         else:
             # First use, no need to rename
-            name = ir.NameRef(prefix)
+            name = wrap_input(prefix)
         return name
 
-    def bind_type_to_name(self, name, type_, is_added):
+    def bind_type_to_name(self, name, type_):
         """
         Register a type for an untyped or undeclared symbol.
         """
@@ -315,9 +314,13 @@ class symboltable:
         """
         This is used to add a unique typed temporary variable name.
         """
-        assert type_ is not None
+        type_ = self.get_ir_type(type_)
         name = self.make_unique_name(name)
-        return self.bind_type_to_name(name, type_, is_added=True)
+        sym = symbol(name, type_, is_source_name=False, is_arg=False, is_assigned=True)
+        self.symbols[name] = sym
+        # The input name may require mangling for uniqueness.
+        # Return the name as it is registered.
+        return name
 
 
 def symbol_table_from_pysymtable(func_table, type_map, file_name):
