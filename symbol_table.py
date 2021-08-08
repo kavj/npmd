@@ -4,7 +4,6 @@ import builtins
 import itertools
 import keyword
 import numbers
-import operator
 
 import numpy as np
 
@@ -79,20 +78,6 @@ def _(input: numbers.Real):
     return ir.FloatConst(input)
 
 
-class FunctionContext:
-
-    def __init__(self, func, types):
-        self.func = func
-        self.types = types
-
-
-class CompilerContext:
-
-    def __init__(self, funcs, type_maps):
-        self.funcs = funcs
-        self.type_maps = type_maps
-
-
 def map_alias_to_qualified_names(import_nodes):
     """
     Internally, we refer to qualified names for uniqueness reasons.
@@ -110,6 +95,12 @@ def map_alias_to_qualified_names(import_nodes):
             qual_names[node.as_name] = node.module
         else:
             raise ValueError
+
+
+def is_valid_identifier(input):
+    if isinstance(input, ir.NameRef):
+        input = input.name
+    return isinstance(input, str) and input.isidentifier() and (input not in reserved_names)
 
 
 class symbol:
@@ -190,7 +181,7 @@ class symboltable:
     def __init__(self, scope_name):
         self.symbols = {}   # name -> typed symbol entry
         self.type_dict = tr.scalar_type_map.copy()
-        self.scope_name = scope_name
+        self.scope_name = wrap_input(scope_name)  # wrap everything to avoid false comparing raw strings to namerefs
         self.prefixes = {}  # prefix for adding enumerated variable names
 
     def make_type_lowering_rule(self, input_type, lltype):
@@ -256,13 +247,10 @@ class symboltable:
 
     def lookup_type(self, name):
         """
-        Look up type from name, returning None if name doesn't exist
-        or name is untyped.
-
+        shortcut to get type info only
         """
         sym = self.lookup(name)
-        type_ = sym.type_ if sym is not None else None
-        return type_
+        return sym.type_
 
     def make_unique_name(self, prefix):
         prefix = extract_name(prefix)
@@ -288,11 +276,11 @@ class symboltable:
             msg = f"Internal Error: Cannot add type to undeclared symbol name {name}."
             raise CompilerError(msg)
         else:
-            existing = sym.type_
-            if existing is None:
+            declared_type = sym.type_
+            if declared_type is None:
                 sym.type_ = type_
-            elif existing != type_:
-                msg = f"Conflicting types {existing} and {type_} for variable name {name}."
+            elif declared_type != type_:
+                msg = f"Conflicting types {declared_type} and {type_} for variable name {name}."
                 raise CompilerError(msg)
 
     def register_src_name(self, name, type_, is_arg, is_assigned):
@@ -305,6 +293,9 @@ class symboltable:
             msg = f"Internal Error: Source name {name} is already registered."
             raise KeyError(msg)
         name = wrap_input(name)
+        if name == self.scope_name:
+            msg = f"Variable name: {name.name} shadows function name."
+            raise CompilerError(msg)
         type_ = self.get_ir_type(type_)
         is_source_name = True
         sym = symbol(name, type_, is_source_name, is_arg, is_assigned)
