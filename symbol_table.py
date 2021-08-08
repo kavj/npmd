@@ -173,49 +173,17 @@ def make_numpy_call(node: ir.Call):
 
 
 class symboltable:
-    type_by_name = {"int": int, "float": float, "numpy.int32": np.int32, "numpy.int64": np.int64,
-                    "numpy.float32": np.float32, "numpy.float64": np.float64}
-
     scalar_ir_types = frozenset({tr.Int32, tr.Int64, tr.Float32, tr.Float64, tr.Predicate32, tr.Predicate64})
 
-    def __init__(self, scope_name):
+    def __init__(self, scope_name, default_int_is_64=True):
         self.symbols = {}   # name -> typed symbol entry
-        self.type_dict = tr.scalar_type_map.copy()
+        self.default_int = tr.Int64 if default_int_is_64 else tr.Int32
         self.scope_name = wrap_input(scope_name)  # wrap everything to avoid false comparing raw strings to namerefs
         self.prefixes = {}  # prefix for adding enumerated variable names
-
-    def make_type_lowering_rule(self, input_type, lltype):
-        assert isinstance(input_type, type)
-        assert lltype in symboltable.scalar_ir_types
-        self.type_dict[input_type] = lltype
 
     def declares(self, name):
         name = wrap_input(name)
         return name in self.symbols
-
-    def get_ir_type(self, type_):
-        if type_ is None:
-            return
-        if isinstance(type_, ir.NameRef):
-            type_ = symboltable.type_by_name.get(type_.name)
-            if type_ is None:
-                msg = f"Cannot match ir type to {type}."
-                raise ValueError(msg)
-        if isinstance(type_, ir.ArrayType):
-            dtype = type_.dtype
-            if dtype not in symboltable.scalar_ir_types:
-                dtype = self.type_dict.get(dtype)
-                if dtype is None:
-                    msg = f"Cannot match ir type to array element type {type_.dtype}."
-                    raise ValueError(msg)
-            type_ = ir.ArrayType(type_.ndims, dtype)
-        elif type_ not in symboltable.scalar_ir_types:
-            dtype = self.type_dict.get(type_)
-            if dtype is None:
-                msg = f"Cannot match ir type to scalar type {type_}"
-                raise ValueError(msg)
-            type_ = dtype
-        return type_
 
     def lookup(self, name):
         name = wrap_input(name)
@@ -227,10 +195,6 @@ class symboltable:
         if sym is None:
             return False
         return sym.is_source_name
-
-    @property
-    def default_int(self):
-        return self.type_dict[int]
 
     def _get_num_generator(self, prefix):
         # splitting by prefix helps avoids appending
@@ -252,6 +216,10 @@ class symboltable:
         sym = self.lookup(name)
         return sym.type_
 
+    def is_typed(self, name):
+        sym = self.lookup(name)
+        return sym is not None and sym.type_ is not None
+
     def make_unique_name(self, prefix):
         prefix = extract_name(prefix)
         if self.declares(prefix):
@@ -270,7 +238,6 @@ class symboltable:
         """
 
         assert type_ is not None
-        type_ = self.get_ir_type(type_)
         sym = self.lookup(name)
         if symbol is None:
             msg = f"Internal Error: Cannot add type to undeclared symbol name {name}."
@@ -283,7 +250,7 @@ class symboltable:
                 msg = f"Conflicting types {declared_type} and {type_} for variable name {name}."
                 raise CompilerError(msg)
 
-    def register_src_name(self, name, type_, is_arg, is_assigned):
+    def register_src_name(self, name, is_arg, is_assigned, type_):
         """
         Register a source name using the corresponding symbol from the Python symbol table.
 
@@ -296,7 +263,6 @@ class symboltable:
         if name == self.scope_name:
             msg = f"Variable name: {name.name} shadows function name."
             raise CompilerError(msg)
-        type_ = self.get_ir_type(type_)
         is_source_name = True
         sym = symbol(name, type_, is_source_name, is_arg, is_assigned)
         self.symbols[name] = sym
@@ -305,7 +271,6 @@ class symboltable:
         """
         This is used to add a unique typed temporary variable name.
         """
-        type_ = self.get_ir_type(type_)
         name = self.make_unique_name(name)
         sym = symbol(name, type_, is_source_name=False, is_arg=False, is_assigned=True)
         self.symbols[name] = sym
@@ -342,7 +307,7 @@ def symbol_table_from_pysymtable(func_table, type_map, file_name):
             raise CompilerError(msg)
         is_arg = sym.is_parameter()
         is_assigned = sym.is_assigned()
-        type_ = type_map.get(name)
+        type_ = None
         internal_table.register_src_name(name, type_, is_arg, is_assigned)
 
     return internal_table

@@ -1,17 +1,61 @@
 import os
 import sys
+import typing
 
-from errors import CompilerError
+import numpy as np
+
+import ir
+import type_resolution as tr
 from ASTTransform import parse_file
+from dataclasses import dataclass
 from errors import module_context
+from symbol_table import wrap_input
 from pretty_printing import pretty_printer
+
 
 version = sys.version_info
 # Python 2 can't parse a significant
 # amount of this code, so error messages ignore it.
 if sys.version_info.minor < 8:
-    msg = f"Python 3.8 or above is required."
-    raise RuntimeError(msg)
+    raise RuntimeError(f"Python 3.8 or above is required.")
+
+
+@dataclass(frozen=True)
+class ArrayArg(ir.ValueRef):
+    """
+    Array argument. This ensures reaching definitions of array
+    parameters are unambiguous.
+    """
+    dims: typing.Tuple[typing.Union[ir.NameRef, ir.IntConst], ...]
+    dtype: typing.Hashable
+    stride: typing.Optional[typing.Union[ir.NameRef, ir.IntConst]]
+
+
+def get_scalar_type(input_type):
+    if input_type == np.float32:
+        return tr.Float32
+    elif input_type == np.float64:
+        return tr.Float64
+    elif input_type == np.int32:
+        return tr.Int32
+    elif input_type == np.int64:
+        return tr.Int64
+    elif input_type == bool:
+        return tr.BoolType
+    else:
+        msg = f"Supported types are {np.float32}, {np.float64}, {np.int32}, {np.int64}, {bool}, received {input_type}."
+        raise ValueError(msg)
+
+
+def make_array_arg_type(dims, dtype, stride=None):
+    """
+    Parameterized array type suitable for use as an argument.
+    """
+    dtype = get_scalar_type(dtype)
+    dims = tuple(wrap_input(d) for d in dims)
+    if stride is not None:
+        stride = wrap_input(stride)
+    return ArrayArg(dims, dtype, stride)
 
 
 class CompilerContext:

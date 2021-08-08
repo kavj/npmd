@@ -21,9 +21,23 @@ FPredicate32 = ir.ScalarType(bits=32, integral=False, boolean=True)
 FPredicate64 = ir.ScalarType(bits=64, integral=False, boolean=True)
 BoolType = ir.ScalarType(bits=8, integral=True, boolean=True)
 
+
 # defaults, can be overridden
-scalar_type_map = {int: Int64, float: Float64, bool: BoolType, np.float32: Float32, np.float64: Float64,
-                   np.int32: Int32, np.int64: Int64, np.bool: BoolType}
+by_input_type = {np.int32: Int32,
+                 np.int64: Int64,
+                 np.float32: Float32,
+                 np.float64: Float64,
+                 bool: BoolType,
+                 np.bool_: BoolType}
+
+
+by_input_type_name = {"numpy.int32": Int32,
+                      "numpy.int64": Int64,
+                      "numpy.float32": Float32,
+                      "numpy.float64": Float64,
+                      "numpy.bool": BoolType,
+                      "numpy.bool_": BoolType}
+
 
 # initially supported, untyped ints and other ranges require additional
 # work, and they are less commonly used

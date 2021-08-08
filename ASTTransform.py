@@ -362,7 +362,7 @@ class TreeBuilder(ast.NodeVisitor):
         # This is probably never going to be supported, because it requires inlining
         # a large number of calculations in ways that may sometimes hamper performance.
         raise CompilerError("Extended slices are currently unsupported. This supports single"
-                        "slices per dimension")
+                            "slices per dimension")
 
     def visit_AugAssign(self, node: ast.AugAssign):
         target = self.visit(node.target)
