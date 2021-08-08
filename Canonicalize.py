@@ -4,6 +4,7 @@ import typing
 from functools import singledispatch, singledispatchmethod
 
 import ir
+from errors import CompilerError
 from visitor import StmtTransformer
 
 
@@ -338,13 +339,13 @@ class CallSpecialize:
         arg_count = len(args)
         kw_count = len(keywords)
         if not self.allow_keywords and kw_count > 0:
-            raise ValueError(f"Function {self.name} does not allow keyword arguments.")
+            raise CompilerError(f"Function {self.name} does not allow keyword arguments.")
         mapped = {}
         unrecognized = set()
         duplicates = set()
         missing = set()
         if arg_count + kw_count > self.max_arg_count:
-            raise ValueError(f"Function {self.name} has {self.max_arg_count} fields. "
+            raise CompilerError(f"Function {self.name} has {self.max_arg_count} fields. "
                                f"{arg_count + kw_count} arguments were provided.")
         for field, arg in zip(self.args, args):
             mapped[field] = arg
@@ -361,7 +362,7 @@ class CallSpecialize:
                 else:
                     missing.add(field)
         for u, v in unrecognized:
-            raise ValueError(f"unrecognized field {u} in call to {self.name}")
+            raise CompilerError(f"unrecognized field {u} in call to {self.name}")
         return self.replacement(mapped)
 
     def validate_simple_call(self, args):
@@ -369,10 +370,10 @@ class CallSpecialize:
         arg_count = len(args)
         mapped = {}
         if arg_count > self.max_arg_count:
-            raise ValueError(f"Signature for {self.name} accepts {self.max_arg_count} arguments. "
+            raise CompilerError(f"Signature for {self.name} accepts {self.max_arg_count} arguments. "
                                f"{arg_count} arguments received.")
         elif arg_count < self.min_arg_count:
-            raise ValueError(f"Signature for {self.name} expects at least {self.min_arg_count} arguments, "
+            raise CompilerError(f"Signature for {self.name} expects at least {self.min_arg_count} arguments, "
                                f"{arg_count} arguments received.")
         for field, arg in zip(self.args, args):
             mapped[field] = arg

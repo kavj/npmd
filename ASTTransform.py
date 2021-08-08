@@ -123,7 +123,7 @@ class ImportHandler(ast.NodeVisitor):
             if module_alias in self.bound_names:
                 msg = f"Module alias {module_alias.name} to module {module_name.name}" \
                       f" shadows a previously bound name."
-                raise ValueError(msg)
+                raise CompilerError(msg)
             mod_import = ir.ModImport(module_name, module_alias, pos)
             self.import_map[module_alias] = mod_import
             self.bound_names.add(module_alias)
@@ -137,7 +137,7 @@ class ImportHandler(ast.NodeVisitor):
             import_alias = ir.NameRef(name.asname) if hasattr(name, "asname") else imported_name
             if import_alias in self.bound_names:
                 msg = "Name {import_alias} overwrites an existing assignment."
-                raise ValueError(msg)
+                raise CompilerError(msg)
             import_ref = ir.NameImport(module_name, imported_name, import_alias, pos)
             self.import_map[import_alias] = import_ref
             self.bound_names.add(import_alias)
@@ -361,7 +361,7 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_ExtSlice(self, node: ast.ExtSlice):
         # This is probably never going to be supported, because it requires inlining
         # a large number of calculations in ways that may sometimes hamper performance.
-        raise TypeError("Extended slices are currently unsupported. This supports single"
+        raise CompilerError("Extended slices are currently unsupported. This supports single"
                         "slices per dimension")
 
     def visit_AugAssign(self, node: ast.AugAssign):
@@ -403,7 +403,7 @@ class TreeBuilder(ast.NodeVisitor):
                     if existing_type != ir_type:
                         msg = f"IR type from type hint conflicts with existing " \
                               f"(possibly inferred) type {existing_type}, line: {pos.line_begin}"
-                        raise ValueError(msg)
+                        raise CompilerError(msg)
         if node.value is not None:
             # CPython will turn the syntax "var: annotation" into an AnnAssign node
             # with node.value = None. If executed, this won't bind or update the value of var.
@@ -431,7 +431,7 @@ class TreeBuilder(ast.NodeVisitor):
 
     def visit_For(self, node: ast.For):
         if node.orelse:
-            raise ValueError("or else clause not supported for for statements")
+            raise CompilerError("or else clause not supported for for statements")
         iter_node = self.visit(node.iter)
         target_node = self.visit(node.target)
         pos = extract_positional_info(node)
@@ -448,13 +448,13 @@ class TreeBuilder(ast.NodeVisitor):
         except ValueError:
             # Generator will throw an error on bad unpacking
             msg = f"Cannot safely unpack for loop expression, line: {pos.line_begin}"
-            raise ValueError(msg)
+            raise CompilerError(msg)
         conflicts = targets.intersection(iterables)
         if conflicts:
             conflict_names = ", ".join(c for c in conflicts)
             msg = f"{conflict_names} appear in both the target an iterable sequences of a for loop, " \
                   f"line {pos.line_begin}. This is not supported."
-            raise ValueError(msg)
+            raise CompilerError(msg)
         with self.loop_region(node):
             for stmt in node.body:
                 self.visit(stmt)
@@ -463,7 +463,7 @@ class TreeBuilder(ast.NodeVisitor):
 
     def visit_While(self, node: ast.While):
         if node.orelse:
-            raise ValueError("or else clause not supported for for statements")
+            raise CompilerError("or else clause not supported for for statements")
         test = self.visit(node.test)
         pos = extract_positional_info(node)
         with self.loop_region(node):
@@ -474,14 +474,14 @@ class TreeBuilder(ast.NodeVisitor):
 
     def visit_Break(self, node: ast.Break):
         if self.enclosing_loop is None:
-            raise ValueError("Break encountered outside of loop.")
+            raise CompilerError("Break encountered outside of loop.")
         pos = extract_positional_info(node)
         stmt = ir.Break(pos)
         self.body.append(stmt)
 
     def visit_Continue(self, node: ast.Continue):
         if self.enclosing_loop is None:
-            raise ValueError("Continue encountered outside of loop.")
+            raise CompilerError("Continue encountered outside of loop.")
         pos = extract_positional_info(node)
         stmt = ir.Continue(pos)
         self.body.append(stmt)
@@ -490,7 +490,7 @@ class TreeBuilder(ast.NodeVisitor):
         # can't check just self.blocks, since we automatically 
         # instantiate entry and exit
         if node is not self.entry:
-            raise RuntimeError(f"Nested scopes are unsupported. line: {node.lineno}")
+            raise CompilerError(f"Nested scopes are unsupported. line: {node.lineno}")
         name = node.name
         # Todo: warn about unsupported argument features
         params = [ir.NameRef(arg.arg) for arg in node.args.args]
@@ -506,7 +506,7 @@ class TreeBuilder(ast.NodeVisitor):
         self.body.append(stmt)
 
     def generic_visit(self, node):
-        raise NotImplementedError(f"{type(node)} is unsupported")
+        raise CompilerError(f"{type(node)} is unsupported")
 
 
 def map_functions_by_name(node: ast.Module):

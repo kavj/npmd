@@ -266,12 +266,11 @@ class TypeChecker(StmtVisitor):
         self.array_mismatches = defaultdict(set)
         self.expr_types = {}
         self.visit(entry)
-        missing = self.missing
         expr_types = self.expr_types
         array_mismatches = self.array_mismatches
         invalid_truth_tests = self.invalid_truth_tests
         self.missing = self.expr_types = self.array_mismatches = self.invalid_truth_tests = None
-        return missing, expr_types, array_mismatches, invalid_truth_tests
+        return expr_types, array_mismatches, invalid_truth_tests
 
     def lookup_type(self, var_or_expr):
         if isinstance(var_or_expr, ir.NameRef):
