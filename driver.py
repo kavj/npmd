@@ -22,10 +22,9 @@ class CompilerContext:
     def __init__(self, verbose=False, pretty_print_ir=False, pipeline=None):
         self.verbose = verbose
         self.pretty_print_ir_stages = pretty_print_ir
-        if pipeline is not None:
-            self.pipeline = pipeline
-        else:
-            self.pipeline = [stage() for stage in CompilerContext.stages]
+        if pipeline is None:
+            pipeline = [stage() for stage in CompilerContext.stages]
+        self.pipeline = pipeline
 
     def run_pipeline(self, file_name, type_map):
 

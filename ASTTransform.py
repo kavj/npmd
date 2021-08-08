@@ -190,8 +190,10 @@ class TreeBuilder(ast.NodeVisitor):
         self.body = stashed
 
     def is_local_variable_name(self, name: ir.NameRef):
-        name = name.name
-        return name in self.symbols.src_locals
+        sym = self.symbols.lookup(name)
+        if sym is None:
+            return False
+        return sym.is_source_name
 
     def visit_Attribute(self, node: ast.Attribute) -> ir.NameRef:
         value = self.visit(node.value)
@@ -552,7 +554,7 @@ def parse_file(file_name, type_map):
         for func_name, ast_entry_point in funcs_by_name.items():
             table = module_symtable.lookup(func_name).get_namespace()
             func_type_map = type_map[func_name]
-            symbols = symbol_table_from_pysymtable(table, import_map, func_type_map, file_name)
+            symbols = symbol_table_from_pysymtable(table, func_type_map, file_name)
             symbol_tables[func_name] = symbols
             func_ir = build_func_ir(ast_entry_point, symbols)
             funcs.append(func_ir)

@@ -13,6 +13,8 @@ from functools import singledispatch, singledispatchmethod
 import ir
 import type_resolution as tr
 
+from errors import CompilerError
+
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
 
 
@@ -113,24 +115,29 @@ def map_alias_to_qualified_names(import_nodes):
 class symbol:
     """
     variable name symbol class
+    These are meant to be interned by the symbol table and not created arbitrarily.
     """
 
-    def __init__(self, name, type_, make_unique):
+    def __init__(self, name, type_, is_source_name, is_arg, is_assigned):
+        assert isinstance(name, ir.NameRef)
+        assert is_source_name or type_ is not None
         self.name = name
         self.type_ = type_
-        self.added = make_unique
+        self.is_source_name = is_source_name
+        self.is_arg = is_arg
+        self.is_assigned = is_assigned
 
     def __eq__(self, other):
         assert isinstance(other, symbol)
         return (self.name == other.name
                 and self.type_ == other.type_
-                and self.added == other.added)
+                and self.is_source_name == other.is_source_name)
 
     def __ne__(self, other):
         assert isinstance(other, symbol)
         return (self.name != other.name
                 or self.type_ != other.type_
-                or self.added != other.added)
+                or self.is_source_name != other.is_source_name)
 
     def __hash__(self):
         return hash(self.name)
@@ -180,24 +187,24 @@ class symboltable:
 
     scalar_ir_types = frozenset({tr.Int32, tr.Int64, tr.Float32, tr.Float64, tr.Predicate32, tr.Predicate64})
 
-    def __init__(self, scope_name, src_locals, import_map):
+    def __init__(self, scope_name):
         self.symbols = {}   # name -> typed symbol entry
-        self.scalar_type_map = tr.scalar_type_map.copy()
-        self.src_locals = src_locals # initially declared names
-        self.import_map = import_map # source name -> qualified name
+        self.type_dict = tr.scalar_type_map.copy()
         self.scope_name = scope_name
         self.prefixes = {}  # prefix for adding enumerated variable names
 
     def make_type_lowering_rule(self, input_type, lltype):
         assert isinstance(input_type, type)
         assert lltype in symboltable.scalar_ir_types
-        self.scalar_type_map[input_type] = lltype
+        self.type_dict[input_type] = lltype
 
     def declares(self, name):
         name = wrap_input(name)
         return name in self.symbols
 
     def get_ir_type(self, type_):
+        if type_ is None:
+            return
         if isinstance(type_, ir.NameRef):
             type_ = symboltable.type_by_name.get(type_.name)
             if type_ is None:
@@ -206,13 +213,13 @@ class symboltable:
         if isinstance(type_, ir.ArrayType):
             dtype = type_.dtype
             if dtype not in symboltable.scalar_ir_types:
-                dtype = self.scalar_type_map.get(dtype)
+                dtype = self.type_dict.get(dtype)
                 if dtype is None:
                     msg = f"Cannot match ir type to array element type {type_.dtype}."
                     raise ValueError(msg)
             type_ = ir.ArrayType(type_.ndims, dtype)
         elif type_ not in symboltable.scalar_ir_types:
-            dtype = self.scalar_type_map.get(type_)
+            dtype = self.type_dict.get(type_)
             if dtype is None:
                 msg = f"Cannot match ir type to scalar type {type_}"
                 raise ValueError(msg)
@@ -224,13 +231,15 @@ class symboltable:
         sym = self.symbols.get(name)
         return sym
 
-    def is_added(self, name):
-        name = wrap_input(name)
-        return name not in self.src_locals
+    def is_source_name(self, name):
+        sym = self.lookup(name)
+        if sym is None:
+            return False
+        return sym.is_source_name
 
     @property
     def default_int(self):
-        return self.scalar_type_map[int]
+        return self.type_dict[int]
 
     def _get_num_generator(self, prefix):
         # splitting by prefix helps avoids appending
@@ -245,16 +254,15 @@ class symboltable:
         sym = self.lookup(name)
         return isinstance(sym.type_, ir.ArrayType)
 
-    def make_symbol(self, name, type_, added):
-        name = wrap_input(name)
-        if self.declares(name):
-            existing = self.lookup(name)
-            msg = f"Existing symbol definition {existing} for {name} is incompatible with new definition" \
-                  f"{type_}."
-            raise KeyError(msg)
-        else:
-            sym = symbol(name, type_, added)
-            self.symbols[name] = sym
+    def lookup_type(self, name):
+        """
+        Look up type from name, returning None if name doesn't exist
+        or name is untyped.
+
+        """
+        sym = self.lookup(name)
+        type_ = sym.type_ if sym is not None else None
+        return type_
 
     def make_unique_name(self, prefix):
         prefix = extract_name(prefix)
@@ -265,71 +273,57 @@ class symboltable:
                 name = f"{prefix}_{next(gen)}"
             name = ir.NameRef(name)
         else:
-            # No need to rename
+            # First use, no need to rename
             name = ir.NameRef(prefix)
         return name
 
-    # These return a name reference to the symbol name that is actually used.
-    # In the case of is_added=False, this is the original name. Otherwise it
-    # may be a unique variable name that instantiates some renaming or implementation binding.
+    def bind_type_to_name(self, name, type_, is_added):
+        """
+        Register a type for an untyped or undeclared symbol.
+        """
 
-    def add_typed_scalar(self, name, type_, added):
-        # run type check by default, to avoid internal array types
-        # with Python or numpy types as parameters.
-
-        name = wrap_input(name)
-        if added:
-            name = self.make_unique_name(name)
-        if self.declares(name):
-            msg = f"Duplicate symbol declaration for variable name '{name}'."
-            raise ValueError(msg)
+        assert type_ is not None
         type_ = self.get_ir_type(type_)
-        self.make_symbol(name, type_, added)
-        return name
-
-    @singledispatchmethod
-    def add_view(self, base, name, transpose, is_added):
-        raise NotImplementedError
-
-    @add_view.register
-    def _(self, expr: ir.Subscript, name, is_added):
-        base = self.lookup(expr.value)
-        base_type = base.type_
-        if not isinstance(base_type, ir.ArrayType):
-            msg = f"Cannot take view of non-array type {base.name}"
-            raise ValueError(msg)
-        if is_added or name not in self.src_locals:
-            # mangle if either the name or assignment motivating
-            # this symbol is not present in source.
-            name = self.make_unique_name(prefix=name)
-        if isinstance(expr.slice, ir.Slice):
-            # no dim change
-            ndims = base_type.ndims
+        sym = self.lookup(name)
+        if symbol is None:
+            msg = f"Internal Error: Cannot add type to undeclared symbol name {name}."
+            raise CompilerError(msg)
         else:
-            ndims = operator.sub(base_type.ndims, 1)
-        if operator.ge(ndims.value, 1):
-            view_type = ir.ArrayType(ndims, base_type.dtype)
-        else:
-            view_type = base_type.dtype
-        self.make_symbol(name, view_type, is_added)
-        return name
+            existing = sym.type_
+            if existing is None:
+                sym.type_ = type_
+            elif existing != type_:
+                msg = f"Conflicting types {existing} and {type_} for variable name {name}."
+                raise CompilerError(msg)
 
-    @add_view.register
-    def _(self, expr: ir.NameRef, name, is_added):
-        base = self.lookup(expr)
-        base_type = base.type_
-        if not isinstance(base_type, ir.ArrayType):
-            msg = f"Cannot take view using non-array type {base_type}"
-            raise ValueError(msg)
-        if is_added or name not in self.src_locals:
-            name = self.make_unique_name(name)
-        self.make_symbol(name, base_type, is_added)
-        return name
+    def register_src_name(self, name, type_, is_arg, is_assigned):
+        """
+        Register a source name using the corresponding symbol from the Python symbol table.
+
+        """
+
+        if self.declares(name):
+            msg = f"Internal Error: Source name {name} is already registered."
+            raise KeyError(msg)
+        name = wrap_input(name)
+        type_ = self.get_ir_type(type_)
+        is_source_name = True
+        sym = symbol(name, type_, is_source_name, is_arg, is_assigned)
+        self.symbols[name] = sym
+
+    def register_impl_name(self, name, type_):
+        """
+        This is used to add a unique typed temporary variable name.
+        """
+        assert type_ is not None
+        name = self.make_unique_name(name)
+        return self.bind_type_to_name(name, type_, is_added=True)
 
 
-def symbol_table_from_pysymtable(func_table, import_map, type_map, file_name):
+def symbol_table_from_pysymtable(func_table, type_map, file_name):
     """
     Build an internally used symbol table from a Python function symtable and type information.
+    Note: read func_table as py_symbol_table, noting that calling it py_anything would be a Python language violation.
 
     func_table: Function symbol table symtable.symtable
     type_map: dict[name: interface_type]
@@ -344,23 +338,17 @@ def symbol_table_from_pysymtable(func_table, import_map, type_map, file_name):
     elif func_table.get_type() != "function":
         raise TypeError(f"{func_name} in file {file_name} refers to a class rather than a function. This is "
                         f"unsupported.")
-    missing = []
-    locals_from_source = set(func_table.get_locals())
-    table = symboltable(func_name, locals_from_source, import_map)
+    internal_table = symboltable(func_name)
 
     # register types
-    for arg in func_table.get_parameters():
-        # Check that all arguments have type info.
-        type_ = type_map.get(arg)
-        table.add_typed_scalar(arg, type_, added=False)
-    s = table.symbols.get(ir.NameRef('a'))
-    if missing:
-        args = ", ".join(arg for arg in missing)
-        msg = f"Function '{func_table.get_name()}' is missing type info for the following arguments: {args}."
-        raise ValueError(msg)
-    locals_from_source = set(func_table.get_locals())
-    if func_table.get_name() in locals_from_source:
-        msg = f"Function {func_table.get_name()} contains a local variable with the same name. This is unsupported."
-        raise ValueError(msg)
+    for name in func_table.get_locals():
+        sym = func_table.lookup(name)
+        if sym.is_imported():
+            msg = f"Imports at function scope are not currently supported. Import alias: {name}"
+            raise CompilerError(msg)
+        is_arg = sym.is_parameter()
+        is_assigned = sym.is_assigned()
+        type_ = type_map.get(name)
+        internal_table.register_src_name(name, type_, is_arg, is_assigned)
 
-    return table
+    return internal_table
