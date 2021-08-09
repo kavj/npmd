@@ -27,7 +27,7 @@ scalar_pretty_types = {tr.Int32: "numpy.int32",
 def get_pretty_scalar_type(t):
     scalar_type = scalar_pretty_types.get(t)
     if scalar_type is None:
-        msg = f"Pretty printer's formatter encountered unsupported type annotation"
+        msg = f"Pretty printer's formatter encountered unsupported type annotation '{t}'."
         raise ValueError(msg)
     return scalar_type
 
