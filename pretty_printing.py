@@ -26,15 +26,13 @@ scalar_pretty_types = {tr.Int32: "numpy.int32",
 
 def get_pretty_scalar_type(t):
     scalar_type = scalar_pretty_types.get(t)
-    if scalar_type is None:
-        msg = f"Pretty printer's formatter encountered unsupported type annotation '{t}'."
-        raise ValueError(msg)
     return scalar_type
 
 
 def get_pretty_type(t):
     if isinstance(t, ir.ArrayType):
         scalar_type = get_pretty_scalar_type(t.dtype)
+        assert scalar_type is not None
         pt = f"numpy.ndarray[{scalar_type}]"
     else:
         pt = get_pretty_scalar_type(t)
@@ -399,7 +397,8 @@ class pretty_printer:
                     # This will be an error later.
                     type_ = symbol.type_
                     pretty_type = get_pretty_type(type_)
-                    formatted_target = f"{formatted_target}: {pretty_type}"
+                    if pretty_type is not None:
+                        formatted_target = f"{formatted_target}: {pretty_type}"
             stmt = f"{formatted_target} = {formatted_value}"
         self.print_line(stmt)
 

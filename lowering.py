@@ -858,6 +858,29 @@ def sub_is_safe(a: ir.ValueRef, b: ir.ValueRef, p: int)-> typing.Union[bool, ir.
         return ir.TRUTH(test)
 
 
+def split_intervals_by_step(intervals):
+    pass
+
+
+def split_start_stop(intervals):
+    """
+    split pairs of start stop into two dictionaries,
+
+    starts with respect to stops
+    stops with respect to starts
+
+    """
+
+    by_start = defaultdict(set)
+    by_stop = defaultdict(set)
+
+    for start, stop in intervals:
+        by_start[start].add(stop)
+        by_stop[stop].add(start)
+
+    return by_start, by_stop
+
+
 def make_loop_counter(iterables, syms):
     """
 

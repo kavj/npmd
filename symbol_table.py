@@ -34,6 +34,12 @@ def reduces_array_dims(ref):
         raise TypeError(msg)
 
 
+def is_valid_identifier(input):
+    if isinstance(input, ir.NameRef):
+        input = input.name
+    return isinstance(input, str) and input.isidentifier() and (input not in reserved_names)
+
+
 @singledispatch
 def wrap_input(input):
     msg = f"No method to wrap {input} of type {type(input)}."
@@ -42,7 +48,7 @@ def wrap_input(input):
 
 @wrap_input.register
 def _(input: str):
-    if not input.isidentifier():
+    if not is_valid_identifier(input):
         msg = f"{input} is not a valid variable name."
         raise ValueError(msg)
     return ir.NameRef(input)
@@ -95,12 +101,6 @@ def map_alias_to_qualified_names(import_nodes):
             qual_names[node.as_name] = node.module
         else:
             raise ValueError
-
-
-def is_valid_identifier(input):
-    if isinstance(input, ir.NameRef):
-        input = input.name
-    return isinstance(input, str) and input.isidentifier() and (input not in reserved_names)
 
 
 class symbol:
@@ -308,6 +308,6 @@ def symbol_table_from_pysymtable(func_table, type_map, file_name):
         is_arg = sym.is_parameter()
         is_assigned = sym.is_assigned()
         type_ = None
-        internal_table.register_src_name(name, type_, is_arg, is_assigned)
+        internal_table.register_src_name(name, is_arg, is_assigned, type_)
 
     return internal_table

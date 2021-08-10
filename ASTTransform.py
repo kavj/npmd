@@ -143,51 +143,6 @@ class ImportHandler(ast.NodeVisitor):
             self.bound_names.add(import_alias)
 
 
-class TypeCommentParser(ast.NodeVisitor):
-    """
-    Support for conversion of PEP 526 type comments to internal IR.
-
-    References:
-    https://greentreesnakes.readthedocs.io/en/latest/
-    https://www.python.org/dev/peps/pep-0526/
-    https://www.python.org/dev/peps/pep-0484/
-
-    Noting: Seeing as I'm developing on 3.9, Index isn't used. I may need to make
-    some concessions for Python 3.8.
-
-    """
-
-    def __call__(self, src):
-        self.src = src
-        tc = ast.parse(src)
-        self.visit(tc)
-
-    def generic_visit(self, node):
-        msg = f"No method to process node {node} as part of a type comment."
-        raise CompilerError(msg)
-
-    def visit_Name(self, node: ast.Name) -> typing.Any:
-        return ir.NameRef(node.id)
-
-    def visit_Subscript(self, node: ast.Subscript) -> typing.Any:
-        value = self.visit(node.value)
-        slice_ = self.visit(node.slice)
-        return ir.Subscript(value, slice_)
-
-    def visit_Tuple(self, node: ast.Tuple) -> typing.Any:
-        elts = tuple(self.visit(elt) for elt in node.elts)
-        return ir.Tuple(elts)
-
-    def visit_Attribute(self, node: ast.Attribute) -> typing.Any:
-        value = self.visit(node.value)
-        attr = node.attr
-        if not isinstance(value, ir.NameRef):
-            msg = f"Cannot parse type comment {self.src}."
-            raise CompilerError(msg)
-        qualname = f"{value.name}.{attr}"
-        return ir.NameRef(qualname)
-
-
 class TreeBuilder(ast.NodeVisitor):
 
     def __init__(self):

@@ -308,6 +308,7 @@ class BinOp(Expression):
     left: ValueRef
     right: ValueRef
     op: str
+    check_overflow: bool = False
 
     def __post_init__(self):
         assert (self.op in binaryops or self.op in inplace_ops or self.op in compareops)

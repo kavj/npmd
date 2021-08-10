@@ -2,14 +2,13 @@ import os
 import numpy as np
 
 import driver
-import ir
 from TreePipeline import run_tree_pipeline as rtp
 from pretty_printing import pretty_printer
 
-# tests = ("test_cascade_if.py",)
+tests = ("test_cascade_if.py",)
 
-tests = ("test_forifcont.py", "test_nested.py", "test_cascade_if.py", "test_dead.py", "test_dead2.py",
-         "test_while.py", "test_cascade_assign.py")
+# tests = ("test_forifcont.py", "test_nested.py", "test_cascade_if.py", "test_dead.py", "test_dead2.py",
+#          "test_while.py", "test_cascade_assign.py")
 # "test_for.py", "test_forif.py", "test_retval.py",
 # "test_pass.py", "test_conditional_terminated.py", "test_bothterminated.py", "test_chained_comparisons.py",
 # "test_folding.py", "test_fold_unreachable.py", "test_normalize_return_flow.py")
