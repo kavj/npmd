@@ -359,6 +359,10 @@ def simplify_integer_max(node, op):
             seen.add(value)
 
     # reduce Max(i, i + 1, i + 2, i + 3, other_stuff) to Max(i + 3, other_stuff)
+    # Todo: Noting this is very dangerous in certain cases. If this targets an environment
+    #       with wraparound arithmetic (common and supported by gcc and clang), then using
+    #       normally cascaded max will give the right result if some overflow, but this will
+    #       not. It might still be useful if we can prove that away, but I'm not certain.
     for left, rhs_terms in additions.items():
         if len(rhs_items) > 1:
             consts = deque()
@@ -420,6 +424,17 @@ def applies_truth_test(expr):
     elif isinstance(expr, ir.BinOp):
         return expr.op in compare_ops
     return False
+
+
+def unwrap_truth_tested(expr):
+    """
+    Extract truth tested operands. This helps limit isinstance checks for cases
+    where an enclosing expression will refer to the truth test of expr, with or
+    without an explicit TRUTH node wrapper.
+    """
+    if isinstance(expr, ir.TRUTH):
+        expr = expr.operand
+    return expr
 
 
 class associative_arithmetic_folding(ExpressionVisitor):
@@ -562,11 +577,9 @@ class associative_arithmetic_folding(ExpressionVisitor):
             # constant folding should be separate
             # as it causes too many issues here
             assert not operand.constant
+            operand = unwrap_truth_tested(operand)
             if operand not in seen:
                 seen.add(operand)
-                if isinstance(operand, ir.TRUTH):
-                    # Truth cast is applied by AND
-                    operand = operand.operand
                 operands.append(operand)
         if len(operands) > 1:
             return ir.AND(tuple(operands))
@@ -580,11 +593,8 @@ class associative_arithmetic_folding(ExpressionVisitor):
         operands = []
         for operand in node.operands:
             assert not operand.constant
+            operand = unwrap_truth_tested(operand)
             if operand not in seen:
-                seen.add(operand)
-                if isinstance(operand, ir.TRUTH):
-                    # Truth cast is applied by OR
-                    operand = operand.operand
                 operands.append(operand)
         if len(operands) > 1:
             return ir.OR(tuple(operands))
@@ -906,6 +916,10 @@ def sub_is_safe(a: ir.ValueRef, b: ir.ValueRef, p: int)-> typing.Union[bool, ir.
         https://numpy.org/doc/stable/user/building.html
 
     """
+
+    # Todo: This should probably avoid doing explicit overflow checks when they cannot be fully resolved.
+    #  Rather we can consolidate any arithmetic that might overflow, then use compiler specific extensions
+    #  for any remaining checks.
     assert p > 0
     imin = MIN_INT(p)
     imax = MAX_INT(p)
