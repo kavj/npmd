@@ -11,7 +11,7 @@ from pathlib import Path
 import ir
 from errors import CompilerError
 from symbol_table import symbol_table_from_pysymtable, wrap_input
-from Canonicalize import replace_builtin_call
+from canonicalize import replace_builtin_call
 from lowering import const_folding, unpack_assignment, unpack_iterated
 
 binaryops = {ast.Add: "+",

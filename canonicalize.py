@@ -171,6 +171,18 @@ class NormalizePaths(StmtTransformer):
                 stmt = self.visit(stmt)
                 if stmt is not None:
                     append_to.append(stmt)
+                if isinstance(stmt, (ir.Break, ir.Continue)):
+                    if not self.within_loop:
+                        stmt_str = "Break" if isinstance(stmt, ir.Break) else "Continue"
+                        msg = f"{stmt_str} statement encountered outside of loop, line: {stmt.pos.line_begin}."
+                        raise CompilerError(msg)
+                    break  # remaining statements are unreachable
+                elif isinstance(stmt, ir.Return):
+                    if self.within_loop:
+                        msg = f"Return statements within a for or while loop are not supported, " \
+                              f"line: {stmt.pos.line_begin}."
+                        raise CompilerError(msg)
+                    break  # remaining statements are unreachable
         return repl
 
 
