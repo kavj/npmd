@@ -29,23 +29,6 @@ def contains_break(entry):
     raise NotImplementedError
 
 
-def terminates_control_flow(node):
-    # Note: It's probably best to disallow return statements in
-    # for and while loops, because if any alternative return does
-    # not immediately follow the loop body, you get a very complicated
-    # and potentially inefficient output. Because of that, I'm removing it here.
-    if isinstance(node, list):
-        return len(node) > 0 and terminates_control_flow(node[-1])
-    elif isinstance(node, ir.StmtBase):
-        if isinstance(node, (ir.Continue, ir.Break, ir.Return)):
-            return True
-        elif isinstance(node, ir.IfElse):
-            return terminates_control_flow(node.if_branch) and terminates_control_flow(node.else_branch)
-    else:
-        msg = f"Internal Error: No method to check control flow termination for node of type {type(node)}."
-        raise NotImplementedError(msg)
-
-
 def find_unterminated_path(stmts):
     if not isinstance(stmts, list):
         raise TypeError("Internal Error: expected a list of statements")
@@ -56,13 +39,14 @@ def find_unterminated_path(stmts):
         elif isinstance(last, ir.IfElse):
             if_branch = find_unterminated_path(last.if_branch)
             else_branch = find_unterminated_path(last.else_branch)
-            if_is_terminated = isinstance(if_branch, TerminatedPath)
-            else_is_terminated = isinstance(else_branch, TerminatedPath)
-            if if_is_terminated and else_is_terminated:
-                return TerminatedPath()
-            elif if_is_terminated:
-                return else_branch
-            elif else_is_terminated:
+            if_br_terminated = isinstance(if_branch, TerminatedPath)
+            else_br_terminated = isinstance(else_branch, TerminatedPath)
+            if if_br_terminated:
+                if else_br_terminated:
+                    return TerminatedPath()
+                else:
+                    return else_branch
+            elif else_br_terminated:
                 return if_branch
     return stmts
 
@@ -90,6 +74,12 @@ def remove_trailing_continues(node: list) -> list:
 
 
 class NormalizePaths(StmtTransformer):
+    """
+    This is the tree version of control flow optimization.
+    It removes any statements blocked by break, return, or continue
+    and inlines paths as an alternative to explicit continue statements.
+
+    """
 
     def __init__(self):
         self.innermost_loop = None
@@ -122,6 +112,7 @@ class NormalizePaths(StmtTransformer):
     def _(self, node: ir.ForLoop):
         with self.enclosing_loop(node):
             body = self.visit(node.body)
+            body = remove_trailing_continues(body)
             if body != node.body:
                 node = ir.ForLoop(node.target, node.iterable, body, node.pos)
         return node
@@ -131,9 +122,10 @@ class NormalizePaths(StmtTransformer):
         test = node.test
         if test.constant:
             if not operator.truth(test):
-                return []
+                return
         with self.enclosing_loop(node):
             body = self.visit(node.body)
+            body = remove_trailing_continues(body)
             if body != node.body:
                 node = ir.WhileLoop(node.test, body, node.pos)
         return node
@@ -177,7 +169,8 @@ class NormalizePaths(StmtTransformer):
                         append_to = unterminated
             else:
                 stmt = self.visit(stmt)
-                append_to.append(stmt)
+                if stmt is not None:
+                    append_to.append(stmt)
         return repl
 
 
@@ -230,7 +223,7 @@ class CallSpecialize:
         missing = set()
         if arg_count + kw_count > self.max_arg_count:
             raise CompilerError(f"Function {self.name} has {self.max_arg_count} fields. "
-                               f"{arg_count + kw_count} arguments were provided.")
+                                f"{arg_count + kw_count} arguments were provided.")
         for field, arg in zip(self.args, args):
             mapped[field] = arg
         for kw, value in keywords:
@@ -255,10 +248,10 @@ class CallSpecialize:
         mapped = {}
         if arg_count > self.max_arg_count:
             raise CompilerError(f"Signature for {self.name} accepts {self.max_arg_count} arguments. "
-                               f"{arg_count} arguments received.")
+                                f"{arg_count} arguments received.")
         elif arg_count < self.min_arg_count:
             raise CompilerError(f"Signature for {self.name} expects at least {self.min_arg_count} arguments, "
-                               f"{arg_count} arguments received.")
+                                f"{arg_count} arguments received.")
         for field, arg in zip(self.args, args):
             mapped[field] = arg
         for field, value in self.defaults.items():
@@ -288,16 +281,16 @@ def IterBuilder(mapping):
     return mapping["iterable"]
 
 
-def ReversedBuilder(arg):
-    if isinstance(arg, ir.AffineSeq):
-        if arg.stop is not None:
-            node = ir.AffineSeq(arg.stop, arg.start, negate_condition(arg.step))
-        else:
-            # must be enumerate
-            return "Cannot reverse enumerate type"
-    else:
-        node = ir.Reversed(arg)
-    return node
+# def ReversedBuilder(arg):
+#    if isinstance(arg, ir.AffineSeq):
+#        if arg.stop is not None:
+#            node = ir.AffineSeq(arg.stop, arg.start, negate_condition(arg.step))
+#        else:
+#            # must be enumerate
+#            return "Cannot reverse enumerate type"
+#    else:
+#        node = ir.Reversed(arg)
+#    return node
 
 
 def ZipBuilder(node: ir.Call):
@@ -345,11 +338,11 @@ builders = {"enumerate": CallSpecialize(name="enumerate",
                                         defaults={"start": ir.Zero},
                                         allows_keywords=True),
 
-            "reversed": CallSpecialize(name="reversed",
-                                       args=("object",),
-                                       repl=ReversedBuilder,
-                                       defaults={},
-                                       allows_keywords=False),
+            #  "reversed": CallSpecialize(name="reversed",
+            #                           args=("object",),
+            #                            repl=ReversedBuilder,
+            #                            defaults={},
+            #                            allows_keywords=False),
 
             "iter": CallSpecialize(name="iter",
                                    args=("iterable",),
