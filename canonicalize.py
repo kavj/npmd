@@ -159,8 +159,6 @@ class NormalizePaths(StmtTransformer):
         append_to = repl
         for stmt in node:
             if isinstance(stmt, ir.IfElse):
-                # stmt = clear_dead_branches(stmt)
-                # if isinstance(stmt, ir.IfElse):
                 if stmt.test.constant:
                     if operator.truth(stmt.test):
                         live_branch = self.visit(stmt.if_branch)
