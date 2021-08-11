@@ -303,7 +303,10 @@ class pretty_printer:
         if_expr = f"elif {test}:"
         self.print_line(if_expr)
         with self.indented():
-            self.visit(node.if_branch)
+            if node.if_branch:
+                self.visit(node.if_branch)
+            else:
+                self.print_line("pass")
         if node.else_branch:
             # Make another elif if all conditions are met
             if len(node.else_branch) == 1:
@@ -377,7 +380,12 @@ class pretty_printer:
         stmt = f"for {target} in {iterable}:"
         self.print_line(stmt)
         with self.indented():
-            self.visit(node.body)
+            if node.body:
+                self.visit(node.body)
+            else:
+                # If all loop body statements are
+                # dead/unreachable, append pass
+                self.print_line("pass")
 
     @visit.register
     def _(self, node: ir.WhileLoop):
@@ -393,7 +401,10 @@ class pretty_printer:
         stmt = f"if {test}:"
         self.print_line(stmt)
         with self.indented():
-            self.visit(node.if_branch)
+            if node.if_branch:
+                self.visit(node.if_branch)
+            else:
+                self.print_line("pass")
         if node.else_branch:
             # Make elif if all conditions are met
             if len(node.else_branch) == 1:

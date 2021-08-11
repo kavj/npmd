@@ -91,18 +91,21 @@ class NormalizePaths(StmtTransformer):
 
     @contextmanager
     def enclosing_loop(self, header):
-        stashed = self.enclosing_loop
+        stashed = self.innermost_loop
+        self.innermost_loop = header
         yield
         assert self.innermost_loop is header
-        self.body = stashed
+        self.innermost_loop = stashed
 
     def __call__(self, node):
         if self.within_loop:
-            raise RuntimeError("Internal Error: Entering visitor from inconsistent state.")
-        node = self.visit(node)
+            msg = "Internal Error: Entering visitor from inconsistent state."
+            raise RuntimeError(msg)
+        repl = self.visit(node)
         if self.within_loop:
-            raise RuntimeError("Internal Error: Exiting visitor from inconsistent state.")
-        return node
+            msg = "Internal Error: Exiting visitor from inconsistent state."
+            raise RuntimeError(msg)
+        return repl
 
     @singledispatchmethod
     def visit(self, node):

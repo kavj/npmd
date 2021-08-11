@@ -231,7 +231,10 @@ class StmtTransformer:
 
     @visit.register
     def _(self, node: ir.Function):
-        self.visit(node.body)
+        body = self.visit(node.body)
+        if body != node.body:
+            return ir.Function(node.name, node.args, body)
+        return node
 
     @visit.register
     def _(self, node: ir.IfElse):
@@ -269,4 +272,8 @@ class StmtTransformer:
 
     @visit.register
     def _(self, node: ir.Break):
+        return node
+
+    @visit.register
+    def _(self, node: ir.Return):
         return node
