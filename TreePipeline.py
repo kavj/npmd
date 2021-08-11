@@ -1,7 +1,7 @@
 import os.path
 
 from ASTTransform import parse_file
-from reachingcheck import ReachingCheck
+from reaching_check import ReachingCheck
 from pretty_printing import pretty_printer
 
 
