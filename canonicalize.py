@@ -8,14 +8,6 @@ from errors import CompilerError
 from visitor import StmtTransformer
 
 
-class TerminatedPath(ir.StmtBase):
-    """
-    sentinel providing an unambiguous method to convey that an unterminated path
-    is not available
-    """
-    __slots__ = ()
-
-
 def clear_dead_branches(node: ir.IfElse) -> typing.Union[ir.IfElse, list]:
     """
     Remove statements from unreachable branches, but keep the branch intact.
@@ -38,7 +30,7 @@ def find_unterminated_path(stmts):
     if len(stmts) > 0:
         last = stmts[-1]
         if isinstance(last, (ir.Continue, ir.Break, ir.Return)):
-            return TerminatedPath()
+            return
         elif isinstance(last, ir.IfElse):
             if last.test.constant:
                 # If we have a constant branch condition,we can only follow
@@ -48,17 +40,14 @@ def find_unterminated_path(stmts):
                 else:
                     return find_unterminated_path(last.else_branch)
             else:
-                if_branch = find_unterminated_path(last.if_branch)
-                else_branch = find_unterminated_path(last.else_branch)
-                if_br_terminated = isinstance(if_branch, TerminatedPath)
-                else_br_terminated = isinstance(else_branch, TerminatedPath)
-                if if_br_terminated:
-                    if else_br_terminated:
-                        return TerminatedPath()
-                    else:
-                        return else_branch
-                elif else_br_terminated:
-                    return if_branch
+                if_path = find_unterminated_path(last.if_branch)
+                else_path = find_unterminated_path(last.else_branch)
+                if if_path is None and else_path is None:
+                    return  # terminated
+                elif if_path is None:
+                    return else_path
+                elif else_path is None:
+                    return if_path
     return stmts
 
 
@@ -96,26 +85,8 @@ class NormalizePaths(StmtTransformer):
         self.innermost_loop = None
         self.body = None
 
-    @property
-    def within_loop(self):
-        return self.innermost_loop is not None
-
-    @contextmanager
-    def enclosing_loop(self, header):
-        stashed = self.innermost_loop
-        self.innermost_loop = header
-        yield
-        assert self.innermost_loop is header
-        self.innermost_loop = stashed
-
     def __call__(self, node):
-        if self.within_loop:
-            msg = "Internal Error: Entering visitor from inconsistent state."
-            raise RuntimeError(msg)
         repl = self.visit(node)
-        if self.within_loop:
-            msg = "Internal Error: Exiting visitor from inconsistent state."
-            raise RuntimeError(msg)
         return repl
 
     @singledispatchmethod
@@ -124,11 +95,10 @@ class NormalizePaths(StmtTransformer):
 
     @visit.register
     def _(self, node: ir.ForLoop):
-        with self.enclosing_loop(node):
-            body = self.visit(node.body)
-            body = remove_trailing_continues(body)
-            if body != node.body:
-                node = ir.ForLoop(node.target, node.iterable, body, node.pos)
+        body = self.visit(node.body)
+        body = remove_trailing_continues(body)
+        if body != node.body:
+            node = ir.ForLoop(node.target, node.iterable, body, node.pos)
         return node
 
     @visit.register
@@ -137,7 +107,6 @@ class NormalizePaths(StmtTransformer):
         if test.constant:
             if not operator.truth(test):
                 return
-        with self.enclosing_loop(node):
             body = self.visit(node.body)
             body = remove_trailing_continues(body)
             if body != node.body:
@@ -166,7 +135,7 @@ class NormalizePaths(StmtTransformer):
                         live_branch = self.visit(stmt.else_branch)
                     live_path = find_unterminated_path(live_branch)
                     append_to.extend(live_branch)
-                    if isinstance(live_path, TerminatedPath):
+                    if live_path is None:
                         break  # any remaining statements are unreachable
                     append_to = live_path
                 else:
@@ -176,29 +145,17 @@ class NormalizePaths(StmtTransformer):
                     append_to.append(stmt)
                     if_path = find_unterminated_path(stmt.if_branch)
                     else_path = find_unterminated_path(stmt.else_branch)
-                    if_terminated = isinstance(if_path, TerminatedPath)
-                    else_terminated = isinstance(else_path, TerminatedPath)
-                    if if_terminated and else_terminated:
+                    if if_path is None and else_path is None:
                         break  # any remaining statements are unreachable
-                    elif if_terminated:
+                    elif if_path is None:
                         append_to = else_path
-                    elif else_terminated:
+                    elif else_path is None:
                         append_to = if_path
             else:
                 stmt = self.visit(stmt)
                 if stmt is not None:
                     append_to.append(stmt)
-                if isinstance(stmt, (ir.Break, ir.Continue)):
-                    if not self.within_loop:
-                        stmt_str = "Break" if isinstance(stmt, ir.Break) else "Continue"
-                        msg = f"{stmt_str} statement encountered outside of loop, line: {stmt.pos.line_begin}."
-                        raise CompilerError(msg)
-                    break  # remaining statements are unreachable
-                elif isinstance(stmt, ir.Return):
-                    if self.within_loop:
-                        msg = f"Return statements within a for or while loop are not supported, " \
-                              f"line: {stmt.pos.line_begin}."
-                        raise CompilerError(msg)
+                if isinstance(stmt, (ir.Break, ir.Continue, ir.Return)):
                     break  # remaining statements are unreachable
         return repl
 
