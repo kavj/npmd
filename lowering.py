@@ -58,6 +58,9 @@ binops = {"+": operator.add,
           }
 
 
+compare_ops = {"<", "<=", ">", ">=", "isnot", "in", "notin"}
+
+
 def wrap_constant(c):
     if isinstance(c, bool):
         return ir.BoolConst(c)
@@ -147,7 +150,7 @@ def is_division(node):
     return isinstance(node, ir.BinOp) and node.op in ("/", "//", "/=", "//=")
 
 
-def is_unary_negate(node):
+def equals_unary_negate(node):
     return isinstance(node, ir.UnaryOp) and node.op == "-"
 
 
@@ -181,6 +184,12 @@ def rewrite_pow(expr):
         return ir.Call("sqrt", (expr.left,), ())
     else:
         return expr
+
+
+# Todo: A lot of this can't be done consistently without type information. Some folding of constants
+#       is actually useful in determining the types that can hold a constant, but they shouldn't be
+#       completely folded until we have type info. Otherwise we can end up using overflowing values
+#       in a way that may differ from compiler sanitization flags.
 
 
 class const_folding(ExpressionVisitor):
@@ -405,6 +414,14 @@ def simplify_integer_max(node, op):
     return ir.Max(tuple(unique))
 
 
+def applies_truth_test(expr):
+    if isinstance(expr, (ir.TRUTH, ir.AND, ir.OR, ir.NOT, ir.BoolConst)):
+        return True
+    elif isinstance(expr, ir.BinOp):
+        return expr.op in compare_ops
+    return False
+
+
 class associative_arithmetic_folding(ExpressionVisitor):
     """
     Non-recursive visitor for folding identity ops
@@ -442,9 +459,9 @@ class associative_arithmetic_folding(ExpressionVisitor):
         elif is_addition(node):
             if right == ir.Zero:
                 return left
-            elif is_unary_negate(right):
+            elif equals_unary_negate(right):
                 return ir.BinOp(left, right.operand, "-=" if node.in_place else "-")
-            elif is_unary_negate(left):
+            elif equals_unary_negate(left):
                 assert not node.in_place
                 return ir.BinOp(right, left.operand, "-")
         elif is_subtraction(node):
@@ -452,9 +469,9 @@ class associative_arithmetic_folding(ExpressionVisitor):
                 return ir.UnaryOp(right, "-")
             elif right == ir.Zero:
                 return left
-            elif is_unary_negate(right):
+            elif equals_unary_negate(right):
                 return ir.BinOp(left, right.operand, "+=" if node.in_place else "+")
-            elif is_unary_negate(left):
+            elif equals_unary_negate(left):
                 assert not node.in_place
                 return ir.BinOp(right, left.operand, "+")
         elif is_division(node):
@@ -472,7 +489,7 @@ class associative_arithmetic_folding(ExpressionVisitor):
             elif left == ir.One:
                 return right
             elif left == negative_one:
-                if is_unary_negate(right):
+                if equals_unary_negate(right):
                     # -(-something)) is safe in Python but possibly unsafe in a fixed width
                     # destination. Folding it should be considered safe.
                     return right.operand
@@ -576,9 +593,41 @@ class associative_arithmetic_folding(ExpressionVisitor):
             return ir.TRUTH(operand)
 
     @visit.register
+    def _(self, node: ir.NOT):
+        if not applies_truth_test(node.operand):
+            return node
+        if isinstance(node.operand, ir.BinOp):
+            op = node.operand.op
+            if op == "==":
+                left = node.operand.left
+                right = node.operand.right
+                return ir.BinOp(left, right, "!=")
+            elif op == "!=":
+                left = node.operand.left
+                right = node.operand.right
+                return ir.BinOp(left, right, "==")
+            # >, >=, <, <= are not safe to invert if unordered operands
+            # are present, particularly floating point NaNs.
+            # While this started off assuming integer arithmetic, it may
+            # be better to move this after typing, since some of this applies
+            # equally or almost as well to floating point arithmetic.
+        elif isinstance(node, ir.NOT):
+            # remove double negation
+            operand = node.operand.operand
+            if not applies_truth_test(operand):
+                # If the unwrapped type doesn't already export a truth test
+                # we need to indicate this explicitly.
+                operand = ir.TRUTH(operand)
+            return operand
+        return node
+
+    @visit.register
     def _(self, node: ir.TRUTH):
-        if isinstance(node.operand, (ir.AND, ir.OR, ir.TRUTH, ir.BoolConst)):
-            return node.operand
+        # This will leave truth casts on constant integers
+        # and floats, since the only gain there is a loss
+        # of clarity.
+        if applies_truth_test(node.operand):
+            node = node.operand
         return node
 
     @visit.register

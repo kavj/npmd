@@ -164,6 +164,17 @@ class pretty_formatter:
         return expr
 
     @visit.register
+    def _(self, node: ir.TRUTH):
+        formatted = self.visit(node.operand)
+        if node.constant:
+            if not isinstance(node, ir.BoolConst):
+                # We don't distinguish between bools and predicates here in
+                # truth testing, since Python doesn't have any notion of
+                # predicate types.
+                formatted = f"bool({formatted})"
+        return formatted
+
+    @visit.register
     def _(self, node: ir.NameRef):
         expr = node.name
         return expr
