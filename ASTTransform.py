@@ -210,9 +210,16 @@ class TreeBuilder(ast.NodeVisitor):
             msg = "Ellipses are not supported."
             raise TypeError(msg)
         elif isinstance(node.value, str):
-            msg = "String constants are not supported."
-            raise TypeError(msg)
-        return wrap_input(node.value)
+            # Check unicode code points fall within ascii range. This is mainly supported
+            # for the possibility of enabling simple printing.
+            if any(ord(v) > 127 for v in node.value):
+                msg = f"Only strings that can be converted to ascii text are supported. This is mainly intended" \
+                      f"to facilitate simple printing support at some point."
+                raise CompilerError(msg)
+            output = ir.StringConst(node.value)
+        else:
+            output = wrap_input(node.value)
+        return output
 
     def visit_Tuple(self, node: ast.Tuple) -> ir.Tuple:
         # refactor seems to have gone wrong here..
@@ -276,7 +283,6 @@ class TreeBuilder(ast.NodeVisitor):
                     operands.append(value)
         if len(operands) == 1:
             expr = operands.pop()
-            expr = ir.TRUTH(expr)
         else:
             operands = tuple(operands)
             if op == "and":

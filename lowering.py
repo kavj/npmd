@@ -261,10 +261,14 @@ class const_folding(ExpressionVisitor):
             if operand.constant and not operator.truth(operand):
                 return ir.BoolConst(False)
             operands.append(operand)
+        operands = tuple(operands)
         if len(operands) == 1:
-            repl = ir.TRUTH(operands[0])
+            # Use an explicit truth test to avoid exporting
+            # "operand and True"
+            operand, = operands
+            repl = ir.TRUTH(operand)
         else:
-            repl = ir.AND(tuple(operands))
+            repl = ir.AND(operands)
         return repl
 
     @visit.register
@@ -275,11 +279,27 @@ class const_folding(ExpressionVisitor):
             if operand.constant and operator.truth(operand):
                 return ir.BoolConst(True)
             operands.append(operand)
+        operands = tuple(operands)
         if len(operands) == 1:
-            repl = ir.TRUTH(operands[0])
+            # Use an explicit truth test to avoid exporting
+            # "expr or False"
+            operand, = operands
+            repl = ir.TRUTH(operand)
         else:
-            repl = ir.OR(tuple(operands))
+            repl = ir.OR(operands)
         return repl
+
+    @visit.register
+    def _(self, expr: ir.NOT):
+        operand = self.lookup(expr.operand)
+        if isinstance(operand, ir.Constant):
+            value = not operator.truth(operand.value)
+            expr = wrap_constant(value)
+        elif isinstance(operand, ir.TRUTH):
+            # NOT implicitly truth tests, so
+            # we can discard the explicit test.
+            expr = ir.NOT(operand.operand)
+        return operand
 
     @visit.register
     def _(self, expr: ir.XOR):

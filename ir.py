@@ -140,6 +140,14 @@ class IntConst(Constant):
         assert isinstance(self.value, numbers.Integral)
 
 
+@dataclass(frozen=True)
+class StringConst(Constant):
+    value: str
+
+    def __post_init__(self):
+        assert isinstance(self.value, str)
+
+
 # commonly used
 
 Zero = IntConst(0)
@@ -413,14 +421,14 @@ class TRUTH(BoolOp_):
     """
     Truth test single operand
     """
-    operands: ValueRef
+    operand: ValueRef
 
     def __post_init__(self):
-        assert isinstance(self.operands, ValueRef)
+        assert isinstance(self.operand, ValueRef)
 
     @property
     def subexprs(self):
-        yield self.operands
+        yield self.operand
 
 
 @dataclass(frozen=True)
@@ -429,10 +437,14 @@ class NOT(BoolOp_):
     Boolean not
     """
 
-    operands: ValueRef
+    operand: ValueRef
 
     def __post_init__(self):
-        assert isinstance(self.operands, ValueRef)
+        assert isinstance(self.operand, ValueRef)
+
+    @property
+    def subexprs(self):
+        yield self.operand
 
 
 @dataclass(frozen=True)

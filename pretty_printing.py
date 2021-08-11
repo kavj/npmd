@@ -104,6 +104,10 @@ class pretty_formatter:
         return str(node.value)
 
     @visit.register
+    def _(self, node: ir.StringConst):
+        return f"\"{node.value}\""
+
+    @visit.register
     def _(self, node: ir.BinOp):
         left = self.visit(node.left)
         right = self.visit(node.right)
@@ -111,7 +115,7 @@ class pretty_formatter:
         if not node.in_place:
             op_ordering = binop_ordering[op]
             if isinstance(node.left, ir.BinOp):
-                if op_ordering < binop_ordering[left.op]:
+                if op_ordering < binop_ordering[node.left.op]:
                     left = parenthesized(left)
             elif isinstance(node.left, ir.UnaryOp):
                 if op == "**":
@@ -149,6 +153,14 @@ class pretty_formatter:
                 formatted = parenthesized(formatted)
             operands.append(formatted)
         expr = " or ".join(operand for operand in operands)
+        return expr
+
+    @visit.register
+    def _(self, node: ir.NOT):
+        formatted = self.visit(node.operand)
+        if isinstance(node.operand, (ir.AND, ir.OR, ir.Ternary)):
+            formatted = parenthesized(formatted)
+        expr = f"not {formatted}"
         return expr
 
     @visit.register

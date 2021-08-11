@@ -5,13 +5,11 @@ import driver
 from TreePipeline import run_tree_pipeline as rtp
 from pretty_printing import pretty_printer
 
-tests = ("test_cascade_if.py",)
 
-# tests = ("test_forifcont.py", "test_nested.py", "test_cascade_if.py", "test_dead.py", "test_dead2.py",
-#          "test_while.py", "test_cascade_assign.py")
-# "test_for.py", "test_forif.py", "test_retval.py",
-# "test_pass.py", "test_conditional_terminated.py", "test_bothterminated.py", "test_chained_comparisons.py",
-# "test_folding.py", "test_fold_unreachable.py", "test_normalize_return_flow.py")
+tests = ("test_forifcont.py", "test_nested.py", "test_cascade_if.py", "test_dead.py", "test_dead2.py",
+         "test_while.py", "test_cascade_assign.py", "test_for.py", "test_forif.py", "test_retval.py",
+         "test_pass.py", "test_conditional_terminated.py", "test_bothterminated.py", "test_chained_comparisons.py",
+         "test_folding.py", "test_fold_unreachable.py", "test_normalize_return_flow.py")
 
 array_n = driver.make_array_arg_type(dims=("n",), dtype=np.float64, stride=None)
 
@@ -32,7 +30,17 @@ uws_types = {"test_forifcont.py": {"something": {"x": array_n,
              "test_dead.py": {"blah": {"a": array_n, "b": array_n}},
              "test_dead2.py": {"blah": {"a": array_n, "b": array_n}},
              "test_while.py": {"f": {"x": int}},
-             "test_cascade_assign.py": {"ca": {"d": int}}
+             "test_cascade_assign.py": {"ca": {"d": int}},
+             "test_for.py": {"for_func": {}},
+             "test_forif.py": {"something": {}},
+             "test_retval.py": {"f": {}},
+             "test_pass.py": {"blah": {}},
+             "test_conditional_terminated.py": {"divergent": {}},
+             "test_bothterminated.py": {"both_term": {}},
+             "test_chained_comparisons.py": {"chained_compare": {}},
+             "test_folding.py": {"folding": {}},
+             "test_fold_unreachable.py": {"divergent": {}},
+             "test_normalize_return_flow.py": {"something": {}},
              }
 
 Type_Info = {}
@@ -47,10 +55,10 @@ for i, t in enumerate(tests):
         src = reader.read()
     print(src)
     print("\n\nOUTPUT\n\n")
-    types = uws_types.get(t)
-    if types is None:
-        msg = f"Unable to load types for test file {t}."
-        raise RuntimeError(msg)
+    types = uws_types.get(t, {})
+    # if types is None:
+    #    msg = f"Unable to load types for test file {t}."
+    #    raise RuntimeError(msg)
     module, symbols = rtp(filepath, types)
     pretty_print(module, symbols)
     print('\n\n\n')
