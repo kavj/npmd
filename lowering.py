@@ -258,17 +258,24 @@ class const_folding(ExpressionVisitor):
         operands = []
         for operand in self.operands:
             operand = self.lookup(operand)
-            if operand.constant and not operator.truth(operand):
-                return ir.BoolConst(False)
+            if operand.constant:
+                if not operator.truth(operand):
+                    return ir.BoolConst(False)
+                continue  # don't append True
+            elif isinstance(operand, ir.TRUTH):
+                # Truth cast is applied by AND
+                operand = operand.operand
             operands.append(operand)
-        operands = tuple(operands)
-        if len(operands) == 1:
+        num_operands = len(operands)
+        if num_operands == 0:
+            repl = ir.BoolConst(True)
+        elif len(operands) == 1:
             # Use an explicit truth test to avoid exporting
             # "operand and True"
             operand, = operands
             repl = ir.TRUTH(operand)
         else:
-            repl = ir.AND(operands)
+            repl = ir.AND(tuple(operands))
         return repl
 
     @visit.register
@@ -276,17 +283,24 @@ class const_folding(ExpressionVisitor):
         operands = []
         for operand in self.operands:
             operand = self.lookup(operand)
-            if operand.constant and operator.truth(operand):
-                return ir.BoolConst(True)
+            if operand.constant:
+                if operator.truth(operand):
+                    return ir.BoolConst(True)
+                continue # don't append constant False
+            elif isinstance(operand, ir.TRUTH):
+                # Truth cast is applied by OR
+                operand = operand.operand
             operands.append(operand)
-        operands = tuple(operands)
-        if len(operands) == 1:
+        num_operands = len(operands)
+        if num_operands == 0:
+            return ir.BoolConst(False)
+        elif num_operands == 1:
             # Use an explicit truth test to avoid exporting
             # "expr or False"
             operand, = operands
             repl = ir.TRUTH(operand)
         else:
-            repl = ir.OR(operands)
+            repl = ir.OR(tuple(operands))
         return repl
 
     @visit.register
@@ -532,8 +546,11 @@ class associative_arithmetic_folding(ExpressionVisitor):
             # as it causes too many issues here
             assert not operand.constant
             if operand not in seen:
-                operands.append(operand)
                 seen.add(operand)
+                if isinstance(operand, ir.TRUTH):
+                    # Truth cast is applied by AND
+                    operand = operand.operand
+                operands.append(operand)
         if len(operands) > 1:
             return ir.AND(tuple(operands))
         else:
@@ -547,13 +564,22 @@ class associative_arithmetic_folding(ExpressionVisitor):
         for operand in node.operands:
             assert not operand.constant
             if operand not in seen:
-                operands.append(operand)
                 seen.add(operand)
+                if isinstance(operand, ir.TRUTH):
+                    # Truth cast is applied by OR
+                    operand = operand.operand
+                operands.append(operand)
         if len(operands) > 1:
             return ir.OR(tuple(operands))
         else:
             operand, = operands
             return ir.TRUTH(operand)
+
+    @visit.register
+    def _(self, node: ir.TRUTH):
+        if isinstance(node.operand, (ir.AND, ir.OR, ir.TRUTH, ir.BoolConst)):
+            return node.operand
+        return node
 
     @visit.register
     def _(node: ir.Ternary):

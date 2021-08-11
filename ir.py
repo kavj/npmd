@@ -4,6 +4,7 @@ import numbers
 import operator
 import typing
 from abc import ABC, abstractmethod
+from collections.abc import Hashable
 from dataclasses import dataclass
 from functools import cached_property
 
@@ -162,11 +163,18 @@ class NameRef(ValueRef):
     # variable name ref
     name: str
 
+    def __post_init__(self):
+        assert isinstance(self.name, str)
+
 
 @dataclass(frozen=True)
 class ArrayType(ValueRef):
     ndims: int
     dtype: typing.Hashable
+
+    def __post_init__(self):
+        assert isinstance(self.ndims, int)
+        assert isinstance(self.dtype, Hashable)
 
 
 @dataclass(frozen=True)
@@ -174,6 +182,11 @@ class ArrayRef(ValueRef):
     name: NameRef
     dims: typing.Tuple[typing.Union[NameRef, IntConst], ...]
     dtype: typing.Hashable
+
+    def __post_init__(self):
+        assert isinstance(self.name, NameRef)
+        assert isinstance(self.dims, tuple)
+        assert isinstance(self.dtype, Hashable)
 
     @property
     def base(self):
@@ -190,6 +203,10 @@ class ViewRef:
     base: typing.Union[ArrayRef, ViewRef]
     slice: typing.Optional[typing.Union[IntConst, Slice, NameRef, BinOp, UnaryOp]]
     transposed: bool
+
+    def __post_init__(self):
+        assert isinstance(self.base, (ArrayRef, ViewRef))
+        assert self.slice is None or isinstance(self.slice, (IntConst, Slice, NameRef, BinOp, UnaryOp))
 
     @cached_property
     def dtype(self):
@@ -211,6 +228,9 @@ class ViewRef:
 class Length(Expression):
     value: ValueRef
 
+    def __post_init__(self):
+        assert isinstance(self.value, ValueRef)
+
     @property
     def subexprs(self):
         yield self.value
@@ -220,6 +240,10 @@ class Length(Expression):
 class Subscript(Expression):
     value: ValueRef
     slice: ValueRef
+
+    def __post_init__(self):
+        assert isinstance(self.value, ValueRef)
+        assert isinstance(self.slice, ValueRef)
 
     @property
     def subexprs(self):
@@ -234,6 +258,9 @@ class Min(Expression):
     """
     values: typing.Tuple[ValueRef, ...]
 
+    def __post_init__(self):
+        assert isinstance(self.values, tuple)
+
     @property
     def subexprs(self):
         for subexpr in self.values:
@@ -246,6 +273,9 @@ class Max(Expression):
     Max iteration count over a number of counters
     """
     values: typing.Tuple[ValueRef, ...]
+
+    def __post_init__(self):
+        assert isinstance(self.values, tuple)
 
     @property
     def subexprs(self):
@@ -284,6 +314,11 @@ class Slice(Expression):
     stop: typing.Optional[typing.Union[NameRef, IntConst]]
     step: typing.Union[NameRef, IntConst]
 
+    def __post_init__(self):
+        assert isinstance(self.start, (NameRef, IntConst))
+        assert isinstance(self.stop, (NameRef, IntConst))
+        assert isinstance(self.step, (NameRef, IntConst))
+
     @property
     def subexprs(self):
         yield self.start
@@ -296,7 +331,7 @@ class Tuple(Expression):
     elements: typing.Tuple[ValueRef, ...]
 
     def __post_init__(self):
-        assert (isinstance(self.elements, tuple))
+        assert isinstance(self.elements, tuple)
 
     @property
     def subexprs(self):
@@ -349,6 +384,10 @@ class CompareOp(Expression):
     left: ValueRef
     right: ValueRef
     op: str
+
+    def __post_init__(self):
+        assert isinstance(self.left, ValueRef)
+        assert isinstance(self.right, ValueRef)
 
     def subexprs(self):
         yield self.left
@@ -419,7 +458,34 @@ class XOR(BoolOp_):
 @dataclass(frozen=True)
 class TRUTH(BoolOp_):
     """
-    Truth test single operand
+    Truth test for a single operand, which is not known to be wrapped by an implicit truth test.
+    This is primarily used to handle cases where folding otherwise leaves an invalid
+    expression.
+
+    For example consider an expression that reduces to:
+
+        value = b and non_zero_constant
+
+    This is treated as:
+
+        value = b and True
+
+    After folding the truth constant, we need some way to represent that we export
+    the truth test of "b" rather than its actual value, thus
+
+        value = TRUTH(b)
+
+    If instead it's something like:
+
+        if b and True:
+            ...
+
+    or:
+
+        value = not (b and non_zero_constant)
+
+    then truth testing is applied by an outer expression anyway.
+
     """
     operand: ValueRef
 
@@ -461,7 +527,8 @@ class Call(Expression):
     keywords: typing.Tuple[typing.Tuple[str, ValueRef], ...]
 
     def __post_init__(self):
-        assert (isinstance(self.args, tuple))
+        assert isinstance(self.args, tuple)
+        assert isinstance(self.keywords, tuple)
 
     @property
     def subexprs(self):
@@ -550,7 +617,7 @@ class Zip(Expression):
     elements: typing.Tuple[ValueRef, ...]
 
     def __post_init__(self):
-        assert (isinstance(self.elements, tuple))
+        assert isinstance(self.elements, tuple)
 
     @property
     def subexprs(self):
