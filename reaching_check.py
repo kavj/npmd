@@ -53,20 +53,16 @@ class ReachingCheck(StmtVisitor):
                 return False
         return True
 
-    def register_reference(self, ref, stmt):
-        for param in get_expr_parameters(ref):
-            if param not in self.unknowns:
-                if self.maybe_unbound(param):
-                    self.unknowns[param] = stmt
-        for scope in reversed(self._bound):
-            if ref in scope:
-                return True
-        return False
+    def register_name_reference(self, name, stmt):
+        if name not in self.unknowns:
+            if self.maybe_unbound(name):
+                self.unknowns[name] = stmt
 
-    def register_assignment(self, target, value, stmt):
-        self.register_reference(value, stmt)
-        self.register_reference(target, stmt)
-        self.mark_assigned(target)
+    def register_expr_reference(self, expr, stmt):
+        for param in get_expr_parameters(expr):
+            self.register_name_reference(param, stmt)
+        if isinstance(expr, ir.NameRef):
+            self.register_name_reference(expr, stmt)
 
     @singledispatchmethod
     def visit(self, node):
@@ -81,29 +77,34 @@ class ReachingCheck(StmtVisitor):
 
     @visit.register
     def _(self, node: ir.SingleExpr):
-        self.register_reference(node.expr, node)
+        self.register_expr_reference(node.expr, node)
 
     @visit.register
     def _(self, node: ir.Assign):
-        self.register_assignment(node.target, node.value, node)
+        self.register_expr_reference(node.value, node)
+        self.mark_assigned(node.target)
+        # catch non-name targets
+        self.register_expr_reference(node.target, node)
 
     @visit.register
     def _(self, node: ir.ForLoop):
         with self.scoped():
             for target, value in unpack_iterated(node.target, node.iterable, node.pos):
-                self.register_assignment(target, value, node)
+                self.register_expr_reference(value, node)
+                self.mark_assigned(target)
+                self.register_expr_reference(target, node)
             self.visit(node.body)
 
     @visit.register
     def _(self, node: ir.WhileLoop):
         # test is encountered before loop
-        self.register_assignment(None, node.test, node)
+        self.register_expr_reference(node.test, node)
         with self.scoped():
             self.visit(node.body)
 
     @visit.register
     def _(self, node: ir.IfElse):
-        self.register_reference(node.test, node)
+        self.register_expr_reference(node.test, node)
         with self.scoped():
             self.visit(node.if_branch)
             if_branch = self.current_scope
@@ -111,4 +112,7 @@ class ReachingCheck(StmtVisitor):
             self.visit(node.else_branch)
             else_branch = self.current_scope
         definitely_bound = if_branch.intersection(else_branch)
+        # If bound in both branches, mark as bound.
+        # Declarations must be hoisted if these may
+        # escape.
         self.current_scope.update(definitely_bound)
