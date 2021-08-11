@@ -16,12 +16,15 @@ class TerminatedPath(ir.StmtBase):
     __slots__ = ()
 
 
-def remove_dead_branches(node: ir.IfElse) -> typing.Union[ir.IfElse, list]:
+def clear_dead_branches(node: ir.IfElse) -> typing.Union[ir.IfElse, list]:
+    """
+    Remove statements from unreachable branches, but keep the branch intact.
+    """
     if node.test.constant:
         if operator.truth(node.test):
-            node = node.if_branch
+            node = ir.IfElse(node.test, node.if_branch, [], node.pos)
         else:
-            node = node.else_branch
+            node = ir.IfElse(node.test, [], node.else_branch, node.pos)
     return node
 
 
@@ -37,17 +40,25 @@ def find_unterminated_path(stmts):
         if isinstance(last, (ir.Continue, ir.Break, ir.Return)):
             return TerminatedPath()
         elif isinstance(last, ir.IfElse):
-            if_branch = find_unterminated_path(last.if_branch)
-            else_branch = find_unterminated_path(last.else_branch)
-            if_br_terminated = isinstance(if_branch, TerminatedPath)
-            else_br_terminated = isinstance(else_branch, TerminatedPath)
-            if if_br_terminated:
-                if else_br_terminated:
-                    return TerminatedPath()
+            if last.test.constant:
+                # If we have a constant branch condition,we can only follow
+                # the reachable branch
+                if operator.truth(last.test):
+                    return find_unterminated_path(last.if_branch)
                 else:
-                    return else_branch
-            elif else_br_terminated:
-                return if_branch
+                    return find_unterminated_path(last.else_branch)
+            else:
+                if_branch = find_unterminated_path(last.if_branch)
+                else_branch = find_unterminated_path(last.else_branch)
+                if_br_terminated = isinstance(if_branch, TerminatedPath)
+                else_br_terminated = isinstance(else_branch, TerminatedPath)
+                if if_br_terminated:
+                    if else_br_terminated:
+                        return TerminatedPath()
+                    else:
+                        return else_branch
+                elif else_br_terminated:
+                    return if_branch
     return stmts
 
 
@@ -135,7 +146,7 @@ class NormalizePaths(StmtTransformer):
 
     @visit.register
     def _(self, node: ir.IfElse):
-        node = remove_dead_branches(node)
+        node = clear_dead_branches(node)
         if isinstance(node, ir.IfElse):
             if_branch = self.visit(node.if_branch)
             else_branch = self.visit(node.else_branch)
@@ -148,28 +159,33 @@ class NormalizePaths(StmtTransformer):
         append_to = repl
         for stmt in node:
             if isinstance(stmt, ir.IfElse):
-                stmt = remove_dead_branches(stmt)
-                if isinstance(stmt, ir.IfElse):
-                    append_to.append(stmt)
-                    unterminated_if = find_unterminated_path(stmt.if_branch)
-                    unterminated_else = find_unterminated_path(stmt.else_branch)
-                    if isinstance(unterminated_if, TerminatedPath):
-                        if isinstance(unterminated_else, TerminatedPath):
-                            # remaining statements are unreachable
-                            break
-                        else:
-                            append_to = unterminated_else
-                    elif isinstance(unterminated_else, TerminatedPath):
-                        append_to = unterminated_if
+                # stmt = clear_dead_branches(stmt)
+                # if isinstance(stmt, ir.IfElse):
+                if stmt.test.constant:
+                    if operator.truth(stmt.test):
+                        live_branch = self.visit(stmt.if_branch)
+                    else:
+                        live_branch = self.visit(stmt.else_branch)
+                    live_path = find_unterminated_path(live_branch)
+                    append_to.extend(live_branch)
+                    if isinstance(live_path, TerminatedPath):
+                        break  # any remaining statements are unreachable
+                    append_to = live_path
                 else:
-                    # visit remaining live branch
-                    branch_stmts = self.visit(stmt)
-                    unterminated = find_unterminated_path(branch_stmts)
-                    append_to.extend(branch_stmts)
-                    if unterminated is not branch_stmts:
-                        # update append_to if the remaining live branch here
-                        # contains terminated sub-paths
-                        append_to = unterminated
+                    if_branch = self.visit(stmt.if_branch)
+                    else_branch = self.visit(stmt.else_branch)
+                    stmt = ir.IfElse(stmt.test, if_branch, else_branch, stmt.pos)
+                    append_to.append(stmt)
+                    if_path = find_unterminated_path(stmt.if_branch)
+                    else_path = find_unterminated_path(stmt.else_branch)
+                    if_terminated = isinstance(if_path, TerminatedPath)
+                    else_terminated = isinstance(else_path, TerminatedPath)
+                    if if_terminated and else_terminated:
+                        break  # any remaining statements are unreachable
+                    elif if_terminated:
+                        append_to = else_path
+                    elif else_terminated:
+                        append_to = if_path
             else:
                 stmt = self.visit(stmt)
                 if stmt is not None:
