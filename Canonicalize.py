@@ -153,33 +153,28 @@ class NormalizePaths(StmtTransformer):
         append_to = repl
         for stmt in node:
             if isinstance(stmt, ir.IfElse):
-                # check for dead branches
-                if stmt.test.constant:
-                    if operator.truth(stmt.test):
-                        branch_stmts = self.visit(stmt.if_branch)
-                    else:
-                        branch_stmts = self.visit(stmt.else_branch)
-                    unterminated = find_unterminated_path(branch_stmts)
-                    repl.extend(branch_stmts)
-                    if isinstance(unterminated, TerminatedPath):
-                        # remaining statements are unreachable
-                        break
-                    elif unterminated is not branch_stmts:
-                        # some paths are terminated, so subsequent statements
-                        # are appended to the outermost unterminated path.
-                        append_to = unterminated
-                else:
-                    stmt = self.visit(stmt)
+                stmt = remove_dead_branches(stmt)
+                if isinstance(stmt, ir.IfElse):
                     append_to.append(stmt)
-                    if_path = find_unterminated_path(stmt.if_branch)
-                    else_path = find_unterminated_path(stmt.else_branch)
-                    if isinstance(if_path, TerminatedPath):
-                        if isinstance(else_path, TerminatedPath):
+                    unterminated_if = find_unterminated_path(stmt.if_branch)
+                    unterminated_else = find_unterminated_path(stmt.else_branch)
+                    if isinstance(unterminated_if, TerminatedPath):
+                        if isinstance(unterminated_else, TerminatedPath):
+                            # remaining statements are unreachable
                             break
                         else:
-                            append_to = else_path
-                    elif isinstance(else_path, TerminatedPath):
-                        append_to = if_path
+                            append_to = unterminated_else
+                    elif isinstance(unterminated_else, TerminatedPath):
+                        append_to = unterminated_if
+                else:
+                    # visit remaining live branch
+                    branch_stmts = self.visit(stmt)
+                    unterminated = find_unterminated_path(branch_stmts)
+                    append_to.extend(branch_stmts)
+                    if unterminated is not branch_stmts:
+                        # update append_to if the remaining live branch here
+                        # contains terminated sub-paths
+                        append_to = unterminated
             else:
                 stmt = self.visit(stmt)
                 append_to.append(stmt)
