@@ -1,6 +1,5 @@
 import operator
 import typing
-from contextlib import contextmanager
 from functools import singledispatchmethod
 
 import ir
@@ -106,6 +105,7 @@ class NormalizePaths(StmtTransformer):
         test = node.test
         if test.constant:
             if not operator.truth(test):
+                # return None if the loop body is unreachable.
                 return
             body = self.visit(node.body)
             body = remove_trailing_continues(body)
@@ -115,10 +115,19 @@ class NormalizePaths(StmtTransformer):
 
     @visit.register
     def _(self, node: ir.IfElse):
-        node = clear_dead_branches(node)
-        if isinstance(node, ir.IfElse):
+        # If visited directly, return the same node type.
+        # Alternatively, this would be an error.
+        if node.test.constant:
+            if operator.truth(node.test):
+                if_branch = self.visit(node.if_branch)
+                else_branch = []
+            else:
+                if_branch = []
+                else_branch = self.visit(node.else_branch)
+        else:
             if_branch = self.visit(node.if_branch)
             else_branch = self.visit(node.else_branch)
+        if if_branch != node.if_branch or else_branch != node.else_branch:
             node = ir.IfElse(node.test, if_branch, else_branch, node.pos)
         return node
 
@@ -260,7 +269,7 @@ class CallSpecialize:
 
 
 def EnumerateBuilder(mapping):
-    return ir.Zip((ir.AffineSeq(mapping["start"], None, ir.One), mapping["iterable"]))
+    return ir.Enumerate(mapping["iterable"], mapping["start"])
 
 
 def IterBuilder(mapping):

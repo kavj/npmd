@@ -417,9 +417,9 @@ class TreeBuilder(ast.NodeVisitor):
             self.body.append(assign)
 
     def visit_Pass(self, node: ast.Pass):
-        pos = extract_positional_info(node)
-        stmt = ir.Pass(pos)
-        return stmt
+        # If required and missing, AST construction
+        # will fail. After that these are somewhat useless.
+        return
 
     def visit_If(self, node: ast.If):
         pos = extract_positional_info(node)

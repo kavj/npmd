@@ -8,7 +8,6 @@ from collections.abc import Hashable
 from dataclasses import dataclass
 from functools import cached_property
 
-
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
 inplace_ops = frozenset({"+=", "-=", "*=", "/=", "//=", "%=", "**=", "<<=", ">>=", "|=", "^=", "&=", "@="})
 unaryops = frozenset({"-", "~", "not"})
@@ -394,7 +393,7 @@ class CompareOp(Expression):
         yield self.right
 
 
-class BoolOp_(Expression):
+class BoolOp(Expression):
     """
     Boolean operation using a single logical operation and an arbitrary
     number of operands. Base class is used here to aggregate type checks.
@@ -405,7 +404,7 @@ class BoolOp_(Expression):
 
 
 @dataclass(frozen=True)
-class OR(BoolOp_):
+class OR(BoolOp):
     """
     Boolean OR
     """
@@ -422,7 +421,7 @@ class OR(BoolOp_):
 
 
 @dataclass(frozen=True)
-class AND(BoolOp_):
+class AND(BoolOp):
     """
     Boolean AND
     """
@@ -439,7 +438,7 @@ class AND(BoolOp_):
 
 
 @dataclass(frozen=True)
-class XOR(BoolOp_):
+class XOR(BoolOp):
     """
     Boolean XOR
     """
@@ -456,7 +455,7 @@ class XOR(BoolOp_):
 
 
 @dataclass(frozen=True)
-class TRUTH(BoolOp_):
+class TRUTH(BoolOp):
     """
     Truth test for a single operand, which is not known to be wrapped by an implicit truth test.
     This is primarily used to handle cases where folding otherwise leaves an invalid
@@ -498,7 +497,7 @@ class TRUTH(BoolOp_):
 
 
 @dataclass(frozen=True)
-class NOT(BoolOp_):
+class NOT(BoolOp):
     """
     Boolean not
     """
@@ -608,10 +607,28 @@ class UnaryOp(Expression):
 
 
 @dataclass(frozen=True)
+class Enumerate(Expression):
+    """
+    High level sentinel, representing an enumerate object.
+    """
+
+    iterable: ValueRef
+    start: ValueRef
+
+    def __post_init__(self):
+        assert isinstance(self.iterable, ValueRef)
+        assert isinstance(self.start, ValueRef)
+
+    @property
+    def subexprs(self):
+        yield self.iterable
+        yield self.start
+
+
+@dataclass(frozen=True)
 class Zip(Expression):
     """
-    High level sentinel representing a zip object. This is the only unpackable iterator type in this IR.
-    Enumerate(object) is handled by Zip(AffineSeq, object).
+    High level sentinel representing a zip object.
     """
 
     elements: typing.Tuple[ValueRef, ...]
@@ -689,11 +706,6 @@ class NameImport(StmtBase):
     module: NameRef
     name: NameRef
     as_name: NameRef
-    pos: Position
-
-
-@dataclass
-class Pass(StmtBase):
     pos: Position
 
 

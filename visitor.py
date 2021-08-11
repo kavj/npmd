@@ -140,6 +140,12 @@ class ExpressionVisitor:
         return ir.Zip(elems)
 
     @visit.register
+    def _(self, expr: ir.Enumerate):
+        iterable = self.lookup(expr.iterable)
+        start = self.lookup(expr.start)
+        return ir.Enumerate(iterable, start)
+
+    @visit.register
     def _(self, expr: ir.Reversed):
         iterable = self.lookup(expr.iterable)
         return ir.Reversed(iterable)

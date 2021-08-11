@@ -99,7 +99,18 @@ def unpack_iterated(target, iterable, pos):
         else:
             msg = f"Zip construct {iterable} requires a tuple for unpacking."
             raise CompilerError(msg)
-
+    elif isinstance(iterable, ir.Enumerate):
+        if isinstance(target, ir.Tuple):
+            if len(target.elements) == 2:
+                first_target, sec_target = target.elements
+                yield first_target, iterable.iterable
+                yield sec_target, iterable.start
+            else:
+                msg = f"Enumerate must be unpacked to exactly two targets, received {len(target.elements)}."
+                raise CompilerError(msg)
+        else:
+            msg = f"Only tuples are supported unpacking targets. Received {type(target)}."
+            raise CompilerError(msg)
     else:
         # Array or sequence reference, with a single opaque target.
         yield target, iterable
