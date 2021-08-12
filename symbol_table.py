@@ -198,8 +198,8 @@ class symboltable:
         return gen
 
     def is_array(self, name):
-        sym = self.lookup(name)
-        return isinstance(sym.type_, ir.ArrayType)
+        type_ = self.check_type(name)
+        return isinstance(type_, ir.ArrayType)
 
     def check_type(self, name):
         """
