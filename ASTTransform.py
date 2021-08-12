@@ -12,7 +12,8 @@ import ir
 from errors import CompilerError
 from symbol_table import symbol_table_from_pysymtable, wrap_input
 from canonicalize import replace_builtin_call
-from lowering import const_folding, unpack_assignment, unpack_iterated
+from lowering import const_folding
+from utils import unpack_assignment, unpack_iterated
 
 binaryops = {ast.Add: "+",
              ast.Sub: "-",
@@ -115,7 +116,6 @@ class ImportHandler(ast.NodeVisitor):
 
     def visit_Import(self, node):
         # import modules only
-        imported_mods = set()
         pos = extract_positional_info(node)
         for name in node.names:
             module_name = ir.NameRef(name.name)
@@ -531,9 +531,6 @@ def parse_file(file_name, type_map):
     Parameters
     ----------
 
-    src: str
-        Source code for the corresponding module
-
     file_name:
         File path we used to extract source. This is used for error reporting.
 
@@ -559,7 +556,6 @@ def parse_file(file_name, type_map):
         symbol_tables = {}
         for func_name, ast_entry_point in funcs_by_name.items():
             table = module_symtable.lookup(func_name).get_namespace()
-            func_type_map = type_map[func_name]
             symbols = symbol_table_from_pysymtable(table, file_name)
             symbol_tables[func_name] = symbols
             func_ir = build_func_ir(ast_entry_point, symbols)

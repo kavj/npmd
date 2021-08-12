@@ -350,7 +350,6 @@ class BinOp(Expression):
     left: ValueRef
     right: ValueRef
     op: str
-    check_overflow: bool = False
 
     def __post_init__(self):
         assert (self.op in binaryops or self.op in inplace_ops or self.op in compareops)
@@ -393,7 +392,7 @@ class CompareOp(Expression):
         yield self.right
 
 
-class BoolOp(Expression):
+class BoolOp(Expression, ABC):
     """
     Boolean operation using a single logical operation and an arbitrary
     number of operands. Base class is used here to aggregate type checks.

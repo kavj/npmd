@@ -96,7 +96,7 @@ def name_and_source_from_path(file_path):
     return file_name, src
 
 
-def compile(src, file_name, type_map, verbose=False, custom_pipeline=None):
+def compile_module(src, file_name, type_map, verbose=False):
 
     if verbose:
         if file_name:

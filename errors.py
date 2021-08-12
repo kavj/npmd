@@ -17,7 +17,7 @@ class CompilerError(Exception):
 
 
 @contextmanager
-def module_context(print_stack=False):
+def module_context():
     try:
         yield
     except CompilerError as ce:

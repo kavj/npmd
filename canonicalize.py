@@ -19,10 +19,6 @@ def clear_dead_branches(node: ir.IfElse) -> typing.Union[ir.IfElse, list]:
     return node
 
 
-def contains_break(entry):
-    raise NotImplementedError
-
-
 def find_unterminated_path(stmts):
     if not isinstance(stmts, list):
         raise TypeError("Internal Error: expected a list of statements")

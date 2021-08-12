@@ -1,18 +1,13 @@
-import numbers
-import math
+import operator
 import operator
 import typing
-
 from collections import defaultdict, deque
-from dataclasses import dataclass
-from functools import singledispatch, singledispatchmethod
+from functools import singledispatchmethod
 
 import ir
-import symbol_table
-
 from errors import CompilerError
-from visitor import StmtVisitor, ExpressionVisitor
-
+from utils import is_addition, is_multiplication
+from visitor import ExpressionVisitor
 
 unaryops = {"+": operator.pos,
             "-": operator.neg,
@@ -57,112 +52,7 @@ binops = {"+": operator.add,
           "notin": NotImplemented
           }
 
-
 compare_ops = {"<", "<=", ">", ">=", "isnot", "in", "notin"}
-
-
-def wrap_constant(c):
-    if isinstance(c, bool):
-        return ir.BoolConst(c)
-    if isinstance(c, numbers.Integral):
-        return ir.IntConst(c)
-    elif isinstance(c, numbers.Real):
-        return ir.FloatConst(c)
-    else:
-        msg = f"Can't construct constant node for unsupported constant type {type(c)}"
-        raise NotImplementedError(msg)
-
-
-def unpack_assignment(target, value, pos):
-    if isinstance(target, ir.Tuple) and isinstance(value, ir.Tuple):
-        if target.length != value.length:
-            msg = f"Cannot unpack {value} with {value.length} elements using {target} with {target.length} elements: " \
-                  f"line {pos.line_begin}."
-            raise ValueError(msg)
-        for t, v in zip(target.subexprs, value.subexprs):
-            yield from unpack_assignment(t, v, pos)
-    else:
-        yield target, value
-
-
-def unpack_iterated(target, iterable, pos):
-    if isinstance(iterable, ir.Zip):
-        # must unpack
-        if isinstance(target, ir.Tuple):
-            if len(target.elements) == len(iterable.elements):
-                for t, v in zip(target.elements, iterable.elements):
-                    yield from unpack_iterated(t, v, pos)
-            else:
-                msg = f"Mismatched unpacking counts for {target} and {iterable}, {len(target.elements)} " \
-                      f"and {(len(iterable.elements))}."
-                raise CompilerError(msg)
-        else:
-            msg = f"Zip construct {iterable} requires a tuple for unpacking."
-            raise CompilerError(msg)
-    elif isinstance(iterable, ir.Enumerate):
-        if isinstance(target, ir.Tuple):
-            if len(target.elements) == 2:
-                first_target, sec_target = target.elements
-                yield first_target, iterable.iterable
-                yield sec_target, iterable.start
-            else:
-                msg = f"Enumerate must be unpacked to exactly two targets, received {len(target.elements)}."
-                raise CompilerError(msg)
-        else:
-            msg = f"Only tuples are supported unpacking targets. Received {type(target)}."
-            raise CompilerError(msg)
-    else:
-        # Array or sequence reference, with a single opaque target.
-        yield target, iterable
-
-
-def is_pow(expr):
-    return isinstance(expr, ir.BinOp) and expr.op in ("**", "**=")
-
-
-def is_fma_pattern(expr):
-    """
-    This ignores safety issues, which may be addressed later for anything
-    that looks like a * b - c * d.
-
-
-    """
-
-    if isinstance(expr, ir.BinOp) and expr.op in ("+", "+=", "-", "-="):
-        left = expr.left
-        right = expr.right
-        for operand in (left, right):
-            if isinstance(operand, ir.BinOp):
-                if operand.op == "*":
-                    return True
-            elif isinstance(operand, ir.UnaryOp):
-                # Expression simplifiers should have already folded any multiple
-                # nestings of unary -
-                if (operand.op == "-"
-                        and isinstance(operand.operand, ir.BinOp)
-                        and operand.operand.op == "*"):
-                    return True
-    return False
-
-
-def is_addition(node):
-    return isinstance(node, ir.BinOp) and node.op in ("+", "+=")
-
-
-def is_subtraction(node):
-    return isinstance(node, ir.BinOp) and node.op in ("-", "-=")
-
-
-def is_multiplication(node):
-    return isinstance(node, ir.BinOp) and node.op in ("*", "*=")
-
-
-def is_division(node):
-    return isinstance(node, ir.BinOp) and node.op in ("/", "//", "/=", "//=")
-
-
-def equals_unary_negate(node):
-    return isinstance(node, ir.UnaryOp) and node.op == "-"
 
 
 def rewrite_pow(expr):
@@ -222,15 +112,15 @@ class const_folding(ExpressionVisitor):
         if left.constant and right.constant:
             op = binops[expr.op]
             if op in ("<<", ">>", "<<=", ">>="):
-                 if not isinstance(right, ir.IntConst):
-                     msg = f"Cannot safely evaluate shifts by non-integral amounts: {left.value}  {op} {right.value}."
-                     raise ValueError(msg)
-                 elif operator.eq(right.value, 0):
-                     msg = f"Shift by zero error: {left.value} {op} {right.value}"
-                     raise ValueError(msg)
-                 elif operator.lt(right.value, 0):
-                     msg = f"Shift amount cannot be negative: {left.value} {op} {right.value}"
-                     raise ValueError(msg)
+                if not isinstance(right, ir.IntConst):
+                    msg = f"Cannot safely evaluate shifts by non-integral amounts: {left.value}  {op} {right.value}."
+                    raise ValueError(msg)
+                elif operator.eq(right.value, 0):
+                    msg = f"Shift by zero error: {left.value} {op} {right.value}"
+                    raise ValueError(msg)
+                elif operator.lt(right.value, 0):
+                    msg = f"Shift amount cannot be negative: {left.value} {op} {right.value}"
+                    raise ValueError(msg)
             value = op(left.value, right.value)
             return wrap_constant(value)
         else:
@@ -306,7 +196,7 @@ class const_folding(ExpressionVisitor):
             if operand.constant:
                 if operator.truth(operand):
                     return ir.BoolConst(True)
-                continue # don't append constant False
+                continue  # don't append constant False
             elif isinstance(operand, ir.TRUTH):
                 # Truth cast is applied by OR
                 operand = operand.operand
@@ -351,7 +241,6 @@ class const_folding(ExpressionVisitor):
 
 
 def simplify_integer_max(node, op):
-
     numeric = set()
     additions = defaultdict(set)
     seen = set()
@@ -398,10 +287,7 @@ def simplify_integer_max(node, op):
             right = rhs_terms.pop()
         unique.append(ir.BinOp(left, right, "+"))
 
-
-
     unique = []
-
 
     for value in node.values:
         if value.constant:
@@ -418,7 +304,6 @@ def simplify_integer_max(node, op):
             # that rely on multiple offset views of one array
             if value.left.constant:
                 assert isinstance(value, ir.IntConst)
-
 
                 pass
             elif value.right.constant:
@@ -725,7 +610,7 @@ class interval_splitting(ExpressionVisitor):
             else:
                 intervals = {base, (start, iterable.stop, step)}
         else:
-            intervals = {(ir.Zero, ir.Length(iterable), ir.One),}
+            intervals = {(ir.Zero, ir.Length(iterable), ir.One), }
         return intervals
 
 
@@ -788,6 +673,7 @@ def unary_minus_is_safe(a: ir.ValueRef, p: int) -> ir.ValueRef:
         cond = ir.BinOp(a, ir.IntConst(min_int), "!=")
     return cond
 
+
 # Stubs for range checks, not always decidable
 # The expressions themselves should be evaluated as if safe and well defined.
 
@@ -809,7 +695,7 @@ def MIN_INT(p: int) -> ir.IntConst:
     """
 
     assert p > 0
-    value = -(2**p)
+    value = -(2 ** p)
     return ir.IntConst(value)
 
 
@@ -819,7 +705,7 @@ def MAX_INT(p: int) -> ir.IntConst:
     """
 
     assert p > 0
-    value = 2**p - 1
+    value = 2 ** p - 1
     return ir.IntConst(value)
 
 
@@ -902,7 +788,7 @@ def add_is_safe(a: ir.ValueRef, b: ir.ValueRef, p: int) -> ir.ValueRef:
         return ir.Ternary(non_negative_a, cond_if_true, cond_if_false)
 
 
-def sub_is_safe(a: ir.ValueRef, b: ir.ValueRef, p: int)-> typing.Union[bool, ir.ValueRef]:
+def sub_is_safe(a: ir.ValueRef, b: ir.ValueRef, p: int) -> typing.Union[bool, ir.ValueRef]:
     """
 
     Note that folding at compile time uses Python's arbitrary precision integers

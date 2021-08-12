@@ -2,7 +2,8 @@ from collections import defaultdict
 from functools import singledispatchmethod
 
 import ir
-from visitor import StmtVisitor, walk_statements
+from utils import get_expr_parameters
+from visitor import StmtVisitor
 
 """
 Very conservative varying checks. These determine uniformity at a variable name level, ignoring local dataflow
@@ -76,7 +77,7 @@ class MapDependentExprs(StmtVisitor):
     @visit.register
     def _(self, node: ir.ValueRef):
         expr_deps = set()
-        for subexpr in node.subexprs:
+        for subexpr in get_expr_parameters(node):
             self.visit(subexpr)
             expr_deps.add(subexpr)
         self.deps[node] = expr_deps
@@ -116,18 +117,18 @@ class MapTargets(StmtVisitor):
         raise NotImplementedError("UNDER RECONSTRUCTION")
 
 
-def collect_assigned(entry):
-    exprs = defaultdict(set)
-    for stmt in walk_statements(entry):
-        if isinstance(stmt, ir.Assign):
-            # only record expressions recorded as top level expressions
-            if isinstance(stmt.target, ir.NameRef):
-                if not stmt.value.constant:
-                    exprs[stmt.value].add(stmt.target)
-        elif isinstance(stmt, ir.ForLoop):
-            raise NotImplementedError("UNDER RECONSTRCTION")
+# def collect_assigned(entry):
+#    exprs = defaultdict(set)
+#    for stmt in walk_statements(entry):
+#        if isinstance(stmt, ir.Assign):
+# only record expressions recorded as top level expressions
+#            if isinstance(stmt.target, ir.NameRef):
+#                if not stmt.value.constant:
+#                    exprs[stmt.value].add(stmt.target)
+#        elif isinstance(stmt, ir.ForLoop):
+#            raise NotImplementedError("UNDER RECONSTRCTION")
 
-    return exprs
+#    return exprs
 
 
 def map_parameters(exprs):
@@ -154,9 +155,8 @@ def varying_from_exprs(exprs, params, varying_inputs):
                     varying.add(target)
     return varying
 
-
-def find_varying(entry, varying_inputs):
-    exprs = collect_assigned(entry)
-    params = map_parameters(exprs.keys())
-    varying = varying_from_exprs(exprs, params, varying_inputs)
-    return varying
+# def find_varying(entry, varying_inputs):
+#    exprs = collect_assigned(entry)
+#    params = map_parameters(exprs.keys())
+#    varying = varying_from_exprs(exprs, params, varying_inputs)
+#    return varying

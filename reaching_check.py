@@ -2,12 +2,8 @@ from contextlib import contextmanager
 from functools import singledispatchmethod
 
 import ir
-from lowering import unpack_iterated
-from visitor import StmtVisitor, walk
-
-
-def get_expr_parameters(expr):
-    return {subexpr for subexpr in walk(expr) if isinstance(subexpr, ir.NameRef)}
+from utils import unpack_iterated, get_expr_parameters
+from visitor import StmtVisitor
 
 
 class ReachingCheck(StmtVisitor):

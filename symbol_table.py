@@ -34,54 +34,54 @@ def reduces_array_dims(ref):
         raise TypeError(msg)
 
 
-def is_valid_identifier(input):
-    if isinstance(input, ir.NameRef):
-        input = input.name
-    return isinstance(input, str) and input.isidentifier() and (input not in reserved_names)
+def is_valid_identifier(name):
+    if isinstance(name, ir.NameRef):
+        name = name.name
+    return isinstance(name, str) and name.isidentifier() and (name not in reserved_names)
 
 
 @singledispatch
-def wrap_input(input):
-    msg = f"No method to wrap {input} of type {type(input)}."
+def wrap_input(value):
+    msg = f"No method to wrap {value} of type {type(value)}."
     raise NotImplementedError(msg)
 
 
 @wrap_input.register
-def _(input: str):
-    if not is_valid_identifier(input):
-        msg = f"{input} is not a valid variable name."
+def _(value: str):
+    if not is_valid_identifier(value):
+        msg = f"{value} is not a valid variable name."
         raise ValueError(msg)
-    return ir.NameRef(input)
+    return ir.NameRef(value)
 
 
 @wrap_input.register
-def _(input: ir.NameRef):
-    return input
+def _(value: ir.NameRef):
+    return value
 
 
 @wrap_input.register
-def _(input: ir.Constant):
-    return input
+def _(value: ir.Constant):
+    return value
 
 
 @wrap_input.register
-def _(input: int):
-    return ir.IntConst(input)
+def _(value: int):
+    return ir.IntConst(value)
 
 
 @wrap_input.register
-def _(input: bool):
-    return ir.BoolConst(input)
+def _(value: bool):
+    return ir.BoolConst(value)
 
 
 @wrap_input.register
-def _(input: numbers.Integral):
-    return ir.IntConst(input)
+def _(value: numbers.Integral):
+    return ir.IntConst(value)
 
 
 @wrap_input.register
-def _(input: numbers.Real):
-    return ir.FloatConst(input)
+def _(value: numbers.Real):
+    return ir.FloatConst(value)
 
 
 def map_alias_to_qualified_names(import_nodes):

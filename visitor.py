@@ -114,12 +114,12 @@ class ExpressionVisitor:
 
     @visit.register
     def _(self, expr: ir.TRUTH):
-        operand = self.lookup(expr.operands)
+        operand = self.lookup(expr.operand)
         return ir.XOR(operand)
 
     @visit.register
     def _(self, expr: ir.NOT):
-        operand = self.lookup(expr.operands)
+        operand = self.lookup(expr.operand)
         return ir.XOR(operand)
 
     @visit.register
