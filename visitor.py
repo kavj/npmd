@@ -197,7 +197,6 @@ class StmtVisitor:
 
     @visit.register
     def _(self, node: ir.WhileLoop):
-        self.visit(node.test)
         self.visit(node.body)
 
     @visit.register

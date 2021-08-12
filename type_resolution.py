@@ -266,4 +266,3 @@ dispatch = {
     "&=": bitwise_inplace_dispatch,
     "^=": bitwise_inplace_dispatch,
 }
-

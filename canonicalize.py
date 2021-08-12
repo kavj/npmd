@@ -111,8 +111,6 @@ class NormalizePaths(StmtTransformer):
 
     @visit.register
     def _(self, node: ir.IfElse):
-        # If visited directly, return the same node type.
-        # Alternatively, this would be an error.
         if node.test.constant:
             if operator.truth(node.test):
                 if_branch = self.visit(node.if_branch)
@@ -123,8 +121,10 @@ class NormalizePaths(StmtTransformer):
         else:
             if_branch = self.visit(node.if_branch)
             else_branch = self.visit(node.else_branch)
-        if if_branch != node.if_branch or else_branch != node.else_branch:
-            node = ir.IfElse(node.test, if_branch, else_branch, node.pos)
+        # If no statements remain in either branch, discard this node.
+        if not (if_branch or else_branch):
+            return
+        node = ir.IfElse(node.test, if_branch, else_branch, node.pos)
         return node
 
     @visit.register
@@ -132,34 +132,27 @@ class NormalizePaths(StmtTransformer):
         repl = []
         append_to = repl
         for stmt in node:
+            stmt = self.visit(stmt)
             if isinstance(stmt, ir.IfElse):
                 if stmt.test.constant:
-                    if operator.truth(stmt.test):
-                        live_branch = self.visit(stmt.if_branch)
-                    else:
-                        live_branch = self.visit(stmt.else_branch)
+                    live_branch = stmt.if_branch if operator.truth(stmt.test) else stmt.else_branch
                     live_path = find_unterminated_path(live_branch)
                     append_to.extend(live_branch)
                     if live_path is None:
                         break  # any remaining statements are unreachable
                     append_to = live_path
                 else:
-                    if_branch = self.visit(stmt.if_branch)
-                    else_branch = self.visit(stmt.else_branch)
-                    stmt = ir.IfElse(stmt.test, if_branch, else_branch, stmt.pos)
                     append_to.append(stmt)
                     if_path = find_unterminated_path(stmt.if_branch)
                     else_path = find_unterminated_path(stmt.else_branch)
                     if if_path is None and else_path is None:
-                        break  # any remaining statements are unreachable
+                        break  # remaining statements are unreachable
                     elif if_path is None:
                         append_to = else_path
                     elif else_path is None:
                         append_to = if_path
-            else:
-                stmt = self.visit(stmt)
-                if stmt is not None:
-                    append_to.append(stmt)
+            elif stmt is not None:
+                append_to.append(stmt)
                 if isinstance(stmt, (ir.Break, ir.Continue, ir.Return)):
                     break  # remaining statements are unreachable
         return repl
