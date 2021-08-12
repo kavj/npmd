@@ -9,7 +9,8 @@ from pretty_printing import pretty_printer
 tests = ("test_forifcont.py", "test_nested.py", "test_cascade_if.py", "test_dead.py", "test_dead2.py",
          "test_while.py", "test_cascade_assign.py", "test_for.py", "test_forif.py", "test_retval.py",
          "test_pass.py", "test_conditional_terminated.py", "test_bothterminated.py", "test_chained_comparisons.py",
-         "test_folding.py", "test_fold_unreachable.py", "test_normalize_return_flow.py")
+         "test_folding.py", "test_fold_unreachable.py", "test_normalize_return_flow.py", "unpack_with_subscripts.py")
+
 
 array_n = driver.make_array_arg_type(dims=("n",), dtype=np.float64, stride=None)
 
@@ -41,6 +42,7 @@ uws_types = {"test_forifcont.py": {"something": {"x": array_n,
              "test_folding.py": {"folding": {}},
              "test_fold_unreachable.py": {"divergent": {}},
              "test_normalize_return_flow.py": {"something": {}},
+             "unpack_with_subscripts.py": {"unpack_test": {}}
              }
 
 Type_Info = {}

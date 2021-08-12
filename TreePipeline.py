@@ -1,6 +1,7 @@
 import os.path
 
 from ASTTransform import parse_file
+from canonicalize import NormalizePaths
 from reaching_check import ReachingCheck
 from pretty_printing import pretty_printer
 
@@ -12,23 +13,11 @@ def run_tree_pipeline(pth, types):
     module, symbol_tables = parse_file(pth, types)
     repl = []
     pp = pretty_printer()
+    normalize_paths = NormalizePaths()
     for func in module.functions:
+        func = normalize_paths(func)
         pp(func, symbol_tables[func.name])
         print("\n\n")
-        # func = merge_paths(func)
-        # P(func)
-        # print("\n\n")
-        # func = fold_constant_expressions(func)
-        # P(func)
-        # print("\n\n")
-        # func = merge_paths(func)
-        # P(func)
-        # print("\n\n")
-        # func = fold_constant_expressions(func)
-        # P(func)
-        # print("\n\n")
-        # func = remove_continues(func)
-        # repl.append(func)
 
     module.functions = repl
     unbound = []
