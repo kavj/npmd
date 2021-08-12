@@ -560,7 +560,7 @@ def parse_file(file_name, type_map):
         for func_name, ast_entry_point in funcs_by_name.items():
             table = module_symtable.lookup(func_name).get_namespace()
             func_type_map = type_map[func_name]
-            symbols = symbol_table_from_pysymtable(table, func_type_map, file_name)
+            symbols = symbol_table_from_pysymtable(table, file_name)
             symbol_tables[func_name] = symbols
             func_ir = build_func_ir(ast_entry_point, symbols)
             funcs.append(func_ir)

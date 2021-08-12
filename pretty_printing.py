@@ -422,11 +422,10 @@ class pretty_printer:
             formatted_target = self.format(node.target)
             formatted_value = self.format(node.value)
             if self.print_annotations and isinstance(target, ir.NameRef):
-                symbol = self.symbols.lookup(target)
-                if symbol is not None:
+                type_ = self.symbols.check_type(target)
+                if type_ is not None:
                     # This is None if no typed symbol is registered
                     # This will be an error later.
-                    type_ = symbol.type_
                     pretty_type = get_pretty_type(type_)
                     if pretty_type is not None:
                         formatted_target = f"{formatted_target}: {pretty_type}"

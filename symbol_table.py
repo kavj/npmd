@@ -109,11 +109,9 @@ class symbol:
     These are meant to be interned by the symbol table and not created arbitrarily.
     """
 
-    def __init__(self, name, type_, is_source_name, is_arg, is_assigned):
+    def __init__(self, name, is_source_name, is_arg, is_assigned):
         assert isinstance(name, ir.NameRef)
-        assert is_source_name or type_ is not None
         self.name = name
-        self.type_ = type_
         self.is_source_name = is_source_name
         self.is_arg = is_arg
         self.is_assigned = is_assigned
@@ -121,25 +119,15 @@ class symbol:
     def __eq__(self, other):
         assert isinstance(other, symbol)
         return (self.name == other.name
-                and self.type_ == other.type_
                 and self.is_source_name == other.is_source_name)
 
     def __ne__(self, other):
         assert isinstance(other, symbol)
         return (self.name != other.name
-                or self.type_ != other.type_
                 or self.is_source_name != other.is_source_name)
 
     def __hash__(self):
         return hash(self.name)
-
-    @property
-    def is_array(self):
-        return isinstance(self.type_, (ir.ArrayRef, ir.ViewRef))
-
-    @property
-    def is_integer(self):
-        return self.type_ in (tr.Int32, tr.Int64)
 
 
 # array creation nodes
@@ -177,6 +165,7 @@ class symboltable:
 
     def __init__(self, scope_name, default_int_is_64=True):
         self.symbols = {}   # name -> typed symbol entry
+        self.types = {}
         self.default_int = tr.Int64 if default_int_is_64 else tr.Int32
         self.scope_name = wrap_input(scope_name)  # wrap everything to avoid false comparing raw strings to namerefs
         self.prefixes = {}  # prefix for adding enumerated variable names
@@ -196,6 +185,9 @@ class symboltable:
             return False
         return sym.is_source_name
 
+    def get_arguments(self):
+        return {s for s in self.symbols if s.is_arg}
+
     def _get_num_generator(self, prefix):
         # splitting by prefix helps avoids appending
         # large numbers in most cases
@@ -209,16 +201,16 @@ class symboltable:
         sym = self.lookup(name)
         return isinstance(sym.type_, ir.ArrayType)
 
-    def lookup_type(self, name):
+    def check_type(self, name):
         """
         shortcut to get type info only
         """
-        sym = self.lookup(name)
-        return sym.type_
+        name = wrap_input(name)
+        return self.types.get(name)
 
     def is_typed(self, name):
-        sym = self.lookup(name)
-        return sym is not None and sym.type_ is not None
+        name = wrap_input(name)
+        return name in self.types
 
     def make_unique_name(self, prefix):
         prefix = extract_name(prefix)
@@ -238,19 +230,15 @@ class symboltable:
         """
 
         assert type_ is not None
-        sym = self.lookup(name)
-        if symbol is None:
-            msg = f"Internal Error: Cannot add type to undeclared symbol name {name}."
-            raise CompilerError(msg)
-        else:
-            declared_type = sym.type_
-            if declared_type is None:
-                sym.type_ = type_
-            elif declared_type != type_:
-                msg = f"Conflicting types {declared_type} and {type_} for variable name {name}."
+        existing_type = self.check_type(name)
+        if existing_type is not None:
+            if existing_type != type_:
+                msg = f"Conflicting types {existing_type} and {type_} for variable name {name}."
                 raise CompilerError(msg)
+        else:
+            self.types[name] = type_
 
-    def register_src_name(self, name, is_arg, is_assigned, type_):
+    def register_src_name(self, name, is_arg, is_assigned):
         """
         Register a source name using the corresponding symbol from the Python symbol table.
 
@@ -264,7 +252,7 @@ class symboltable:
             msg = f"Variable name: {name.name} shadows function name."
             raise CompilerError(msg)
         is_source_name = True
-        sym = symbol(name, type_, is_source_name, is_arg, is_assigned)
+        sym = symbol(name, is_source_name, is_arg, is_assigned)
         self.symbols[name] = sym
 
     def register_impl_name(self, name, type_):
@@ -272,14 +260,15 @@ class symboltable:
         This is used to add a unique typed temporary variable name.
         """
         name = self.make_unique_name(name)
-        sym = symbol(name, type_, is_source_name=False, is_arg=False, is_assigned=True)
+        sym = symbol(name, is_source_name=False, is_arg=False, is_assigned=True)
         self.symbols[name] = sym
+        self.bind_type_to_name(name, type_)
         # The input name may require mangling for uniqueness.
         # Return the name as it is registered.
         return name
 
 
-def symbol_table_from_pysymtable(func_table, type_map, file_name):
+def symbol_table_from_pysymtable(func_table, file_name):
     """
     Build an internally used symbol table from a Python function symtable and type information.
     Note: read func_table as py_symbol_table, noting that calling it py_anything would be a Python language violation.
@@ -308,6 +297,6 @@ def symbol_table_from_pysymtable(func_table, type_map, file_name):
         is_arg = sym.is_parameter()
         is_assigned = sym.is_assigned()
         type_ = None
-        internal_table.register_src_name(name, is_arg, is_assigned, type_)
+        internal_table.register_src_name(name, is_arg, is_assigned)
 
     return internal_table
