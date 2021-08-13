@@ -242,98 +242,86 @@ class CallSpecialize:
             return self.replacement(mapped)
 
 
-def EnumerateBuilder(mapping):
-    return ir.Enumerate(mapping["iterable"], mapping["start"])
-
-
-def IterBuilder(mapping):
-    return mapping["iterable"]
-
-
-# def ReversedBuilder(arg):
-#    if isinstance(arg, ir.AffineSeq):
-#        if arg.stop is not None:
-#            node = ir.AffineSeq(arg.stop, arg.start, negate_condition(arg.step))
-#        else:
-#            # must be enumerate
-#            return "Cannot reverse enumerate type"
-#    else:
-#        node = ir.Reversed(arg)
-#    return node
-
-
-def ZipBuilder(node: ir.Call):
-    """
-    Zip takes an arbitrary number of positional arguments, something which we don't generally support.
-
-    """
-    assert (node.func.name == "zip")
-    if node.keywords:
-        raise ValueError("Zip does not accept keyword arguments.")
-    args = tuple(arg for arg in node.args)
-    return ir.Zip(args)
-
-
-def RangeBuilder(node: ir.Call):
-    """
-    Range is a special case and handled separately from other call signatures,
-    since it has to accommodate two distinct orderings without the use of keywords.
-
-    These are:
-        range(stop)
-        range(start, stop, step: optional)
-
-    Unlike the CPython version, this is only supported as part of a for loop.
-
-    """
-
-    argct = len(node.args)
-    if not (0 < argct <= 3):
-        return None, "Range call with incorrect number of arguments"
-    elif node.keywords:
-        return None, "Range does not support keyword arguments"
-    if argct == 1:
-        repl = ir.AffineSeq(ir.Zero, node.args[0], ir.One)
-    elif argct == 2:
-        repl = ir.AffineSeq(node.args[0], node.args[1], ir.One)
-    else:
-        repl = ir.AffineSeq(node.args[0], node.args[1], node.args[2])
-    return repl
-
-
-builders = {"enumerate": CallSpecialize(name="enumerate",
-                                        args=("iterable", "start"),
-                                        repl=EnumerateBuilder,
-                                        defaults={"start": ir.Zero},
-                                        allows_keywords=True),
-
-            #  "reversed": CallSpecialize(name="reversed",
-            #                           args=("object",),
-            #                            repl=ReversedBuilder,
-            #                            defaults={},
-            #                            allows_keywords=False),
-
-            "iter": CallSpecialize(name="iter",
-                                   args=("iterable",),
-                                   repl=IterBuilder,
-                                   defaults={},
-                                   allows_keywords=False),
-
-            # Todo: orphaned
-            # "len": CallSpecialize(name="len",
-            #                      args=("obj",),
-            #                      repl=LenBuilder,
-            #                      defaults={},
-            #                      allows_keywords=False),
-
-            "range": RangeBuilder,
-
-            "zip": ZipBuilder,
-            }
-
-
 def replace_builtin_call(node: ir.Call):
-    handler = builders.get(node.func.name)
-    if handler is None:
+    name = node.func.name
+    if name == "enumerate":
+        args = node.args
+        kws = node.keywords
+        nargs = len(args)
+        nkws = len(kws)
+        if not (1 <= nargs + nkws <= 2):
+            msg = f"In call to enumerate: {node}, enumerate requires exactly 1 or 2 arguments, {nargs + nkws} " \
+                  f"arguments given."
+            raise CompilerError(msg)
+        elif nargs == 1:
+            iterable, = args
+            if kws:
+                if len(kws) != 1:
+                    msg = f"Call to enumerate: {node} contains too many keyword arguments."
+                    raise CompilerError(msg)
+                else:
+                    (kw, start), = kws
+                    if kw != "start":
+                        msg = f"Call to enumerate: {node} has unexpected keyword argument '{kw}'"
+                        raise CompilerError(msg)
+            else:
+                start = ir.Zero
+        elif nargs == 2:
+            if kws:
+                kws = tuple(k for (k, _) in kws)
+                msg = f"Call to enumerate with 2 positional arguments contains unexpected keyword arguments {kws}."
+                raise CompilerError(msg)
+            iterable, start = args
+        else:
+            raise CompilerError
+        return ir.Enumerate(iterable, start)
+    if name == "iter":
+        if node.args:
+            if len(node.args) != 1 or node.keywords:
+                msg = "Only the single argument form of iter: 'iter(iterable)' is supported"
+                raise CompilerError(msg)
+        elif node.keywords:
+            if len(node.keywords) > 1:
+                msg = f"The only supported keyword argument form of iter that is supported is 'iter(iterable)', " \
+                      f"received 2 or more keyword arguments."
+                raise CompilerError(msg)
+            kw, value = node.keywords
+            if kw != "iterable":
+                msg = "Unrecognized keyword {kw} in call to iter."
+                raise CompilerError(msg)
+        # no call specialization. within a loop this reduces to a noop, elsewhere it's unsupported
         return node
-    return handler(node)
+    elif name == "len":
+        if node.keywords:
+            msg = f"len does not support keyword arguments"
+            raise CompilerError(msg)
+        elif len(node.args) != 1:
+            msg = f"len expects exactly one positional argument, {len(node.args)} arguments received."
+            raise CompilerError(msg)
+        arg, = node.args
+        return ir.Length(arg)
+    elif name == "range":
+        if node.keywords:
+            msg = "Range does not support keyword arguments."
+            raise CompilerError(msg)
+        nargs = len(node.args)
+        if not (1 <= nargs <= 3):
+            msg = f"Range expects 1 to 3 arguments, {len(node.args)} given."
+            raise CompilerError(msg)
+        if nargs == 1:
+            start = ir.Zero
+            stop, = node.args
+            step = ir.One
+        elif nargs == 2:
+            start, stop = node.args
+            step = ir.One
+        else:
+            start, stop, step = node.args
+        return ir.AffineSeq(start, stop, step)
+    elif name == "zip":
+        if node.keywords:
+            msg = "Zip does not support keywords."
+            raise CompilerError(msg)
+        return ir.Zip(node.args)
+    else:
+        return node
