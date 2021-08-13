@@ -1,16 +1,61 @@
 import os
 import sys
+import typing
 
-from errors import CompilerError
+import numpy as np
+
+import ir
+import type_resolution as tr
 from ASTTransform import parse_file
+from dataclasses import dataclass
+from errors import module_context
+from symbol_table import wrap_input
 from pretty_printing import pretty_printer
+
 
 version = sys.version_info
 # Python 2 can't parse a significant
 # amount of this code, so error messages ignore it.
 if sys.version_info.minor < 8:
-    msg = f"Python 3.8 or above is required."
-    raise RuntimeError(msg)
+    raise RuntimeError(f"Python 3.8 or above is required.")
+
+
+@dataclass(frozen=True)
+class ArrayArg(ir.ValueRef):
+    """
+    Array argument. This ensures reaching definitions of array
+    parameters are unambiguous.
+    """
+    dims: typing.Tuple[typing.Union[ir.NameRef, ir.IntConst], ...]
+    dtype: typing.Hashable
+    stride: typing.Optional[typing.Union[ir.NameRef, ir.IntConst]]
+
+
+def get_scalar_type(input_type):
+    if input_type == np.float32:
+        return tr.Float32
+    elif input_type == np.float64:
+        return tr.Float64
+    elif input_type == np.int32:
+        return tr.Int32
+    elif input_type == np.int64:
+        return tr.Int64
+    elif input_type == bool:
+        return tr.BoolType
+    else:
+        msg = f"Supported types are {np.float32}, {np.float64}, {np.int32}, {np.int64}, {bool}, received {input_type}."
+        raise ValueError(msg)
+
+
+def make_array_arg_type(dims, dtype, stride=None):
+    """
+    Parameterized array type suitable for use as an argument.
+    """
+    dtype = get_scalar_type(dtype)
+    dims = tuple(wrap_input(d) for d in dims)
+    if stride is not None:
+        stride = wrap_input(stride)
+    return ArrayArg(dims, dtype, stride)
 
 
 class CompilerContext:
@@ -21,15 +66,14 @@ class CompilerContext:
     def __init__(self, verbose=False, pretty_print_ir=False, pipeline=None):
         self.verbose = verbose
         self.pretty_print_ir_stages = pretty_print_ir
-        if pipeline is not None:
-            self.pipeline = pipeline
-        else:
-            self.pipeline = [stage() for stage in CompilerContext.stages]
+        if pipeline is None:
+            pipeline = [stage() for stage in CompilerContext.stages]
+        self.pipeline = pipeline
 
-    def run_pipeline(self, source, file_name, type_map):
+    def run_pipeline(self, file_name, type_map):
 
         with module_context():
-            module, symbols = parse_file(source, file_name, type_map)
+            module, symbols = parse_file(file_name, type_map)
 
             funcs = module.functions
 
@@ -46,24 +90,22 @@ class CompilerContext:
 
 
 def name_and_source_from_path(file_path):
-    with open(file_path) as input:
-        src = input.read()
+    with open(file_path) as src_stream:
+        src = src_stream.read()
     file_name = os.path.basename(file_path)
     return file_name, src
 
 
-def compile(src, file_name, type_map, verbose=False, custom_pipeline=None):
+def compile_module(src, file_name, type_map, verbose=False):
 
     if verbose:
         if file_name:
             print(f"Compiling: {file_name}")
-    try:
-        tree, symbols = parse_file(src, file_name, type_map)
-        functions = []
-        for func in tree.functions:
-            for stage in pipeline:
-                func = stage(func, )
-
-    except CompilerError:
-        pass
-
+    tree, symbols = parse_file(src, type_map)
+    functions = []
+    cc = CompilerContext(verbose=True, pretty_print_ir=True, pipeline=None)
+    for func in tree.functions:
+        for stage in cc.pipeline:
+            syms = symbols[func.name]
+            func = stage(func, syms)
+            functions.append(func)

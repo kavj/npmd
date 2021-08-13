@@ -10,9 +10,10 @@ from pathlib import Path
 
 import ir
 from errors import CompilerError
-from symbol_table import symbol_table_from_pysymtable, wrap_input
-from Canonicalize import replace_builtin_call
-from lowering import const_folding, unpack_assignment, unpack_iterated
+from symbol_table import st_from_pyst, wrap_input
+from canonicalize import replace_builtin_call
+from lowering import const_folding
+from utils import unpack_assignment, unpack_iterated
 
 binaryops = {ast.Add: "+",
              ast.Sub: "-",
@@ -115,7 +116,6 @@ class ImportHandler(ast.NodeVisitor):
 
     def visit_Import(self, node):
         # import modules only
-        imported_mods = set()
         pos = extract_positional_info(node)
         for name in node.names:
             module_name = ir.NameRef(name.name)
@@ -123,7 +123,7 @@ class ImportHandler(ast.NodeVisitor):
             if module_alias in self.bound_names:
                 msg = f"Module alias {module_alias.name} to module {module_name.name}" \
                       f" shadows a previously bound name."
-                raise ValueError(msg)
+                raise CompilerError(msg)
             mod_import = ir.ModImport(module_name, module_alias, pos)
             self.import_map[module_alias] = mod_import
             self.bound_names.add(module_alias)
@@ -137,7 +137,7 @@ class ImportHandler(ast.NodeVisitor):
             import_alias = ir.NameRef(name.asname) if hasattr(name, "asname") else imported_name
             if import_alias in self.bound_names:
                 msg = "Name {import_alias} overwrites an existing assignment."
-                raise ValueError(msg)
+                raise CompilerError(msg)
             import_ref = ir.NameImport(module_name, imported_name, import_alias, pos)
             self.import_map[import_alias] = import_ref
             self.bound_names.add(import_alias)
@@ -190,8 +190,10 @@ class TreeBuilder(ast.NodeVisitor):
         self.body = stashed
 
     def is_local_variable_name(self, name: ir.NameRef):
-        name = name.name
-        return name in self.symbols.src_locals
+        sym = self.symbols.lookup(name)
+        if sym is None:
+            return False
+        return sym.is_source_name
 
     def visit_Attribute(self, node: ast.Attribute) -> ir.NameRef:
         value = self.visit(node.value)
@@ -208,9 +210,16 @@ class TreeBuilder(ast.NodeVisitor):
             msg = "Ellipses are not supported."
             raise TypeError(msg)
         elif isinstance(node.value, str):
-            msg = "String constants are not supported."
-            raise TypeError(msg)
-        return wrap_input(node.value)
+            # Check unicode code points fall within ascii range. This is mainly supported
+            # for the possibility of enabling simple printing.
+            if any(ord(v) > 127 for v in node.value):
+                msg = f"Only strings that can be converted to ascii text are supported. This is mainly intended" \
+                      f"to facilitate simple printing support at some point."
+                raise CompilerError(msg)
+            output = ir.StringConst(node.value)
+        else:
+            output = wrap_input(node.value)
+        return output
 
     def visit_Tuple(self, node: ast.Tuple) -> ir.Tuple:
         # refactor seems to have gone wrong here..
@@ -235,7 +244,7 @@ class TreeBuilder(ast.NodeVisitor):
         op = unaryops.get(type(node.op))
         operand = self.visit(node.operand)
         operand = self.fold_if_constant(operand)
-        if op == "+":
+        if op == "+":  # This is a weird noop that can be ignored.
             expr = operand
         elif op == "not":
             expr = ir.NOT(operand)
@@ -274,7 +283,6 @@ class TreeBuilder(ast.NodeVisitor):
                     operands.append(value)
         if len(operands) == 1:
             expr = operands.pop()
-            expr = ir.TRUTH(expr)
         else:
             operands = tuple(operands)
             if op == "and":
@@ -287,7 +295,7 @@ class TreeBuilder(ast.NodeVisitor):
         left = self.visit(node.left)
         right = self.visit(node.comparators[0])
         op = compareops[type(node.ops[0])]
-        initial_compare = ir.BinOp(left, right, op)
+        initial_compare = ir.CompareOp(left, right, op)
         initial_compare = self.fold_if_constant(initial_compare)
         if len(node.ops) == 1:
             return initial_compare
@@ -297,15 +305,15 @@ class TreeBuilder(ast.NodeVisitor):
             left = right
             right = self.visit(node.comparators[index])
             op = compareops[type(ast_op)]
-            cmp = ir.BinOp(left, right, op)
+            cmp = ir.CompareOp(left, right, op)
             cmp = self.fold_if_constant(cmp)
             if cmp.constant:
                 if not operator.truth(cmp):
                     return ir.BoolConst(False)
             else:
                 if cmp not in seen:
-                    # Preserve the original comparison order, ignoring
-                    # duplicate expressions.
+                    # Preserve the original comparison order, but
+                    # ignore duplicate expressions.
                     seen.add(cmp)
                     compares.append(cmp)
         return ir.AND(tuple(compares))
@@ -359,8 +367,8 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_ExtSlice(self, node: ast.ExtSlice):
         # This is probably never going to be supported, because it requires inlining
         # a large number of calculations in ways that may sometimes hamper performance.
-        raise TypeError("Extended slices are currently unsupported. This supports single"
-                        "slices per dimension")
+        raise CompilerError("Extended slices are currently unsupported. This supports single"
+                            "slices per dimension")
 
     def visit_AugAssign(self, node: ast.AugAssign):
         target = self.visit(node.target)
@@ -401,7 +409,7 @@ class TreeBuilder(ast.NodeVisitor):
                     if existing_type != ir_type:
                         msg = f"IR type from type hint conflicts with existing " \
                               f"(possibly inferred) type {existing_type}, line: {pos.line_begin}"
-                        raise ValueError(msg)
+                        raise CompilerError(msg)
         if node.value is not None:
             # CPython will turn the syntax "var: annotation" into an AnnAssign node
             # with node.value = None. If executed, this won't bind or update the value of var.
@@ -409,9 +417,9 @@ class TreeBuilder(ast.NodeVisitor):
             self.body.append(assign)
 
     def visit_Pass(self, node: ast.Pass):
-        pos = extract_positional_info(node)
-        stmt = ir.Pass(pos)
-        return stmt
+        # If required and missing, AST construction
+        # will fail. After that these are somewhat useless.
+        return
 
     def visit_If(self, node: ast.If):
         pos = extract_positional_info(node)
@@ -429,7 +437,7 @@ class TreeBuilder(ast.NodeVisitor):
 
     def visit_For(self, node: ast.For):
         if node.orelse:
-            raise ValueError("or else clause not supported for for statements")
+            raise CompilerError("or else clause not supported for for statements")
         iter_node = self.visit(node.iter)
         target_node = self.visit(node.target)
         pos = extract_positional_info(node)
@@ -446,13 +454,13 @@ class TreeBuilder(ast.NodeVisitor):
         except ValueError:
             # Generator will throw an error on bad unpacking
             msg = f"Cannot safely unpack for loop expression, line: {pos.line_begin}"
-            raise ValueError(msg)
+            raise CompilerError(msg)
         conflicts = targets.intersection(iterables)
         if conflicts:
             conflict_names = ", ".join(c for c in conflicts)
             msg = f"{conflict_names} appear in both the target an iterable sequences of a for loop, " \
                   f"line {pos.line_begin}. This is not supported."
-            raise ValueError(msg)
+            raise CompilerError(msg)
         with self.loop_region(node):
             for stmt in node.body:
                 self.visit(stmt)
@@ -461,7 +469,7 @@ class TreeBuilder(ast.NodeVisitor):
 
     def visit_While(self, node: ast.While):
         if node.orelse:
-            raise ValueError("or else clause not supported for for statements")
+            raise CompilerError("or else clause not supported for for statements")
         test = self.visit(node.test)
         pos = extract_positional_info(node)
         with self.loop_region(node):
@@ -472,14 +480,14 @@ class TreeBuilder(ast.NodeVisitor):
 
     def visit_Break(self, node: ast.Break):
         if self.enclosing_loop is None:
-            raise ValueError("Break encountered outside of loop.")
+            raise CompilerError("Break encountered outside of loop.")
         pos = extract_positional_info(node)
         stmt = ir.Break(pos)
         self.body.append(stmt)
 
     def visit_Continue(self, node: ast.Continue):
         if self.enclosing_loop is None:
-            raise ValueError("Continue encountered outside of loop.")
+            raise CompilerError("Continue encountered outside of loop.")
         pos = extract_positional_info(node)
         stmt = ir.Continue(pos)
         self.body.append(stmt)
@@ -488,7 +496,7 @@ class TreeBuilder(ast.NodeVisitor):
         # can't check just self.blocks, since we automatically 
         # instantiate entry and exit
         if node is not self.entry:
-            raise RuntimeError(f"Nested scopes are unsupported. line: {node.lineno}")
+            raise CompilerError(f"Nested scopes are unsupported. line: {node.lineno}")
         name = node.name
         # Todo: warn about unsupported argument features
         params = [ir.NameRef(arg.arg) for arg in node.args.args]
@@ -504,7 +512,7 @@ class TreeBuilder(ast.NodeVisitor):
         self.body.append(stmt)
 
     def generic_visit(self, node):
-        raise NotImplementedError(f"{type(node)} is unsupported")
+        raise CompilerError(f"{type(node)} is unsupported")
 
 
 def map_functions_by_name(node: ast.Module):
@@ -522,9 +530,6 @@ def parse_file(file_name, type_map):
 
     Parameters
     ----------
-
-    src: str
-        Source code for the corresponding module
 
     file_name:
         File path we used to extract source. This is used for error reporting.
@@ -551,8 +556,7 @@ def parse_file(file_name, type_map):
         symbol_tables = {}
         for func_name, ast_entry_point in funcs_by_name.items():
             table = module_symtable.lookup(func_name).get_namespace()
-            func_type_map = type_map[func_name]
-            symbols = symbol_table_from_pysymtable(table, import_map, func_type_map, file_name)
+            symbols = st_from_pyst(table, file_name)
             symbol_tables[func_name] = symbols
             func_ir = build_func_ir(ast_entry_point, symbols)
             funcs.append(func_ir)

@@ -1,11 +1,5 @@
 import numpy as np
-import typing
-
-from collections import defaultdict
-from functools import singledispatchmethod
-
 import ir
-from visitor import StmtVisitor
 
 # Todo: At the tree layer, this should be much with fine grained tests moving to dataflow layer.
 #       In particular, just check for bad use of division and truth testing of arrays
@@ -13,17 +7,31 @@ from visitor import StmtVisitor
 
 Float32 = ir.ScalarType(bits=32, integral=False, boolean=False)
 Float64 = ir.ScalarType(bits=64, integral=False, boolean=False)
-Int32 = ir.ScalarType(bits=32, integral=True, boolean=True)
-Int64 = ir.ScalarType(bits=64, integral=True, boolean=True)
+Int32 = ir.ScalarType(bits=32, integral=True, boolean=False)
+Int64 = ir.ScalarType(bits=64, integral=True, boolean=False)
 Predicate32 = ir.ScalarType(bits=32, integral=True, boolean=True)
 Predicate64 = ir.ScalarType(bits=64, integral=True, boolean=True)
 FPredicate32 = ir.ScalarType(bits=32, integral=False, boolean=True)
 FPredicate64 = ir.ScalarType(bits=64, integral=False, boolean=True)
 BoolType = ir.ScalarType(bits=8, integral=True, boolean=True)
 
+
 # defaults, can be overridden
-scalar_type_map = {int: Int64, float: Float64, bool: BoolType, np.float32: Float32, np.float64: Float64,
-                   np.int32: Int32, np.int64: Int64, np.bool: BoolType}
+by_input_type = {np.int32: Int32,
+                 np.int64: Int64,
+                 np.float32: Float32,
+                 np.float64: Float64,
+                 bool: BoolType,
+                 np.bool_: BoolType}
+
+
+by_input_type_name = {"numpy.int32": Int32,
+                      "numpy.int64": Int64,
+                      "numpy.float32": Float32,
+                      "numpy.float64": Float64,
+                      "numpy.bool": BoolType,
+                      "numpy.bool_": BoolType}
+
 
 # initially supported, untyped ints and other ranges require additional
 # work, and they are less commonly used
@@ -252,157 +260,3 @@ dispatch = {
     "&=": bitwise_inplace_dispatch,
     "^=": bitwise_inplace_dispatch,
 }
-
-
-class TypeChecker(StmtVisitor):
-    """
-    This only enforces types on explicit assignment. Compound expressions take on monomorphic types
-    based on expression evaluation. Casts are only applied on explicit assignment.
-    """
-
-    def __call__(self, entry, types_by_vname: typing.Dict):
-        self.type_by_vname = types_by_vname
-        self.invalid_truth_tests = set()
-        self.array_mismatches = defaultdict(set)
-        self.expr_types = {}
-        self.visit(entry)
-        missing = self.missing
-        expr_types = self.expr_types
-        array_mismatches = self.array_mismatches
-        invalid_truth_tests = self.invalid_truth_tests
-        self.missing = self.expr_types = self.array_mismatches = self.invalid_truth_tests = None
-        return missing, expr_types, array_mismatches, invalid_truth_tests
-
-    def lookup_type(self, var_or_expr):
-        if isinstance(var_or_expr, ir.NameRef):
-            t = self.type_by_vname.get(var_or_expr)
-            if t is None:
-                self.missing.add(var_or_expr)
-        else:
-            t = self.expr_types.get(var_or_expr)
-        return t
-
-    @singledispatchmethod
-    def visit(self, node):
-        super().visit(node)
-
-    @visit.register
-    def _(self, node: ir.NameRef):
-        if node not in self.type_by_vname:
-            self.missing.add(node)
-
-    @visit.register
-    def _(self, node: ir.Call):
-        # Todo: replace parse_array_create
-        return
-
-    @visit.register
-    def _(self, node: ir.Assign):
-        self.visit(node.value)
-        if isinstance(node.target, ir.ValueRef):
-            self.visit(node.target)
-        else:
-            assigned_type = self.visit(node.target)
-            expr_type = self.visit(node.value)
-            # check for invalid casts
-            if assigned_type != expr_type:
-                if (isinstance(assigned_type, (ir.ArrayRef, ir.ViewRef))
-                        or isinstance(expr_type, (ir.ArrayRef, ir.ViewRef))):
-                    self.array_mismatches.add(node.target)
-
-    @visit.register
-    def _(self, node: ir.BinOp):
-        # Todo: expand for boolean and compare ops
-        if node in self.missing:
-            return
-        dispatcher = dispatch.get(node.op)
-        lt = self.lookup_type(node.left)
-        if lt is None:
-            self.visit(node.left)
-            lt = self.visit(node.left)
-        rt = self.lookup_type(node.right)
-        if rt is None:
-            self.visit(node.right)
-            rt = self.lookup_type(node.right)
-        if lt is None or rt is None:
-            self.missing.add(node)
-        else:
-            t = dispatcher.get((lt, rt))
-            if t is None:
-                self.missing.add(node)
-            else:
-                self.expr_types[node] = t
-
-    @visit.register
-    def _(self, node: ir.ForLoop):
-        target = node.target
-        iterable = node.iterable
-        self.visit(target)
-        self.visit(iterable)
-        t = self.lookup_type(iterable)
-        if t is None:
-            self.missing.add(t)
-            return
-        if isinstance(t, ir.ArrayRef):
-            target_type = self.lookup_type(target)
-            if target_type is None:
-                self.array_mismatches[iterable].add(target)
-                return
-            if t.ndims > 1:
-                if not isinstance(target_type, ir.ArrayRef):
-                    self.array_mismatches[iterable].add(target)
-                elif target_type.ndims != t.ndims - 1:
-                    self.array_mismatches[iterable].add(target)
-            else:
-                self.array_mismatches[iterable].add(target)
-
-    @visit.register
-    def _(self, node: ir.WhileLoop):
-        self.visit(node.test)
-        t = self.lookup_type(node.test)
-        if isinstance(t, ir.ArrayRef):
-            self.invalid_truth_tests.add(t)
-        self.visit(node.body)
-
-    @visit.register
-    def _(self, node: ir.IfElse):
-        self.visit(node.test)
-        t = self.lookup_type(node.test)
-        if isinstance(t, ir.ArrayRef):
-            self.invalid_truth_tests.add(t)
-        self.visit(node.if_branch)
-        self.visit(node.else_branch)
-
-    @visit.register
-    def _(self, node: ir.Ternary):
-        self.visit(node.test)
-        t = self.lookup_type(node.test)
-        if isinstance(t, ir.ArrayRef):
-            self.invalid_truth_tests.add(t)
-        self.visit(node.if_expr)
-        self.visit(node.else_expr)
-
-    @visit.register
-    def _(self, node: ir.Subscript):
-        self.visit(node.value)
-        self.visit(node.slice)
-        existing = self.lookup_type(node)
-        reduce_dims = not isinstance(node.slice, ir.Slice)
-        t = self.lookup_type(node.value)
-        if t is None:
-            self.missing.add(node)
-            return
-        if reduce_dims:
-            if isinstance(t, (ir.ArrayRef, ir.ViewRef)):
-                if t.ndims > 1:
-                    t = ir.ViewRef(node.value, node.slice)
-                else:
-                    t = node.value.dtype
-            else:
-                # over subscripted
-                self.array_mismatches.add(node)
-        if existing is None:
-            self.expr_types[node] = t
-        else:
-            if existing != t:
-                self.array_mismatches.add(node)

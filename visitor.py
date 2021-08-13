@@ -91,6 +91,12 @@ class ExpressionVisitor:
         return ir.BinOp(left, right, expr.op)
 
     @visit.register
+    def _(self, expr: ir.CompareOp):
+        left = self.lookup(expr.left)
+        right = self.lookup(expr.right)
+        return ir.CompareOp(left, right, expr.op)
+
+    @visit.register
     def _(self, expr: ir.Call):
         args = tuple(self.lookup(arg) for arg in expr.args)
         kws = tuple((kw, self.lookup(value)) for (kw, value) in expr.keywords)
@@ -114,12 +120,12 @@ class ExpressionVisitor:
 
     @visit.register
     def _(self, expr: ir.TRUTH):
-        operand = self.lookup(expr.operands)
+        operand = self.lookup(expr.operand)
         return ir.XOR(operand)
 
     @visit.register
     def _(self, expr: ir.NOT):
-        operand = self.lookup(expr.operands)
+        operand = self.lookup(expr.operand)
         return ir.XOR(operand)
 
     @visit.register
@@ -138,6 +144,12 @@ class ExpressionVisitor:
     def _(self, expr: ir.Zip):
         elems = tuple(self.lookup(elem) for elem in expr.elements)
         return ir.Zip(elems)
+
+    @visit.register
+    def _(self, expr: ir.Enumerate):
+        iterable = self.lookup(expr.iterable)
+        start = self.lookup(expr.start)
+        return ir.Enumerate(iterable, start)
 
     @visit.register
     def _(self, expr: ir.Reversed):
@@ -191,7 +203,6 @@ class StmtVisitor:
 
     @visit.register
     def _(self, node: ir.WhileLoop):
-        self.visit(node.test)
         self.visit(node.body)
 
     @visit.register
@@ -231,7 +242,10 @@ class StmtTransformer:
 
     @visit.register
     def _(self, node: ir.Function):
-        self.visit(node.body)
+        body = self.visit(node.body)
+        if body != node.body:
+            return ir.Function(node.name, node.args, body)
+        return node
 
     @visit.register
     def _(self, node: ir.IfElse):
@@ -269,4 +283,8 @@ class StmtTransformer:
 
     @visit.register
     def _(self, node: ir.Break):
+        return node
+
+    @visit.register
+    def _(self, node: ir.Return):
         return node

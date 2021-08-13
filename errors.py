@@ -1,5 +1,4 @@
 from contextlib import contextmanager
-from inspect import getsourcelines
 
 
 # Skeleton
@@ -9,16 +8,16 @@ from inspect import getsourcelines
 
 class CompilerError(Exception):
     """
-    An exception that specifies an error in input source code. This is used to halt execution and generate
-    error logging without printing out a stack trace of unrelated compiler internals.
-
+    An exception type to specify errors, which are presumed to be semantic errors in input source
+    unless explicitly labeled as internal errors. These are used to halt execution with an appropriate error
+    message, without printing a stack trace that refers to compiler internals.
     """
     def __init__(self, *args):
         super().__init__(args)
 
 
 @contextmanager
-def compiler_pass_context(entry, src, print_stack=False):
+def module_context():
     try:
         yield
     except CompilerError as ce:
