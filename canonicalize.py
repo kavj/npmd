@@ -98,17 +98,8 @@ class NormalizePaths(StmtTransformer):
 
     @visit.register
     def _(self, node: ir.IfElse):
-        if node.test.constant:
-            if operator.truth(node.test):
-                if_branch = self.visit(node.if_branch)
-                else_branch = []
-            else:
-                if_branch = []
-                else_branch = self.visit(node.else_branch)
-        else:
-            if_branch = self.visit(node.if_branch)
-            else_branch = self.visit(node.else_branch)
-        # If no statements remain in either branch, discard this node.
+        if_branch = self.visit(node.if_branch)
+        else_branch = self.visit(node.else_branch)
         if not (if_branch or else_branch):
             return
         node = ir.IfElse(node.test, if_branch, else_branch, node.pos)
@@ -119,18 +110,21 @@ class NormalizePaths(StmtTransformer):
         repl = []
         append_to = repl
         for stmt in node:
-            stmt = self.visit(stmt)
             if isinstance(stmt, ir.IfElse):
                 if stmt.test.constant:
                     live_branch = stmt.if_branch if operator.truth(stmt.test) else stmt.else_branch
-                    live_path = find_unterminated_path(live_branch)
+                    live_branch = self.visit(live_branch)
+                    extendable_path = find_unterminated_path(live_branch)
                     append_to.extend(live_branch)
-                    if live_path is not live_branch:
-                        if live_path is None:
+                    if extendable_path is not live_branch:
+                        if extendable_path is None:
                             break
                         else:  # extendable path exists and is distinct from the inlined branch
-                            append_to = live_path
+                            append_to = extendable_path
                 else:
+                    stmt = self.visit(stmt)
+                    if stmt is None:
+                        continue  # doesn't execute anything
                     append_to.append(stmt)
                     if_path = find_unterminated_path(stmt.if_branch)
                     else_path = find_unterminated_path(stmt.else_branch)
@@ -140,10 +134,12 @@ class NormalizePaths(StmtTransformer):
                         append_to = else_path
                     elif else_path is None:
                         append_to = if_path
-            elif stmt is not None:
-                append_to.append(stmt)
-                if isinstance(stmt, (ir.Break, ir.Continue, ir.Return)):
-                    break  # remaining statements are unreachable
+            else:
+                stmt = self.visit(stmt)
+                if stmt is not None:
+                    append_to.append(stmt)
+                    if isinstance(stmt, (ir.Break, ir.Continue, ir.Return)):
+                        break  # remaining statements are unreachable
         return repl
 
 
