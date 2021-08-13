@@ -1,22 +1,9 @@
 import operator
-import typing
 from functools import singledispatchmethod
 
 import ir
 from errors import CompilerError
 from visitor import StmtTransformer
-
-
-def clear_dead_branches(node: ir.IfElse) -> typing.Union[ir.IfElse, list]:
-    """
-    Remove statements from unreachable branches, but keep the branch intact.
-    """
-    if node.test.constant:
-        if operator.truth(node.test):
-            node = ir.IfElse(node.test, node.if_branch, [], node.pos)
-        else:
-            node = ir.IfElse(node.test, [], node.else_branch, node.pos)
-    return node
 
 
 def find_unterminated_path(stmts):
