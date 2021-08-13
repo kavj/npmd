@@ -2,6 +2,7 @@ import numbers
 
 import ir
 from errors import CompilerError
+from visitor import walk
 
 
 def get_expr_parameters(expr):

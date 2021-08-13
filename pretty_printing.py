@@ -48,8 +48,8 @@ class pretty_formatter:
     The pretty printer is intended as a way to show the state of the IR in a way that resembles a
     typical source representation.
 
-    Note: This will parenthesize Tuples even in cases where they aren't really supported by the rest of
-    the code base. This is to avoid confusing formatting errors here.
+    Note: This will parenthesize some expressions that are unsupported yet accepted by plain Python.
+          It's designed this way, because the alternative is more confusing.
 
     """
 
@@ -120,7 +120,7 @@ class pretty_formatter:
             elif isinstance(node.left, ir.UnaryOp):
                 if op == "**":
                     left = parenthesized(left)
-            elif isinstance(node.left, (ir.BoolOp, ir.Ternary, ir.Tuple)):
+            elif isinstance(node.left, (ir.BoolOp, ir.CompareOp, ir.Ternary, ir.Tuple)):
                 left = parenthesized(left)
             if isinstance(node.right, ir.BinOp):
                 if op_ordering < binop_ordering[right.op]:
@@ -128,9 +128,20 @@ class pretty_formatter:
             elif isinstance(node.right, ir.UnaryOp):
                 if op == "**":
                     left = parenthesized(left)
-            elif isinstance(node.right, (ir.BoolOp, ir.Ternary, ir.Tuple)):
+            elif isinstance(node.right, (ir.BoolOp, ir.CompareOp, ir.Ternary, ir.Tuple)):
                 right = parenthesized(right)
         expr = f"{left} {op} {right}"
+        return expr
+
+    @visit.register
+    def _(self, node: ir.CompareOp):
+        left = self.visit(node.left)
+        right = self.visit(node.right)
+        if isinstance(node.left, (ir.BoolOp, ir.CompareOp, ir.Ternary, ir.Tuple)):
+            left = parenthesized(left)
+        if isinstance(node.right, (ir.BoolOp, ir.CompareOp, ir.Ternary, ir.Tuple)):
+            right = parenthesized(right)
+        expr = f"{left} {node.op} {right}"
         return expr
 
     @visit.register
@@ -138,7 +149,7 @@ class pretty_formatter:
         operands = []
         for operand in node.operands:
             formatted = self.visit(operand)
-            if isinstance(operand, (ir.OR, ir.Ternary, ir.Tuple)):
+            if isinstance(operand, (ir.AND, ir.OR, ir.Ternary, ir.Tuple)):
                 formatted = parenthesized(formatted)
             operands.append(formatted)
         expr = " and ".join(operand for operand in operands)

@@ -352,12 +352,15 @@ class BinOp(Expression):
     op: str
 
     def __post_init__(self):
-        assert (self.op in binaryops or self.op in inplace_ops or self.op in compareops)
+        assert (self.op in binaryops or self.op in inplace_ops)
+        assert isinstance(self.right, ValueRef)
         if self.in_place:
             # ensure things like -a += b are treated as compiler errors.
             # These shouldn't even pass the parser if caught in source but
             # could be accidentally created internally.
             assert isinstance(self.left, (NameRef, Subscript))
+        else:
+            assert isinstance(self.left, ValueRef)
 
     @property
     def subexprs(self):
@@ -384,6 +387,7 @@ class CompareOp(Expression):
     op: str
 
     def __post_init__(self):
+        assert self.op in compareops
         assert isinstance(self.left, ValueRef)
         assert isinstance(self.right, ValueRef)
 

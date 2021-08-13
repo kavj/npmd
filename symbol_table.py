@@ -7,7 +7,7 @@ import numbers
 
 import numpy as np
 
-from functools import singledispatch, singledispatchmethod
+from functools import singledispatch
 
 import ir
 import type_resolution as tr
@@ -160,7 +160,7 @@ def make_numpy_call(node: ir.Call):
     return array_init
 
 
-class symboltable:
+class symbol_table:
     scalar_ir_types = frozenset({tr.Int32, tr.Int64, tr.Float32, tr.Float64, tr.Predicate32, tr.Predicate64})
 
     def __init__(self, scope_name, default_int_is_64=True):
@@ -268,7 +268,7 @@ class symboltable:
         return name
 
 
-def symbol_table_from_pysymtable(func_table, file_name):
+def st_from_pyst(func_table, file_name):
     """
     Build an internally used symbol table from a Python function symtable and type information.
     Note: read func_table as py_symbol_table, noting that calling it py_anything would be a Python language violation.
@@ -286,7 +286,7 @@ def symbol_table_from_pysymtable(func_table, file_name):
     elif func_table.get_type() != "function":
         raise TypeError(f"{func_name} in file {file_name} refers to a class rather than a function. This is "
                         f"unsupported.")
-    internal_table = symboltable(func_name)
+    internal_table = symbol_table(func_name)
 
     # register types
     for name in func_table.get_locals():

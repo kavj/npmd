@@ -91,6 +91,12 @@ class ExpressionVisitor:
         return ir.BinOp(left, right, expr.op)
 
     @visit.register
+    def _(self, expr: ir.CompareOp):
+        left = self.lookup(expr.left)
+        right = self.lookup(expr.right)
+        return ir.CompareOp(left, right, expr.op)
+
+    @visit.register
     def _(self, expr: ir.Call):
         args = tuple(self.lookup(arg) for arg in expr.args)
         kws = tuple((kw, self.lookup(value)) for (kw, value) in expr.keywords)

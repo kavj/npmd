@@ -10,7 +10,7 @@ from pathlib import Path
 
 import ir
 from errors import CompilerError
-from symbol_table import symbol_table_from_pysymtable, wrap_input
+from symbol_table import st_from_pyst, wrap_input
 from canonicalize import replace_builtin_call
 from lowering import const_folding
 from utils import unpack_assignment, unpack_iterated
@@ -295,7 +295,7 @@ class TreeBuilder(ast.NodeVisitor):
         left = self.visit(node.left)
         right = self.visit(node.comparators[0])
         op = compareops[type(node.ops[0])]
-        initial_compare = ir.BinOp(left, right, op)
+        initial_compare = ir.CompareOp(left, right, op)
         initial_compare = self.fold_if_constant(initial_compare)
         if len(node.ops) == 1:
             return initial_compare
@@ -305,15 +305,15 @@ class TreeBuilder(ast.NodeVisitor):
             left = right
             right = self.visit(node.comparators[index])
             op = compareops[type(ast_op)]
-            cmp = ir.BinOp(left, right, op)
+            cmp = ir.CompareOp(left, right, op)
             cmp = self.fold_if_constant(cmp)
             if cmp.constant:
                 if not operator.truth(cmp):
                     return ir.BoolConst(False)
             else:
                 if cmp not in seen:
-                    # Preserve the original comparison order, ignoring
-                    # duplicate expressions.
+                    # Preserve the original comparison order, but
+                    # ignore duplicate expressions.
                     seen.add(cmp)
                     compares.append(cmp)
         return ir.AND(tuple(compares))
@@ -556,7 +556,7 @@ def parse_file(file_name, type_map):
         symbol_tables = {}
         for func_name, ast_entry_point in funcs_by_name.items():
             table = module_symtable.lookup(func_name).get_namespace()
-            symbols = symbol_table_from_pysymtable(table, file_name)
+            symbols = st_from_pyst(table, file_name)
             symbol_tables[func_name] = symbols
             func_ir = build_func_ir(ast_entry_point, symbols)
             funcs.append(func_ir)
