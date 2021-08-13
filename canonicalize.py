@@ -138,9 +138,11 @@ class NormalizePaths(StmtTransformer):
                     live_branch = stmt.if_branch if operator.truth(stmt.test) else stmt.else_branch
                     live_path = find_unterminated_path(live_branch)
                     append_to.extend(live_branch)
-                    if live_path is None:
-                        break  # any remaining statements are unreachable
-                    append_to = live_path
+                    if live_path is not live_branch:
+                        if live_path is None:
+                            break
+                        else:  # extendable path exists and is distinct from the inlined branch
+                            append_to = live_path
                 else:
                     append_to.append(stmt)
                     if_path = find_unterminated_path(stmt.if_branch)
