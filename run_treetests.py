@@ -2,9 +2,7 @@ import os
 import numpy as np
 
 import driver
-from TreePipeline import run_tree_pipeline as rtp
 from pretty_printing import pretty_printer
-
 
 tests = ("test_forifcont.py", "test_nested.py", "test_cascade_if.py", "test_dead.py", "test_dead2.py",
          "test_while.py", "test_cascade_assign.py", "test_for.py", "test_forif.py", "test_retval.py",
@@ -61,9 +59,13 @@ for i, t in enumerate(tests):
     print(src)
     print("\n\nOUTPUT\n\n")
     types = uws_types.get(t, {})
+
     # if types is None:
     #    msg = f"Unable to load types for test file {t}."
     #    raise RuntimeError(msg)
-    module, symbols = rtp(filepath, types)
-    pretty_print(module, symbols)
+    ctx = driver.CompilerContext()
+    module, symbols = ctx.run_pipeline(filepath, types)
+    for func in module.functions:
+        t = symbols.get(func.name)
+        pretty_print(func, t)
     print('\n\n\n')
