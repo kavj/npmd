@@ -9,11 +9,12 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import ir
-from errors import CompilerError
-from symbol_table import st_from_pyst, wrap_input
 from canonicalize import replace_builtin_call
+from errors import CompilerError
 from lowering import const_folding
-from utils import unpack_assignment, unpack_iterated
+from symbol_table import st_from_pyst
+from utils import unpack_assignment, unpack_iterated, wrap_input
+
 
 binaryops = {ast.Add: "+",
              ast.Sub: "-",
@@ -216,6 +217,8 @@ class TreeBuilder(ast.NodeVisitor):
                 msg = f"Only strings that can be converted to ascii text are supported. This is mainly intended" \
                       f"to facilitate simple printing support at some point."
                 raise CompilerError(msg)
+            # special case, by default strings are wrapped as names
+            # rather than constants.
             output = ir.StringConst(node.value)
         else:
             output = wrap_input(node.value)

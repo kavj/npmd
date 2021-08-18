@@ -1,12 +1,31 @@
+import builtins
+import keyword
 import numbers
+
+from functools import singledispatch
 
 import ir
 from errors import CompilerError
 from visitor import walk
 
+reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
+
 
 def get_expr_parameters(expr):
     return {subexpr for subexpr in walk(expr) if isinstance(subexpr, ir.NameRef)}
+
+
+def is_valid_identifier(name):
+    if isinstance(name, ir.NameRef):
+        name = name.name
+    return isinstance(name, str) and name.isidentifier() and (name not in reserved_names)
+
+
+def extract_name(name):
+    if not isinstance(name, (str, ir.NameRef)):
+        msg = f"Expected a variable name, received type {type(name)}."
+        raise TypeError(msg)
+    return name.name if isinstance(name, ir.NameRef) else name
 
 
 def wrap_constant(c):
@@ -19,6 +38,50 @@ def wrap_constant(c):
     else:
         msg = f"Can't construct constant node for unsupported constant type {type(c)}"
         raise NotImplementedError(msg)
+
+
+@singledispatch
+def wrap_input(value):
+    msg = f"No method to wrap {value} of type {type(value)}."
+    raise NotImplementedError(msg)
+
+
+@wrap_input.register
+def _(value: str):
+    if not is_valid_identifier(value):
+        msg = f"{value} is not a valid variable name."
+        raise ValueError(msg)
+    return ir.NameRef(value)
+
+
+@wrap_input.register
+def _(value: ir.NameRef):
+    return value
+
+
+@wrap_input.register
+def _(value: ir.Constant):
+    return value
+
+
+@wrap_input.register
+def _(value: int):
+    return ir.IntConst(value)
+
+
+@wrap_input.register
+def _(value: bool):
+    return ir.BoolConst(value)
+
+
+@wrap_input.register
+def _(value: numbers.Integral):
+    return ir.IntConst(value)
+
+
+@wrap_input.register
+def _(value: numbers.Real):
+    return ir.FloatConst(value)
 
 
 def unpack_assignment(target, value, pos):

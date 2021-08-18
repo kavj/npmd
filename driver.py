@@ -11,7 +11,7 @@ from canonicalize import NormalizePaths
 from reaching_check import ReachingCheck
 from dataclasses import dataclass
 from errors import module_context
-from symbol_table import wrap_input
+from utils import wrap_input
 from pretty_printing import pretty_printer
 
 

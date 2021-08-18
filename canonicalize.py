@@ -1,5 +1,8 @@
 import operator
+
+from collections.abc import Sequence
 from functools import singledispatchmethod
+from itertools import zip_longest
 
 import ir
 from errors import CompilerError
@@ -153,21 +156,18 @@ class CallSpecialize:
 
     """
 
-    def __init__(self, name, args, repl, defaults, allows_keywords=False):
+    def __init__(self, name, args, builder, defaults, allows_keywords=False):
         self.name = name
         if len({*args}) < len(args):
+            # relying on ordered dictionaries is too error prone.
+            # Instead, we verify that field names are unique.
             msg = f"Call lowering for {name} has duplicate argument fields, {args} received."
             raise ValueError(msg)
+        assert isinstance(args, Sequence)
         self.args = args
         self.defaults = defaults
         self.allow_keywords = allows_keywords
-        # Check no duplicates
-        assert len(self.args) == len(args)
-        # Check anything with a default also appears in args
-        assert all(arg in self.args for (arg, value) in defaults.items())
-        # repl must know how to take a dictionary of arguments and construct
-        # a replacement node, suitable for downstream use
-        self.replacement = repl
+        self.builder = builder
 
     @property
     def max_arg_count(self):
@@ -185,7 +185,9 @@ class CallSpecialize:
         arg_count = len(args)
         kw_count = len(keywords)
         if not self.allow_keywords and kw_count > 0:
-            raise CompilerError(f"Function {self.name} does not allow keyword arguments.")
+            kwargs = ", ".join(kw for kw in keywords)
+            raise CompilerError(f"Function {self.name} does not allow keyword arguments. Received keyword arguments:"
+                                f"{kwargs}.")
         mapped = {}
         unrecognized = set()
         duplicates = set()
@@ -193,56 +195,54 @@ class CallSpecialize:
         if arg_count + kw_count > self.max_arg_count:
             raise CompilerError(f"Function {self.name} has {self.max_arg_count} fields. "
                                 f"{arg_count + kw_count} arguments were provided.")
-        for field, arg in zip(self.args, args):
-            mapped[field] = arg
         for kw, value in keywords:
-            if kw not in self.args:
-                unrecognized.add(kw)
-            elif kw in mapped:
-                duplicates.add(kw)
-            mapped[kw] = value
-        for field in self.args:
-            if field not in mapped:
-                if field in self.defaults:
-                    mapped[field] = self.defaults[field]
+            if kw in self.args:
+                if kw in mapped:
+                    duplicates.add(kw)
                 else:
-                    missing.add(field)
-        for u, v in unrecognized:
-            raise CompilerError(f"unrecognized field {u} in call to {self.name}")
-        return self.replacement(mapped)
-
-    def validate_simple_call(self, args):
-        # Check call with no keywords
-        arg_count = len(args)
-        mapped = {}
-        if arg_count > self.max_arg_count:
-            raise CompilerError(f"Signature for {self.name} accepts {self.max_arg_count} arguments. "
-                                f"{arg_count} arguments received.")
-        elif arg_count < self.min_arg_count:
-            raise CompilerError(f"Signature for {self.name} expects at least {self.min_arg_count} arguments, "
-                                f"{arg_count} arguments received.")
-        for field, arg in zip(self.args, args):
-            mapped[field] = arg
-        for field, value in self.defaults.items():
-            if field not in mapped:
-                mapped[field] = value
-        return mapped
-
-    def __call__(self, node):
-        # err (and warnings) could be logged, which might be better..
-        # This should still return None on invalid mapping.
-        if node.keywords:
-            if not self.allow_keywords:
-                raise ValueError(f"{self.name} does not allow keywords.")
+                    mapped[kw] = value
             else:
-                mapped = self.validate_call(node.args, node.keywords)
-                return self.replacement(mapped)
-        else:
-            mapped = self.validate_simple_call(node.args)
-            return self.replacement(mapped)
+                unrecognized.add(kw)
+        for field, value in zip_longest(self.args, args):
+            if field in mapped:
+                if value is not None:
+                    duplicates.add(field)
+            elif value is not None:
+                mapped[field] = value
+            elif field in self.defaults:
+                mapped[field] = self.defaults[field]
+            else:
+                missing.add(field)
+        if unrecognized:
+            bad_kws = ", ".join(u for u in unrecognized)
+            msg = f"Unrecognized fields: {bad_kws} in call to {self.name}."
+            raise CompilerError(msg)
+        elif duplicates:
+            dupes = ", ".join(d for d in duplicates)
+            msg = f"Duplicate fields: {dupes} in call to {self.name}."
+            raise CompilerError(msg)
+        elif missing:
+            missed = ", ".join(m for m in missing)
+            msg = f"Missing fields: {missed} in call to {self.name}."
+            raise CompilerError(msg)
+
+    def replace_call(self, args, keywords):
+        self.validate_call(args, keywords)
+        repl_args = []
+        for field, value in zip_longest(self.args, args):
+            if value is not None:
+                repl_args.append(value)
+            else:
+                repl_args.append(keywords[field])
+        repl = self.builder(args)
+        return repl
 
 
 def replace_builtin_call(node: ir.Call):
+    """
+    Call replacer for builtin types. Some of these, such as range, have different argument ordering
+    depending on the number of fields used, thus the generic call replacer is not well suited.
+    """
     name = node.func.name
     if name == "enumerate":
         args = node.args
@@ -325,3 +325,40 @@ def replace_builtin_call(node: ir.Call):
         return ir.Zip(node.args)
     else:
         return node
+
+
+class call_replacer:
+
+    def __init__(self, replacers):
+        self.replacers = replacers
+
+    def replace_call(self, node: ir.Call):
+
+        # array creation nodes
+
+        def make_numpy_call(node: ir.Call):
+            name = node.func
+            if name == "numpy.ones":
+                fill_value = ir.One
+            elif name == "numpy.zeros":
+                fill_value = ir.Zero
+            else:
+                if name != "numpy.empty":
+                    raise NotImplementedError
+                fill_value = None
+            args = node.args
+            kwargs = node.keywords
+            if not (1 <= len(args) + len(kwargs) <= 2):
+                raise ValueError
+            params = {}
+            for name, value in zip(("shape", "dtype"), args):
+                params[name] = value
+            for key, value in kwargs:
+                if key in params:
+                    raise KeyError
+                params[key] = value
+            shape = params["shape"]
+            dtype = params.get("dtype", np.float64)
+            # Todo: initializer didn't match the rest of this module. Rewrite later.
+            array_init = ()
+            return array_init
