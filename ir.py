@@ -391,6 +391,7 @@ class CompareOp(Expression):
         assert isinstance(self.left, ValueRef)
         assert isinstance(self.right, ValueRef)
 
+    @property
     def subexprs(self):
         yield self.left
         yield self.right

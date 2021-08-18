@@ -112,3 +112,8 @@ class ReachingCheck(StmtVisitor):
         # Declarations must be hoisted if these may
         # escape.
         self.current_scope.update(definitely_bound)
+
+    @visit.register
+    def _(self, node: ir.Return):
+        if node.value is not None:
+            self.register_expr_reference(node.value, node)

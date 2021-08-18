@@ -85,7 +85,7 @@ class CompilerContext:
                 if self.pretty_print_ir_stages:
                     print(f"function: func.name\n")
                 func = self.normalize_paths(func)
-                # self.reaching_check(func)
+                self.reaching_check(func)
                 funcs[index] = func
         return module, symbols
 

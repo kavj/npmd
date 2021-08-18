@@ -221,6 +221,10 @@ class StmtVisitor:
     def _(self, node: ir.Break):
         pass
 
+    @visit.register
+    def _(self, node: ir.Return):
+        pass
+
 
 class StmtTransformer:
 
