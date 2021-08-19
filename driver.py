@@ -28,8 +28,7 @@ class ArrayArg(ir.ValueRef):
     Array argument. This ensures reaching definitions of array
     parameters are unambiguous.
     """
-    dims: typing.Tuple[typing.Union[ir.NameRef, ir.IntConst], ...]
-    dtype: typing.Hashable
+    spec: ir.ArrayInitSpec
     stride: typing.Optional[typing.Union[ir.NameRef, ir.IntConst]]
 
 
@@ -57,7 +56,8 @@ def make_array_arg_type(dims, dtype, stride=None):
     dims = tuple(wrap_input(d) for d in dims)
     if stride is not None:
         stride = wrap_input(stride)
-    return ArrayArg(dims, dtype, stride)
+    spec = ir.ArrayInitSpec(dims, dtype, fill_value=None)
+    return ArrayArg(spec, stride)
 
 
 class CompilerContext:

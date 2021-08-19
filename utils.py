@@ -76,7 +76,13 @@ def _(value: bool):
 
 @wrap_input.register
 def _(value: numbers.Integral):
-    return ir.IntConst(value)
+    if value == 0:
+        v = ir.Zero
+    elif value == 1:
+        v = ir.One
+    else:
+        v = ir.IntConst(value)
+    return v
 
 
 @wrap_input.register

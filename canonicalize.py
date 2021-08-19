@@ -1,12 +1,34 @@
+import numpy
 import operator
 
-from collections.abc import Sequence
-from functools import singledispatchmethod
+from functools import singledispatchmethod, cached_property
 from itertools import zip_longest
 
 import ir
+import type_resolution as tr
 from errors import CompilerError
+from utils import extract_name, wrap_input
 from visitor import StmtTransformer
+
+
+def type_from_numpy_type(t: type):
+    if t == numpy.int32:
+        return tr.Int32
+    elif t == numpy.int64:
+        return tr.Int64
+    elif t == numpy.bool_:
+        return tr.BoolType
+    elif t == bool:
+        return tr.BoolType
+    elif t == numpy.float32:
+        return tr.Float32
+    elif t == numpy.float64:
+        return tr.Float64
+    elif t in (tr.Int32, tr.Int64, tr.Float32, tr.Float64):
+        return t
+    else:
+        msg = f"{t} is not a currently supported type."
+        raise CompilerError(msg)
 
 
 def find_unterminated_path(stmts):
@@ -154,46 +176,51 @@ class CallSpecialize:
     This is forced to consider default arguments, because some builtins require it.
     It does not support * or ** signatures.
 
+    Builders may raise exceptions on unsupported arguments, but they should explicitly
+    recognize all named argument fields.
+
+    Note: We may need to recognize optional fields, where None isn't immediately replaced.
+          For fields that default to None, where None is immediately replaced, just use
+          its replacement as a default instead.
+
     """
 
-    def __init__(self, name, args, builder, defaults, allows_keywords=False):
-        self.name = name
+    def __init__(self, args, builder, allow_keywords):
         if len({*args}) < len(args):
-            # relying on ordered dictionaries is too error prone.
-            # Instead, we verify that field names are unique.
-            msg = f"Call lowering for {name} has duplicate argument fields, {args} received."
+            # relying on ordered dictionaries here is too error prone.
+            msg = f"Call lowering has duplicate argument fields, {args} received."
             raise ValueError(msg)
-        assert isinstance(args, Sequence)
         self.args = args
-        self.defaults = defaults
-        self.allow_keywords = allows_keywords
+        self.allow_keywords = allow_keywords
         self.builder = builder
 
-    @property
+    @cached_property
     def max_arg_count(self):
         return len(self.args)
 
-    @property
+    @cached_property
     def default_count(self):
-        return len(self.defaults)
+        return sum(1 for arg, default in self.args if default is not None)
 
-    @property
+    @cached_property
     def min_arg_count(self):
-        return len(self.args) - len(self.defaults)
+        return len(self.args) - self.default_count
 
-    def validate_call(self, args, keywords):
+    def replace_call(self, node: ir.Call):
+        name = node.func
+        args = node.args
+        keywords = node.keywords
         arg_count = len(args)
         kw_count = len(keywords)
         if not self.allow_keywords and kw_count > 0:
-            kwargs = ", ".join(kw for kw in keywords)
-            raise CompilerError(f"Function {self.name} does not allow keyword arguments. Received keyword arguments:"
+            kwargs = ", ".join(kw for (kw, _) in keywords)
+            raise CompilerError(f"Function {name} does not allow keyword arguments. Received keyword arguments:"
                                 f"{kwargs}.")
         mapped = {}
         unrecognized = set()
         duplicates = set()
-        missing = set()
         if arg_count + kw_count > self.max_arg_count:
-            raise CompilerError(f"Function {self.name} has {self.max_arg_count} fields. "
+            raise CompilerError(f"Function {name} has {self.max_arg_count} fields. "
                                 f"{arg_count + kw_count} arguments were provided.")
         for kw, value in keywords:
             if kw in self.args:
@@ -203,45 +230,29 @@ class CallSpecialize:
                     mapped[kw] = value
             else:
                 unrecognized.add(kw)
-        for field, value in zip_longest(self.args, args):
+        for (field, default), value in zip_longest(self.args.items(), args):
             if field in mapped:
                 if value is not None:
                     duplicates.add(field)
-            elif value is not None:
-                mapped[field] = value
-            elif field in self.defaults:
-                mapped[field] = self.defaults[field]
-            else:
-                missing.add(field)
+                continue
+            # builder should handle cases that may not be None
+            mapped[field] = value
         if unrecognized:
             bad_kws = ", ".join(u for u in unrecognized)
-            msg = f"Unrecognized fields: {bad_kws} in call to {self.name}."
+            msg = f"Unrecognized fields: {bad_kws} in call to {name}."
             raise CompilerError(msg)
         elif duplicates:
             dupes = ", ".join(d for d in duplicates)
-            msg = f"Duplicate fields: {dupes} in call to {self.name}."
+            msg = f"Duplicate fields: {dupes} in call to {name}."
             raise CompilerError(msg)
-        elif missing:
-            missed = ", ".join(m for m in missing)
-            msg = f"Missing fields: {missed} in call to {self.name}."
-            raise CompilerError(msg)
-
-    def replace_call(self, args, keywords):
-        self.validate_call(args, keywords)
-        repl_args = []
-        for field, value in zip_longest(self.args, args):
-            if value is not None:
-                repl_args.append(value)
-            else:
-                repl_args.append(keywords[field])
-        repl = self.builder(args)
+        repl = self.builder(mapped)
         return repl
 
 
 def replace_builtin_call(node: ir.Call):
     """
-    Call replacer for builtin types. Some of these, such as range, have different argument ordering
-    depending on the number of fields used, thus the generic call replacer is not well suited.
+    Builtins are special, because some of them have overloaded signatures.
+
     """
     name = node.func.name
     if name == "enumerate":
@@ -327,38 +338,50 @@ def replace_builtin_call(node: ir.Call):
         return node
 
 
-class call_replacer:
+def replace_numpy_array_init(kwargs):
+    order = extract_name(kwargs["order"])
+    like = extract_name(kwargs["like"])
+    if order != "C":
+        msg = "Only C ordering is supported at this time."
+        raise CompilerError(msg)
+    elif like is not None:
+        msg = "Numpy array initialization with 'like' parameter set is not yet supported."
+        raise CompilerError(msg)
+    dtype = type_from_numpy_type(kwargs["dtype"])
+    shape = tuple(wrap_input(s) for s in kwargs["shape"])
+    fill_value = ir.One
+    return ir.ArrayInitSpec(shape, dtype, fill_value)
 
-    def __init__(self, replacers):
-        self.replacers = replacers
 
-    def replace_call(self, node: ir.Call):
+def replace_numpy_ones(kwargs):
+    kwargs["fill_value"] = ir.One
+    return replace_numpy_array_init(kwargs)
 
-        # array creation nodes
 
-        def make_numpy_call(node: ir.Call):
-            name = node.func
-            if name == "numpy.ones":
-                fill_value = ir.One
-            elif name == "numpy.zeros":
-                fill_value = ir.Zero
-            else:
-                if name != "numpy.empty":
-                    raise NotImplementedError
-                fill_value = None
-            args = node.args
-            kwargs = node.keywords
-            if not (1 <= len(args) + len(kwargs) <= 2):
-                raise ValueError
-            params = {}
-            for name, value in zip(("shape", "dtype"), args):
-                params[name] = value
-            for key, value in kwargs:
-                if key in params:
-                    raise KeyError
-                params[key] = value
-            shape = params["shape"]
-            dtype = params.get("dtype", np.float64)
-            # Todo: initializer didn't match the rest of this module. Rewrite later.
-            array_init = ()
-            return array_init
+def replace_numpy_zeros(kwargs):
+    kwargs["fill_value"] = ir.Zero
+    return replace_numpy_array_init(kwargs)
+
+
+def replace_numpy_empty(kwargs):
+    kwargs["fill_value"] = None
+    return replace_numpy_array_init(kwargs)
+
+
+numpy_empty = CallSpecialize({"shape": None, "dtype": numpy.float64, "order": "C", "like": None},
+                             replace_numpy_empty,
+                             allow_keywords=True)
+
+numpy_zeros = CallSpecialize({"shape": None, "dtype": numpy.float64, "order": "C", "like": None},
+                             replace_numpy_zeros,
+                             allow_keywords=True)
+
+numpy_ones = CallSpecialize({"shape": None, "dtype": numpy.float64, "order": "C", "like": None},
+                            replace_numpy_ones,
+                            allow_keywords=True)
+
+
+def replace_call(node: ir.Call):
+    func_name = node.func
+    if func_name.name.startswith("numpy."):
+        pass

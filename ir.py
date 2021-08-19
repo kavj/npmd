@@ -6,6 +6,7 @@ import typing
 from abc import ABC, abstractmethod
 from collections.abc import Hashable
 from dataclasses import dataclass
+from enum import Enum, auto, unique
 from functools import cached_property
 
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
@@ -46,9 +47,14 @@ inplace_to_oop = {
     "@=": "@",
 }
 
-
 supported_builtins = frozenset({'iter', 'range', 'enumerate', 'zip', 'all', 'any', 'max', 'min', 'abs', 'pow',
                                 'round', 'reversed'})
+
+
+@unique
+class Sentinels(Enum):
+    UNSUPPORTED = auto()
+    NONE = auto()
 
 
 @dataclass(frozen=True)
@@ -64,7 +70,6 @@ clscond = typing.ClassVar[bool]
 
 @dataclass(frozen=True)
 class ScalarType:
-
     bits: int
     integral: bool
     boolean: bool
@@ -177,6 +182,17 @@ class ArrayType(ValueRef):
 
 
 @dataclass(frozen=True)
+class ArrayInitSpec(ValueRef):
+    dims: typing.Tuple[typing.Union[NameRef, IntConst], ...]
+    dtype: typing.Hashable
+    fill_value: typing.Optional[typing.Union[IntConst, FloatConst, BoolConst]]
+
+    def __post_init__(self):
+        assert isinstance(self.dims, tuple)
+        assert isinstance(self.dtype, Hashable)
+
+
+@dataclass(frozen=True)
 class ArrayRef(ValueRef):
     name: NameRef
     dims: typing.Tuple[typing.Union[NameRef, IntConst], ...]
@@ -198,7 +214,6 @@ class ArrayRef(ValueRef):
 
 @dataclass(frozen=True)
 class ViewRef:
-    # name: NameRef
     base: typing.Union[ArrayRef, ViewRef]
     slice: typing.Optional[typing.Union[IntConst, Slice, NameRef, BinOp, UnaryOp]]
     transposed: bool
