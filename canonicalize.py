@@ -338,7 +338,15 @@ def replace_builtin_call(node: ir.Call):
         return node
 
 
-def replace_numpy_array_init(kwargs):
+def replace_array_init(kwargs):
+    """
+    Replace a call to zeros, ones, or empty with a specialized node.
+
+    Only C ordering is supported at this time.
+
+    "like" is unsupported, because it requires handling alternative implementations
+    of the __array__ protocol.
+    """
     order = extract_name(kwargs["order"])
     like = extract_name(kwargs["like"])
     if order != "C":
@@ -353,35 +361,104 @@ def replace_numpy_array_init(kwargs):
     return ir.ArrayInitSpec(shape, dtype, fill_value)
 
 
-def replace_numpy_ones(kwargs):
+def replace_ones(kwargs):
     kwargs["fill_value"] = ir.One
-    return replace_numpy_array_init(kwargs)
+    return replace_array_init(kwargs)
 
 
-def replace_numpy_zeros(kwargs):
+def replace_zeros(kwargs):
     kwargs["fill_value"] = ir.Zero
-    return replace_numpy_array_init(kwargs)
+    return replace_array_init(kwargs)
 
 
-def replace_numpy_empty(kwargs):
+def replace_empty(kwargs):
     kwargs["fill_value"] = None
-    return replace_numpy_array_init(kwargs)
+    return replace_array_init(kwargs)
 
 
-numpy_empty = CallSpecialize({"shape": None, "dtype": numpy.float64, "order": "C", "like": None},
-                             replace_numpy_empty,
-                             allow_keywords=True)
+def replace_iter(kwargs):
+    iterable = kwargs.get["iterable"]
+    if iterable is None:
+        msg = "iter is only supported with exactly one argument. No value found for iterable."
+        raise CompilerError(msg)
+    return iterable
 
-numpy_zeros = CallSpecialize({"shape": None, "dtype": numpy.float64, "order": "C", "like": None},
-                             replace_numpy_zeros,
-                             allow_keywords=True)
 
-numpy_ones = CallSpecialize({"shape": None, "dtype": numpy.float64, "order": "C", "like": None},
-                            replace_numpy_ones,
-                            allow_keywords=True)
+def replace_len(kwargs):
+    iterable = kwargs.get["obj"]
+    if iterable is None:
+        msg = "'len' must be called with exactly one argument."
+        raise CompilerError(msg)
+
+
+def replace_range(kwargs):
+    arg0 = kwargs.get("arg0")
+    arg1 = kwargs.get("arg1")
+    step = kwargs.get("step")
+
+    if arg0 is None:
+        msg = "Call to range requires one to three arguments."
+        raise CompilerError(msg)
+
+    if arg1 is None:
+        # single argument form
+        assert step is None
+        stop = arg0
+        start = ir.Zero
+        step = ir.One
+
+    else:
+        assert arg0 is not None
+        start = arg0
+        stop = arg1
+        if step is None:
+            step = ir.One
+
+    return ir.AffineSeq(start, stop, step)
+
+
+def replace_enumerate(kwargs):
+    iterable = kwargs.get("iterable")
+    start = kwargs.get("start")
+    if iterable is None:
+        msg = "Enumerate called with no iterable set."
+        raise CompilerError(msg)
+    if start is None:
+        start = ir.Zero
+    if not isinstance(iterable, (ir.Length, ir.AffineSeq, ir.Zip)):
+        iterable = ir.Length(iterable)
+    return ir.AffineSeq(start, iterable, ir.One)
+
+
+replacers = {"numpy.empty": CallSpecialize({"shape": None, "dtype": numpy.float64, "order": "C", "like": None},
+                                           replace_empty,
+                                           allow_keywords=True),
+             "numpy.ones": CallSpecialize({"shape": None, "dtype": numpy.float64, "order": "C", "like": None},
+                                          replace_ones,
+                                          allow_keywords=True),
+             "numpy.zeros": CallSpecialize({"shape": None, "dtype": numpy.float64, "order": "C", "like": None},
+                                           replace_zeros,
+                                           allow_keywords=True),
+             "iter": CallSpecialize({"iterable: None"},
+                                    replace_iter,
+                                    allow_keywords=False),
+             "len": CallSpecialize({"obj": None},
+                                   replace_len,
+                                   allow_keywords=False),
+             "range": CallSpecialize({"arg0:": None, "arg1": None, "step": None},
+                                     replace_range,
+                                     allow_keywords=False)
+             }
 
 
 def replace_call(node: ir.Call):
-    func_name = node.func
-    if func_name.name.startswith("numpy."):
-        pass
+    func_name = extract_name(node)
+    replacer = replacers.get(func_name)
+    if replacer is None:
+        if func_name.startswith("numpy."):
+            msg = f"Invalid or unsupported numpy call: {func_name}."
+            raise CompilerError(msg)
+        return node
+        # Todo: expand this for (any,all later
+    repl = replacer.replace_call(node)
+    return repl

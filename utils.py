@@ -21,11 +21,31 @@ def is_valid_identifier(name):
     return isinstance(name, str) and name.isidentifier() and (name not in reserved_names)
 
 
-def extract_name(name):
-    if not isinstance(name, (str, ir.NameRef)):
-        msg = f"Expected a variable name, received type {type(name)}."
-        raise TypeError(msg)
-    return name.name if isinstance(name, ir.NameRef) else name
+@singledispatch
+def extract_name(node):
+    msg = f"Cannot extract name from node of type {type(node)}. This is probably a bug."
+    raise TypeError(msg)
+
+
+@extract_name.register
+def _(node: ir.NameRef):
+    return node.name
+
+
+@extract_name.register
+def _(node: ir.Function):
+    name = node.name
+    if isinstance(name, ir.NameRef):
+        name = name.name
+    return name
+
+
+@extract_name.register
+def _(node: ir.Call):
+    name = node.func
+    if isinstance(name, ir.NameRef):
+        name = name.name
+    return name
 
 
 def wrap_constant(c):
