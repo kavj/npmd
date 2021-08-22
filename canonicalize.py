@@ -206,7 +206,7 @@ class CallSpecialize:
     def min_arg_count(self):
         return len(self.args) - self.default_count
 
-    def replace_call(self, node: ir.Call):
+    def __call__(self, node: ir.Call):
         name = node.func
         args = node.args
         keywords = node.keywords
@@ -247,95 +247,6 @@ class CallSpecialize:
             raise CompilerError(msg)
         repl = self.builder(mapped)
         return repl
-
-
-def replace_builtin_call(node: ir.Call):
-    """
-    Builtins are special, because some of them have overloaded signatures.
-
-    """
-    name = node.func.name
-    if name == "enumerate":
-        args = node.args
-        kws = node.keywords
-        nargs = len(args)
-        nkws = len(kws)
-        if not (1 <= nargs + nkws <= 2):
-            msg = f"In call to enumerate: {node}, enumerate requires exactly 1 or 2 arguments, {nargs + nkws} " \
-                  f"arguments given."
-            raise CompilerError(msg)
-        elif nargs == 1:
-            iterable, = args
-            if kws:
-                if len(kws) != 1:
-                    msg = f"Call to enumerate: {node} contains too many keyword arguments."
-                    raise CompilerError(msg)
-                else:
-                    (kw, start), = kws
-                    if kw != "start":
-                        msg = f"Call to enumerate: {node} has unexpected keyword argument '{kw}'"
-                        raise CompilerError(msg)
-            else:
-                start = ir.Zero
-        elif nargs == 2:
-            if kws:
-                kws = tuple(k for (k, _) in kws)
-                msg = f"Call to enumerate with 2 positional arguments contains unexpected keyword arguments {kws}."
-                raise CompilerError(msg)
-            iterable, start = args
-        else:
-            raise CompilerError
-        return ir.Enumerate(iterable, start)
-    if name == "iter":
-        if node.args:
-            if len(node.args) != 1 or node.keywords:
-                msg = "Only the single argument form of iter: 'iter(iterable)' is supported"
-                raise CompilerError(msg)
-        elif node.keywords:
-            if len(node.keywords) > 1:
-                msg = f"The only supported keyword argument form of iter that is supported is 'iter(iterable)', " \
-                      f"received 2 or more keyword arguments."
-                raise CompilerError(msg)
-            kw, value = node.keywords
-            if kw != "iterable":
-                msg = "Unrecognized keyword {kw} in call to iter."
-                raise CompilerError(msg)
-        # no call specialization. within a loop this reduces to a noop, elsewhere it's unsupported
-        return node
-    elif name == "len":
-        if node.keywords:
-            msg = f"len does not support keyword arguments"
-            raise CompilerError(msg)
-        elif len(node.args) != 1:
-            msg = f"len expects exactly one positional argument, {len(node.args)} arguments received."
-            raise CompilerError(msg)
-        arg, = node.args
-        return ir.Length(arg)
-    elif name == "range":
-        if node.keywords:
-            msg = "Range does not support keyword arguments."
-            raise CompilerError(msg)
-        nargs = len(node.args)
-        if not (1 <= nargs <= 3):
-            msg = f"Range expects 1 to 3 arguments, {len(node.args)} given."
-            raise CompilerError(msg)
-        if nargs == 1:
-            start = ir.Zero
-            stop, = node.args
-            step = ir.One
-        elif nargs == 2:
-            start, stop = node.args
-            step = ir.One
-        else:
-            start, stop, step = node.args
-        return ir.AffineSeq(start, stop, step)
-    elif name == "zip":
-        if node.keywords:
-            msg = "Zip does not support keywords."
-            raise CompilerError(msg)
-        return ir.Zip(node.args)
-    else:
-        return node
 
 
 def replace_array_init(kwargs):
@@ -384,53 +295,95 @@ def replace_iter(kwargs):
     return iterable
 
 
-def replace_len(kwargs):
-    iterable = kwargs.get["obj"]
-    if iterable is None:
-        msg = "'len' must be called with exactly one argument."
+def replace_len(node: ir.Call):
+    if node.keywords:
+        msg = "'len' does not allow keyword arguments."
         raise CompilerError(msg)
-
-
-def replace_range(kwargs):
-    arg0 = kwargs.get("arg0")
-    arg1 = kwargs.get("arg1")
-    step = kwargs.get("step")
-
-    if arg0 is None:
-        msg = "Call to range requires one to three arguments."
+    nargs = len(node.args)
+    if nargs != 1:
+        msg = f"'len' accepts a single argument. {nargs} provided"
         raise CompilerError(msg)
+    iterable, = node.args
+    return ir.Length(iterable)
 
-    if arg1 is None:
-        # single argument form
-        assert step is None
-        stop = arg0
-        start = ir.Zero
-        step = ir.One
 
+def replace_range(node: ir.Call):
+    if node.keywords:
+        msg = "Call to 'range' does not support keyword arguments."
+        raise CompilerError(msg)
+    nargs = len(node.args)
+    # defaults
+    start = ir.Zero
+    step = ir.One
+    if nargs == 1:
+        stop, = node.args
+    elif nargs == 2:
+        start, stop = node.args
+    elif nargs == 3:
+        start, stop, step = node.args
     else:
-        assert arg0 is not None
-        start = arg0
-        stop = arg1
-        if step is None:
-            step = ir.One
-
+        msg = f"Range accepts 1 to 3 arguments, {nargs} provided."
+        raise CompilerError(msg)
     return ir.AffineSeq(start, stop, step)
 
 
-def replace_enumerate(kwargs):
-    iterable = kwargs.get("iterable")
-    start = kwargs.get("start")
-    if iterable is None:
-        msg = "Enumerate called with no iterable set."
+def replace_enumerate(node: ir.Call):
+    nargs = len(node.args) + len(node.keywords)
+    if not (1 <= nargs <= 2):
+        msg = f"'enumerate' accepts either 1 or 2 arguments, {nargs} provided."
         raise CompilerError(msg)
-    if start is None:
-        start = ir.Zero
-    if not isinstance(iterable, (ir.Length, ir.AffineSeq, ir.Zip)):
-        iterable = ir.Length(iterable)
-    return ir.AffineSeq(start, iterable, ir.One)
+    if node.keywords:
+        if node.args:
+            key, value = node.keywords
+            if key != "start":
+                if key == "iterable":
+                    msg = "keyword 'iterable' in call to enumerate shadows a positional argument."
+                else:
+                    msg = f"Unrecognized keyword {key} in call to enumerate"
+                raise CompilerError(msg)
+            start = value
+            iterable, = node.args
+        else:
+            if len(node.keywords) == 1:
+                key, iterable = node.keywords
+                if key != "iterable":
+                    msg = "Missing 'iterable' argument in call to enumerate"
+                    raise CompilerError(msg)
+                start = ir.Zero
+            else:
+                # dictionaries are not hashable, thus we have a tuple with explicit pairings
+                # we should factor out a duplicate key check earlier on
+                kwargs = node.keywords
+                iterable = None
+                start = None
+                for key, value in kwargs:
+                    if key == "iterable":
+                        iterable = value
+                    elif key == "start":
+                        start = value
+                    else:
+                        msg = f"Unrecognized keyword {key} in call to enumerate."
+                        raise CompilerError(msg)
+                if iterable is None or start is None:
+                    msg = f"bad keyword combination {kwargs[0][0]} {kwargs[0][1]} in call to enumerate, expected" \
+                          f"'iterable' and 'start'"
+                    raise CompilerError(msg)
+        return ir.Enumerate(iterable, start)
 
 
-replacers = {"numpy.empty": CallSpecialize({"shape": None, "dtype": numpy.float64, "order": "C", "like": None},
+def replace_zip(node: ir.Call):
+    if node.keywords:
+        msg = "zip does not support keyword arguments."
+        raise CompilerError(msg)
+    return ir.Zip(node.args)
+
+
+replacers = {"enumerate": replace_enumerate,
+             "iter": replace_iter,
+             "len": replace_len,
+             "range": replace_range,
+             "zip": replace_zip,
+             "numpy.empty": CallSpecialize({"shape": None, "dtype": numpy.float64, "order": "C", "like": None},
                                            replace_empty,
                                            allow_keywords=True),
              "numpy.ones": CallSpecialize({"shape": None, "dtype": numpy.float64, "order": "C", "like": None},
@@ -438,20 +391,14 @@ replacers = {"numpy.empty": CallSpecialize({"shape": None, "dtype": numpy.float6
                                           allow_keywords=True),
              "numpy.zeros": CallSpecialize({"shape": None, "dtype": numpy.float64, "order": "C", "like": None},
                                            replace_zeros,
-                                           allow_keywords=True),
-             "iter": CallSpecialize({"iterable: None"},
-                                    replace_iter,
-                                    allow_keywords=False),
-             "len": CallSpecialize({"obj": None},
-                                   replace_len,
-                                   allow_keywords=False),
-             "range": CallSpecialize({"arg0:": None, "arg1": None, "step": None},
-                                     replace_range,
-                                     allow_keywords=False)
+                                           allow_keywords=True)
              }
 
 
 def replace_call(node: ir.Call):
+    """
+    AST level replacement for functions that are specialized internally.
+    """
     func_name = extract_name(node)
     replacer = replacers.get(func_name)
     if replacer is None:
@@ -460,5 +407,7 @@ def replace_call(node: ir.Call):
             raise CompilerError(msg)
         return node
         # Todo: expand this for (any,all later
-    repl = replacer.replace_call(node)
+    # Todo: Some of the builtin calls follow strange overloading conventions
+    #       so they had to be separated. I may rework this further, as I hate type checks.
+    repl = replacer(node)
     return repl

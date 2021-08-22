@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import ir
-from canonicalize import replace_builtin_call
+from canonicalize import replace_call
 from errors import CompilerError
 from lowering import const_folding
 from symbol_table import st_from_pyst
@@ -336,7 +336,7 @@ class TreeBuilder(ast.NodeVisitor):
             # Most of the time this kind of conflict is an error. For example
             # we don't support overwriting zip, enumerate, etc. since we don't
             # really support customized iterator protocols anyway.
-            call_ = replace_builtin_call(call_)
+            call_ = replace_call(call_)
         return call_
 
     def visit_IfExp(self, node: ast.IfExp) -> ir.ValueRef:
