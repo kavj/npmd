@@ -124,8 +124,11 @@ def _(node: ir.Max):
             repl = ir.Max(tuple(unique))
         else:
             repl, = unique
+    elif numeric:
+        repl = wrap_constant(max(numeric))
     else:
-        repl = numeric
+        # should never happen
+        raise ValueError("Internal Error: commutative min max simplification.")
 
     return repl
 
@@ -156,8 +159,11 @@ def _(node: ir.Min):
             repl = ir.Min(tuple(unique))
         else:
             repl, = unique
+    elif numeric:
+        repl = wrap_constant(min(numeric))
     else:
-        repl = numeric
+        # should never happen
+        raise ValueError("Internal Error: commutative min max simplification.")
 
     return repl
 
