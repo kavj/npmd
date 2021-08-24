@@ -11,6 +11,9 @@ from visitor import walk
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
 
 
+signed_integer_range = {p: (-(2**(p-1)-1), 2**(p-1)-1) for p in (8, 32, 64)}
+
+
 def get_expr_parameters(expr):
     return {subexpr for subexpr in walk(expr) if isinstance(subexpr, ir.NameRef)}
 

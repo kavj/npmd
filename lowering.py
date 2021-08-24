@@ -1,12 +1,13 @@
 import math
+import numbers
 import operator
 import typing
 from collections import defaultdict, deque
-from functools import singledispatchmethod
+from functools import singledispatch, singledispatchmethod
 
 import ir
 from errors import CompilerError
-from utils import is_addition, is_multiplication, wrap_constant
+from utils import is_addition, is_division, is_multiplication, is_subtraction, wrap_constant, signed_integer_range
 from visitor import ExpressionVisitor
 
 unaryops = {"+": operator.pos,
@@ -85,6 +86,80 @@ def rewrite_pow(expr):
         return ir.Call("sqrt", (expr.left,), ())
     else:
         return expr
+
+
+@singledispatchmethod
+def simplify_commutative_min_max(node):
+    msg = f"Internal Error: Expected min or max ir node, received {type(node)}."
+    raise TypeError(msg)
+
+
+@simplify_commutative_min_max.register
+def _(node: ir.Max):
+    numeric = set()
+    seen = set()
+    unchecked = deque(node.subexprs)
+    unique = deque()
+
+    while unchecked:
+        value = unchecked.popleft()
+        if value.constant:
+            numeric.add(value.value)
+        elif value not in seen:
+            seen.add(value)
+            if isinstance(value, ir.Max):
+                # Since this handles expressions that are assumed to
+                # be commutative and not overflow or contain unordered
+                # operands, we can inline nested max terms the first time
+                # a unique max expression is encountered.
+                unchecked.extend(value.values)
+            else:
+                unique.append(value)
+
+    if unique:
+        if numeric:
+            as_const = wrap_constant(max(numeric))
+            unique.append(as_const)
+        if len(unique) > 1:
+            repl = ir.Max(tuple(unique))
+        else:
+            repl, = unique
+    else:
+        repl = numeric
+
+    return repl
+
+
+@simplify_commutative_min_max.register
+def _(node: ir.Min):
+    numeric = set()
+    seen = set()
+    unchecked = deque(node.values)
+    unique = deque()
+
+    while unchecked:
+        value = unchecked.popleft()
+        if value.constant:
+            numeric.add(value.value)
+        elif value not in seen:
+            seen.add(value)
+            if isinstance(value, ir.Min):
+                unchecked.extend(value.values)
+            else:
+                unique.append(value)
+
+    if unique:
+        if numeric:
+            as_const = wrap_constant(min(numeric))
+            unique.append(as_const)
+        if len(unique) > 1:
+            repl = ir.Min(tuple(unique))
+        else:
+            repl, = unique
+    else:
+        repl = numeric
+
+    return repl
 
 
 # Todo: A lot of this can't be done consistently without type information. Some folding of constants
@@ -229,50 +304,20 @@ class const_folding(ExpressionVisitor):
     def _(self, expr: ir.XOR):
         # not sure about this one, since
         # it's not monotonic
-        raise NotImplementedError
+        return expr
 
     @visit.register
     def _(self, expr: ir.Max):
-        raise NotImplementedErrorf
+        return expr
 
     @visit.register
     def _(self, expr: ir.Min):
-        raise NotImplementedError
+        return expr
 
 
-def simplify_commutative_max(node):
-    numeric = set()
-    seen = set()
-    unchecked = deque(node.values)
-    unique = deque()
-
-    while unchecked:
-        value = unchecked.popleft()
-        if value.constant:
-            numeric.add(value.value)
-        elif value not in seen:
-            seen.add(value)
-            if isinstance(value, ir.Max):
-                # Since this handles expressions that are assumed to
-                # be commutative and not overflow or contain unordered
-                # operands, we can inline nested max terms the first time
-                # a unique max expression is encountered.
-                unchecked.extend(value.values)
-            else:
-                unique.append(value)
-
-    if unique:
-        if numeric:
-            as_const = wrap_constant(max(numeric))
-            unique.append(as_const)
-        if len(unique) > 1:
-            repl = ir.Max(tuple(unique))
-        else:
-            repl, = unique
-    else:
-        repl = numeric
-
-    return repl
+@singledispatch
+def simplify_commutative_min_max(node):
+    raise NotImplementedError
 
 
 def unwrap_truth_tested(expr):
@@ -473,11 +518,6 @@ class arithmetic_folding(ExpressionVisitor):
         return node
 
 
-def discard_unbounded(iterables):
-    bounded = {it for it in iterables if not (isinstance(it, ir.AffineSeq) and it.stop is None)}
-    return bounded
-
-
 class interval_splitting(ExpressionVisitor):
 
     def __call__(self, expr):
@@ -491,28 +531,28 @@ class interval_splitting(ExpressionVisitor):
 
     @visit.register
     def _(self, iterable: ir.NameRef):
-        return {(ir.Zero, ir.Length(iterable), ir.One)}
+        return (ir.Zero, ir.Length(iterable), ir.One),
 
     @visit.register
     def _(self, iterable: ir.AffineSeq):
         # Note: we have to return an interval even if the stop parameter is None
         # Without this, the
-        return {(iterable.start, iterable.stop, iterable.step)}
+        return (iterable.start, iterable.stop, iterable.step),
 
     @visit.register
     def _(self, iterable: ir.Subscript):
         if isinstance(iterable.slice, ir.Slice):
-            # We can convert iteration over a sliced array
-            # to affine parameters with respect to the base array.
+            # determine the inverval based on slice parameters
+            # for a similar transform, see itertools.islice
             start = iterable.start
             step = iterable.step
             base = (start, ir.Length(iterable.value), step)
             if iterble.stop is None:
-                intervals = {base}
+                intervals = base,
             else:
-                intervals = {base, (start, iterable.stop, step)}
+                intervals = base, (start, iterable.stop, step)
         else:
-            intervals = {(ir.Zero, ir.Length(iterable), ir.One), }
+            intervals = (ir.Zero, ir.Length(iterable), ir.One),
         return intervals
 
 
@@ -525,7 +565,14 @@ def get_sequence_step(iterable):
     return ir.One
 
 
-def find_min_interval_width(spans):
+def consolidate_spans(spans):
+    """
+    Try to simplify a group of (start, stop) interval expressions.
+    This does not assume that stop - start may be safely computed.
+    compute stop - start.
+
+    """
+
     starts = set()
     stops = set()
     for start, stop in spans:
@@ -535,60 +582,38 @@ def find_min_interval_width(spans):
             starts.add(start)
             stops.add(stop)
 
+    start_count = len(starts)
     stop_count = len(stops)
+
+    # Check for invalid terms before proceeding.
+    for term in itertools.chain(starts, stops):
+        if term.constant and not isinstance(term, ir.IntConst):
+            msg = f"Non-integral term {term} cannot be used as a range parameter."
+            raise CompilerError(msg)
+
+    # unbounded check
     if stop_count == 0:
-        # unbounded
         return
 
-    single_start = len(starts) == 1
-    single_stop = stop_count == 1
-
-    if single_start or single_stop:
-        if single_start and single_stop:
-            start, = starts
+    if start_count == 1:
+        start, = starts
+        if stop_count == 1:
             stop, = stops
-        elif single_start:
-            start, = starts
-            stop = ir.Min(tuple(stops))
         else:
-            start = ir.Max(tuple(starts))
-            stop, = stops
-        min_width = ir.BinOp(stop, start, "-")
+            stop_reduc = ir.Min(tuple(stops))
+            stop = simplify_commutative_min_max(stop_reduc)
+        reduced = (start, stop),
+
+    elif stop_count == 1:
+        stop, = stops
+        start_reduc = ir.Max(tuple(starts))
+        start = simplify_commutative_min_max(start_reduc)
+        reduced = (start, stop),
+
     else:
-        widths = set()
-        for start, stop in start_stop:
-            if start == ir.Zero:
-                widths.add(stop)
-            elif stop is not None:
-                d = ir.BinOp(stop, start, "-")
-                widths.add(d)
-        min_width = ir.Min(tuple(widths))
-    return width
+        reduced = spans
 
-
-def unary_minus_is_safe(a: ir.ValueRef, p: int) -> ir.ValueRef:
-    assert p >= 0
-    min_int = -1 * operator.pow(2, p - 1)
-    if a.constant:
-        cond = operator.ne(a, min_int)
-    else:
-        cond = ir.BinOp(a, ir.IntConst(min_int), "!=")
-    return cond
-
-
-# Stubs for range checks, not always decidable
-# The expressions themselves should be evaluated as if safe and well defined.
-
-def is_non_negative(expr):
-    return NotImplemented
-
-
-def is_positive(expr):
-    return NotImplemented
-
-
-def is_negative(expr):
-    return NotImplemented
+    return reduced
 
 
 def MIN_INT(p: int) -> ir.IntConst:
@@ -611,163 +636,102 @@ def MAX_INT(p: int) -> ir.IntConst:
     return ir.IntConst(value)
 
 
-def add_is_safe(a: ir.ValueRef, b: ir.ValueRef, p: int) -> ir.ValueRef:
+class UnsafeArithmeticChecker(ExpressionVisitor):
     """
-    This is meant to test whether we can safely compute an expression at runtime, particularly
-    expressions that are generated during compile time lowering.
+    Checks for definitely overflowing arithmetic.
+    """
 
-    a + b can be safely evaluated at runtime if:
-    
-    Note that folding at compile time uses Python's arbitrary precision integers
-    
-    "a + b" can be safely evaluated at runtime if 
-    
-    INT_MIN(p) <= a + b <= INT_MAX(p)
-    
-    which holds if any of the following conditions hold. 
-    
-    Note the >= and <= are partially redundant with the first condition but still valid.
-    
-    (1) a == 0 or b == 0
-    
-    (2) a >= 0 and b <= MAX_INT(p) - a
-    
-    (3) a <= 0 and MIN_INT(p) - a <= b
-    
-    (4) b => 0 and a <= MAX_INT(p) - b
-    
-    (5) b <= 0 and MIN_INT(p) - b <= a
-    
+    def __init__(self, bitwidth):
+        self.lower = -(bound + 1)
+        self.upper = bound
+        self.folder = const_folding()
+
+    def overflows(self, term):
+        return not (self.lower <= term.value <= self.upper)
+
+    @singledispatchmethod
+    def visit(self, expr):
+        assert isinstance(expr, ir.Expression)
+        return False
+
+    @visit.register
+    def _(self, expr: ir.BinOp):
+        left = self.lookup(expr.left)
+        right = self.lookup(expr.right)
+        if left == True or right == True:
+            # If the operation hasn't been folded at this point an individual
+            # overflowing operand means the whole thing overflows.
+            return True
+        if expr.left.constant and expr.right.constant:
+            # constant with neither term overflowing
+            # If folding throws a compiler error, don't catch it
+            # since the entire thing is unsafe rather than merely
+            # overflowing at current precision.
+            folded = self.folder(expr)
+            if isinstance(folded, ir.IntConst):
+                if self.overflows(folded):
+                    return True
+        return False
+
+    @visit.register
+    def _(self, expr: ir.UnaryOp):
+        # don't catch compiler errors here
+        folded = self.folder(expr)
+        if folded.constant:
+            if isinstance(folded, ir.IntConst):
+                return self.overflows(folded)
+        return False
+
+    @visit.register
+    def _(self, expr: ir.Constant):
+        return self.overflows(expr)
+
+
+def may_compute_interval_width(a: ir.ValueRef, b: ir.ValueRef) -> typing.Union[bool, ir.ValueRef]:
+    """
+
+    for a half-open interval [a, b)
+    check if either "a" is non-negative or "b - a" is computable at compile time.
+    If "b - a" overflows available fixed precision, it must be handled elsewhere.
+
     References:
         LIVINSKII et. al, Random Testing for C and C++ Compilers with YARPGen
         Dietz et. al, Understanding Integer Overflow in C/C++
+
         Bachmann et. al, Chains of Recurrences - a method to expedite the evaluation of closed-form functions
         https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html
         https://developercommunity.visualstudio.com/t/please-implement-integer-overflow-detection/409051
         https://numpy.org/doc/stable/user/building.html
+
     """
-    assert p > 0
-    mag = operator.pow(2, p)
-    imin = MIN_INT(p)
-    imax = MAX_INT(p)
-    if a == ir.Zero or b == ir.Zero:
-        # a == 0 or b == 0
-        return ir.BoolConst(True)
-    elif a.constant and b.constant:
-        # safely computable at compile time using arbitrary precision integers
-        res = operator.sub(a.value, b.value)
-        cond = (MIN_INT(p).value <= res <= MAX_INT(p).value)
-        return ir.BoolConst(cond)
-    # Todo: This can be optimized quite a bit if we can determine whether values are positive or negative here.
+
+    if a.constant and b.constant:
+        return True
+
     elif a.constant:
-        if operator.gt(a.value, imax.value):
-            # overflowing constant
-            return ir.BoolConst(False)
-        elif operator.gt(a.value, 0):
-            # a > 0 and b <= MAX_INT(p) - a
-            diff = ir.BinOp(imin.value, a, "-")
-            return ir.BinOp(b, diff, "<=")
-        else:
-            # a < 0 and MIN_INT(p) - a <= b
-            diff = ir.BinOp(imin.value, a, "-")
-            return ir.BinOp(diff, b, "<=")
-    elif b.constant:
-        if operator.gt(b.value, imax.value):
-            # overflowing constant
-            return ir.BoolConst(False)
-        if operator.gt(b.value, 0):
-            # b > 0 and a <= MAX_INT(p) - b
-            diff = ir.BinOp(imax.value, b, "-")
-            return ir.BinOp(a, diff, "<=")
-        else:
-            # b < 0 and MIN_INT(p) - b <= a
-            diff = ir.BinOp(imin.value, b, "-")
-            return ir.BinOp(diff, a, "<=")
-    else:
-        non_negative_a = ir.BinOp(a, ir.Zero, ">=")
-        cond_if_true = ir.BinOp(b, ir.BinOp(imax, a, "-"))
-        cond_if_false = ir.BinOp(ir.BinOp(imin, a, "-"), b, "<=")
-        return ir.Ternary(non_negative_a, cond_if_true, cond_if_false)
+        return operator.ge(a.value, 0)
+
+    elif isinstance(a, ir.Max):
+        # any non-zero interval
+        for subexpr in a.subexprs:
+            if subexpr.constant:
+                # check for forward step interval with
+                # a non-negative lower bound
+                if operator.ge(subexpr.value, 0):
+                    return True
+
+    return False
 
 
-def sub_is_safe(a: ir.ValueRef, b: ir.ValueRef, p: int) -> typing.Union[bool, ir.ValueRef]:
-    """
-
-    Note that folding at compile time uses Python's arbitrary precision integers
-
-    "a - b" can be safely evaluated at runtime if:
-
-        (b == 0) or (INT_MIN(p) <= a - b <= INT_MAX(p))
-
-        which implies a - b is safe if any of the following lines hold:
-            b == 0
-            b < 0 and (a < 0 or a <= INT_MAX(p) + b)
-            b > 0 and (a > 0 or INT_MIN(p) + b <= a)
-
-    This should convert to an OverflowError if something cannot be safely evaluated.
-
-    References:
-        LIVINSKII et. al, Random Testing for C and C++ Compilers with YARPGen
-        Dietz et. al, Understanding Integer Overflow in C/C++
-        Bachmann et. al, Chains of Recurrences - a method to expedite the evaluation of closed-form functions
-        https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html
-        https://developercommunity.visualstudio.com/t/please-implement-integer-overflow-detection/409051
-        https://numpy.org/doc/stable/user/building.html
-
-    """
-
-    # Todo: This should probably avoid doing explicit overflow checks when they cannot be fully resolved.
-    #  Rather we can consolidate any arithmetic that might overflow, then use compiler specific extensions
-    #  for any remaining checks.
-    assert p > 0
-    imin = MIN_INT(p)
-    imax = MAX_INT(p)
-
-    # Check for simple case, ignoring intermediate overflow
-    expr = fold_constants(ir.BinOp(a, b, "-"))
-
-    if expr.constant:
-        truth_value = imin.value <= expr.value <= imax.value
-        return ir.BoolConst(truth_value)
-    elif b == ir.Zero:
-        # It's always safe to compute a - 0
-        # It's unsafe to compute 0 - MIN_INT(p)
-        return ir.BoolConst(True)
-    else:
-        # Check for
-        # b >= 0 and (a >= 0 or INT_MIN(p) + b <= a)
-        # b =< 0 and (a <= 0 or a <= INT_MAX(p) + b)
-
-        b_ge_zero = ir.BinOp(b, ir.Zero, ">=")
-        imin = MIN_INT(p)
-        imax = MAX_INT(p)
-
-        fold_constants = const_folding()
-
-        a_ge_zero = fold_constants(ir.BinOp(a, ir.Zero, ">="))
-        a_le_zero = fold_constants(ir.BinOp(a, ir.Zero, "<="))
-
-        b_ge_zero = fold_constants(ir.BinOp(b, ir.Zero, ">="))
-
-        b_plus_min = fold_constants(ir.BinOp(b, imin, "+"))
-        b_plus_max = fold_constants(ir.BinOp(b, imax, "+"))
-
-        b_plus_min_le_a = fold_constants(ir.BinOp(b_plus_min, a, "<="))
-        a_le_b_plus_max = fold_constants(ir.BinOp(a, b_plus_max, "<="))
-
-        on_true = ir.OR((a_ge_zero, b_plus_min_le_a))
-        on_false = ir.OR((a_le_zero, a_le_b_plus_max))
-        test = ir.Ternary(b_ge_zero, )
-        on_true = ir.OR(a_ge_zero, on_true, on_false)
-
-        test_on_true = ir.OR((ir.BinOp(a, ir.Zero, ">="), ir.BinOp(ir.BinOp(b, imin, "+"), a, "<=")))
-        test_on_false = ir.OR((ir.BinOp(a, ir.Zero, "<="), ir.BinOp(a, ir.BinOp(b, imax, "+"), "<=")))
-        test = ir.Ternary(non_negative_b, test_on_pos, test_on_non_neg)
-        return ir.TRUTH(test)
+def may_compute_min_interval_width(spans):
+    return all(may_compute_interval_width(start, stop) for (start, stop) in spans)
 
 
 def split_intervals_by_step(intervals):
-    pass
+    by_step = defaultdict(set)
+    for start, stop, step in intervals:
+        by_step[step].add((start, stop))
+    return by_step
 
 
 def split_start_stop(intervals):
@@ -865,9 +829,29 @@ def make_loop_counter(iterables, syms):
     # This should never fail.
     assert unique_stops
 
-    have_unique_start = len(unique_starts) == 1
-    have_unique_stop = len(unique_stops) == 1
-    have_unique_step = len(unique_steps) == 1
+    by_step = split_intervals_by_step(intervals)
+
+    can_normalize = True
+
+    for step, spans in by_step.items():
+        # check if any span width cannot be safely computed
+        if not safe_to_compute_interval_width(spans, 64):
+            can_normalize = False
+            break
+
+    if len(by_step) == 1:
+        step, spans = by_step.popitem()
+        if len(spans) == 1:
+            # fold step against possibly reduced bounds
+            pass
+        else:
+            pass
+    else:
+        pass
+
+
+    for step, spans in by_step.items():
+        pass
 
     if have_unique_step:
         step, = unique_steps
