@@ -1,7 +1,7 @@
 import ctypes
 import numpy as np
 
-from contextlib import ContextDecorator
+from contextlib import contextmanager
 from functools import singledispatchmethod
 
 import ir
@@ -16,6 +16,22 @@ This still needs a customized visitor to generate statements.
 At this point, statements are serialized to the level expected by C code.
 
 """
+
+
+class Typer:
+
+    def __init__(self, scalar_types, array_types, simd_types):
+        self.scalar_types = scalar_types
+        self.array_types = array_types
+        self.simd_types = simd_types
+
+
+def check_branch_assigns():
+    """
+    Find values assigned prior to being read on both sides of a branch.
+
+    """
+    pass
 
 
 def build_lltypes():
@@ -57,25 +73,6 @@ class ctx:
 
     def get_raw_scalar_name(self, basetype):
         return self.lltype_mapping.get(basetype)
-
-
-class mangler:
-    """
-    sets up function names by argument specialization
-    """
-    pass
-
-    def mangle_name(self, func):
-        return
-
-
-class FuncWrapperGen:
-    func: ir.Function
-    mangler_: mangler
-
-    @property
-    def mangled(self):
-        return self.mangler_.mangle_name(self.func.name)
 
 
 def enter_func(func, lltypes, return_type):

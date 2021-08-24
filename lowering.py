@@ -1,4 +1,4 @@
-import operator
+import math
 import operator
 import typing
 from collections import defaultdict, deque
@@ -6,7 +6,7 @@ from functools import singledispatchmethod
 
 import ir
 from errors import CompilerError
-from utils import is_addition, is_multiplication
+from utils import is_addition, is_multiplication, wrap_constant
 from visitor import ExpressionVisitor
 
 unaryops = {"+": operator.pos,
@@ -233,93 +233,46 @@ class const_folding(ExpressionVisitor):
 
     @visit.register
     def _(self, expr: ir.Max):
-        raise NotImplementedError
+        raise NotImplementedErrorf
 
     @visit.register
     def _(self, expr: ir.Min):
         raise NotImplementedError
 
 
-def simplify_integer_max(node, op):
+def simplify_commutative_max(node):
     numeric = set()
-    additions = defaultdict(set)
     seen = set()
+    unchecked = deque(node.values)
     unique = deque()
 
-    # Find expressions that could be combined
-
-    for value in node.values:
+    while unchecked:
+        value = unchecked.popleft()
         if value.constant:
-            numeric.add(value)
-        elif is_addition(value):
-            additions[value.left].add(value.right)
+            numeric.add(value.value)
         elif value not in seen:
-            # note: not marking the others as seen
-            unique.append(value)
             seen.add(value)
-
-    # reduce Max(i, i + 1, i + 2, i + 3, other_stuff) to Max(i + 3, other_stuff)
-    # Todo: Noting this is very dangerous in certain cases. If this targets an environment
-    #       with wraparound arithmetic (common and supported by gcc and clang), then using
-    #       normally cascaded max will give the right result if some overflow, but this will
-    #       not. It might still be useful if we can prove that away, but I'm not certain.
-    for left, rhs_terms in additions.items():
-        if len(rhs_items) > 1:
-            consts = deque()
-            collected = deque()
-            for r in rhs_terms:
-                if r.constant:
-                    assert isinstance(r, ir.IntConst)
-                    consts.append(r)
-                else:
-                    collected.append(r)
-            if consts:
-                m = wrap_constant(max(c.value for c in consts))
-                collected.appendleft(m)
-            if len(collected) == 1:
-                right = collected.pop()
+            if isinstance(value, ir.Max):
+                # Since this handles expressions that are assumed to
+                # be commutative and not overflow or contain unordered
+                # operands, we can inline nested max terms the first time
+                # a unique max expression is encountered.
+                unchecked.extend(value.values)
             else:
-                # on the off chance that the same additions are used before this
-                # we would still be stuck with computing the max anyway. Since it's
-                # unlikely to always be the case, might as well just take the max
-                right = ir.Max(tuple(collected))
+                unique.append(value)
+
+    if unique:
+        if numeric:
+            as_const = wrap_constant(max(numeric))
+            unique.append(as_const)
+        if len(unique) > 1:
+            repl = ir.Max(tuple(unique))
         else:
-            right = rhs_terms.pop()
-        unique.append(ir.BinOp(left, right, "+"))
+            repl, = unique
+    else:
+        repl = numeric
 
-    unique = []
-
-    for value in node.values:
-        if value.constant:
-            assert isinstance(value, ir.IntConst)
-            if numeric is None:
-                numeric = value
-            else:
-                numeric = max(numeric, value.value)
-        elif value not in seen:
-            seen.add(value)
-            unique.append(value)
-        elif isinstance(value, ir.BinOp):
-            # This case comes up when simplifying interval constraints
-            # that rely on multiple offset views of one array
-            if value.left.constant:
-                assert isinstance(value, ir.IntConst)
-
-                pass
-            elif value.right.constant:
-                pass
-    if numeric is not None:
-        numeric = wrap_constant(numeric)
-        unique.appendleft(numeric)
-    return ir.Max(tuple(unique))
-
-
-def applies_truth_test(expr):
-    if isinstance(expr, (ir.TRUTH, ir.AND, ir.OR, ir.NOT, ir.BoolConst)):
-        return True
-    elif isinstance(expr, ir.BinOp):
-        return expr.op in compare_ops
-    return False
+    return repl
 
 
 def unwrap_truth_tested(expr):
@@ -333,7 +286,7 @@ def unwrap_truth_tested(expr):
     return expr
 
 
-class associative_arithmetic_folding(ExpressionVisitor):
+class arithmetic_folding(ExpressionVisitor):
     """
     Non-recursive visitor for folding identity ops
 
@@ -413,57 +366,6 @@ class associative_arithmetic_folding(ExpressionVisitor):
             return node.operand.operand
         else:
             return node
-
-    @visit.register
-    def _(self, node: ir.Max):
-        seen = set()
-        unique = deque()
-        # maintain ordering but associative optimizations
-        # allow removing duplicates. Also factor out constants
-        numeric = None
-        for value in node.values:
-            if value.constant:
-                assert isinstance(value, ir.IntConst)
-                if numeric is None:
-                    numeric = value
-                else:
-                    numeric = max(numeric, value)
-            elif value not in seen:
-                seen.add(value)
-                unique.append(value)
-            elif isinstance(value, ir.BinOp):
-                # This case comes up when simplifying interval constraints
-                # that rely on multiple offset views of one array
-                if value.left.constant:
-                    pass
-                elif value.right.constant:
-                    pass
-        if numeric is not None:
-            numeric = wrap_constant(numeric)
-            unique.appendleft(numeric)
-        return ir.Max(tuple(unique))
-
-    @visit.register
-    def _(self, node: ir.Min):
-        seen = set()
-        unique = deque()
-        # maintain ordering but associative optimizations
-        # allow removing duplicates. Also factor out constants
-        numeric = None
-        for value in node.values:
-            if value not in seen:
-                seen.add(value)
-                if value.constant:
-                    assert isinstance(value, ir.IntConst)
-                    if numeric is None:
-                        numeric = value
-                    else:
-                        numeric = min(numeric, value)
-                unique.append(value)
-        if numeric is not None:
-            numeric = wrap_constant(numeric)
-            unique.appendleft(numeric)
-        return ir.Min(tuple(unique))
 
     @visit.register
     def _(self, node: ir.AND):
@@ -561,7 +463,7 @@ class associative_arithmetic_folding(ExpressionVisitor):
                     #  Those can arbitrarily propagate or suppress nans as a side effect of
                     #  determining type from the leading operand.
                     return ir.Max((else_expr, if_expr))
-                    pass
+
             elif test.op in (">", ">="):
                 if if_expr == test.left and else_expr == test.right:
                     return ir.Max((if_expr, else_expr))

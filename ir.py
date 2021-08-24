@@ -386,10 +386,6 @@ class BinOp(Expression):
         yield self.right
 
     @cached_property
-    def is_compare_op(self):
-        return self.op in compareops
-
-    @cached_property
     def in_place(self):
         return self.op in inplace_ops
 
@@ -640,7 +636,7 @@ class UnaryOp(Expression):
 
     def __post_init__(self):
         assert self.op in unaryops
-        assert isinstance(operand, ValueRef)
+        assert isinstance(self.operand, ValueRef)
 
     @property
     def subexprs(self):
