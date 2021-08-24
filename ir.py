@@ -274,6 +274,7 @@ class Min(Expression):
 
     def __post_init__(self):
         assert isinstance(self.values, tuple)
+        assert all(isinstance(v, ValueRef) for v in self.values)
 
     @property
     def subexprs(self):
@@ -290,6 +291,7 @@ class Max(Expression):
 
     def __post_init__(self):
         assert isinstance(self.values, tuple)
+        assert all(isinstance(v, ValueRef) for v in self.values)
 
     @property
     def subexprs(self):
@@ -346,6 +348,7 @@ class Tuple(Expression):
 
     def __post_init__(self):
         assert isinstance(self.elements, tuple)
+        assert all(isinstance(e, ValueRef) for e in self.elements)
 
     @property
     def subexprs(self):
@@ -432,6 +435,7 @@ class OR(BoolOp):
     def __post_init__(self):
         assert (isinstance(self.operands, tuple))
         assert len(self.operands) >= 2
+        assert all(isinstance(operand, ValueRef) for operand in self.operands)
 
     @property
     def subexprs(self):
@@ -449,6 +453,7 @@ class AND(BoolOp):
     def __post_init__(self):
         assert (isinstance(self.operands, tuple))
         assert len(self.operands) >= 2
+        assert all(isinstance(operand, ValueRef) for operand in self.operands)
 
     @property
     def subexprs(self):
@@ -466,6 +471,7 @@ class XOR(BoolOp):
     def __post_init__(self):
         assert (isinstance(self.operands, tuple))
         assert len(self.operands) >= 2
+        assert all(isinstance(operand, ValueRef) for operand in self.operands)
 
     @property
     def subexprs(self):
@@ -547,6 +553,8 @@ class Call(Expression):
     def __post_init__(self):
         assert isinstance(self.args, tuple)
         assert isinstance(self.keywords, tuple)
+        assert all(isinstance(arg, ValueRef) for arg in self.args)
+        assert all(isinstance(arg, ValueRef) for (key, arg) in self.keywords)
 
     @property
     def subexprs(self):
@@ -567,6 +575,11 @@ class AffineSeq(Expression):
     start: ValueRef
     stop: typing.Optional[ValueRef]
     step: ValueRef
+
+    def __post_init__(self):
+        assert isinstance(self.start, ValueRef)
+        assert isinstance(self.stop, ValueRef)
+        assert isinstance(self.step, ValueRef)
 
     @property
     def reversed(self):
@@ -591,6 +604,11 @@ class Ternary(Expression):
     if_expr: ValueRef
     else_expr: ValueRef
 
+    def __post_init__(self):
+        assert isinstance(self.test, ValueRef)
+        assert isinstance(self.if_expr, ValueRef)
+        assert isinstance(self.else_expr, ValueRef)
+
     @property
     def subexprs(self):
         yield self.if_expr
@@ -607,6 +625,9 @@ class Reversed(Expression):
 
     iterable: ValueRef
 
+    def __post_init__(self):
+        assert isinstance(self.iterable, ValueRef)
+
     @property
     def subexprs(self):
         yield self.iterable
@@ -619,6 +640,7 @@ class UnaryOp(Expression):
 
     def __post_init__(self):
         assert self.op in unaryops
+        assert isinstance(operand, ValueRef)
 
     @property
     def subexprs(self):
@@ -654,6 +676,7 @@ class Zip(Expression):
 
     def __post_init__(self):
         assert isinstance(self.elements, tuple)
+        assert all(isinstance(e, ValueRef) for e in self.elements)
 
     @property
     def subexprs(self):
@@ -676,6 +699,10 @@ class Assign(StmtBase):
     value: ValueRef
     pos: Position
 
+    def __post_init__(self):
+        assert isinstance(self.target, ValueRef)
+        assert isinstance(self.value, ValueRef)
+
     @property
     def in_place(self):
         return isinstance(self.value, BinOp) and self.value.in_place
@@ -685,6 +712,9 @@ class Assign(StmtBase):
 class SingleExpr(StmtBase):
     expr: ValueRef
     pos: Position
+
+    def __post_init__(self):
+        assert isinstance(self.expr, ValueRef)
 
 
 @dataclass
@@ -704,6 +734,10 @@ class ForLoop(StmtBase):
     body: typing.List[Statement]
     pos: Position
 
+    def __post_init__(self):
+        assert isinstance(self.target, ValueRef)
+        assert isinstance(self.iterable, ValueRef)
+
 
 @dataclass
 class IfElse(StmtBase):
@@ -711,6 +745,9 @@ class IfElse(StmtBase):
     if_branch: typing.List[Statement]
     else_branch: typing.List[Statement]
     pos: Position
+
+    def __post_init__(self):
+        assert isinstance(self.test, ValueRef)
 
 
 @dataclass
@@ -727,6 +764,11 @@ class NameImport(StmtBase):
     as_name: NameRef
     pos: Position
 
+    def __post_init__(self):
+        assert isinstance(self.module, NameRef)
+        assert isinstance(self.name, NameRef)
+        assert isinstance(self.as_name, NameRef)
+
 
 @dataclass
 class Return(StmtBase):
@@ -739,3 +781,6 @@ class WhileLoop(StmtBase):
     test: ValueRef
     body: typing.List[Statement]
     pos: Position
+
+    def __post_init__(self):
+        assert isinstance(self.test, ValueRef)
