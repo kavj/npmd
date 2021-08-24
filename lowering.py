@@ -729,8 +729,34 @@ def may_compute_interval_width(a: ir.ValueRef, b: ir.ValueRef) -> typing.Union[b
     return False
 
 
-def may_compute_min_interval_width(spans):
-    return all(may_compute_interval_width(start, stop) for (start, stop) in spans)
+def simplify_spans(spans, non_negative_terms):
+    by_stop = defaultdict(set)
+
+    for start, stop in spans:
+        by_stop[stop].add(start)
+
+    repl = []
+    seen = set()
+
+    for _, stop in spans:
+        if stop not in seen:
+            starts = by_stop[stop]
+            seen.add(stop)
+            if len(starts) == 1:
+                start, = starts
+            else:
+                start = ir.Max(tuple(starts))
+                start = simplify_commutative_min_max(start)
+            repl.append((start, stop))
+    return repl
+
+
+def is_safe_to_compute_interval_widths(spans, non_negative_terms):
+    for start, stop in spans:
+        if isinstance(start, ir.Max):
+            if not any(s in non_negative_terms for s in start.subexprs):
+                return False
+    return True
 
 
 def split_intervals_by_step(intervals):
@@ -740,66 +766,8 @@ def split_intervals_by_step(intervals):
     return by_step
 
 
-def split_start_stop(intervals):
+def make_loop_interval(iterables, syms, non_negative_terms):
     """
-    split pairs of start stop into two dictionaries,
-
-    starts with respect to stops
-    stops with respect to starts
-
-    """
-
-    by_start = defaultdict(set)
-    by_stop = defaultdict(set)
-
-    for start, stop in intervals:
-        by_start[start].add(stop)
-        by_stop[stop].add(start)
-
-    return by_start, by_stop
-
-
-def make_loop_counter(iterables, syms):
-    """
-
-    Map a combination of array iterators and range and enumerate calls to a set of counters,
-    which capture the appropriate intervals.
-
-    This carries the requirement that all parameters have non-negative values and that step parameters
-    are strictly positive. Without that, it would take too much arithmetic to sanitize all cases at runtime
-    in a way that doesn't rely on things such as non-portable saturating arithmetic routines.
-
-    For example, suppose we have
-
-    for u, v in zip(array0[i::k], array1[j::k]):
-        ...
-
-    where its known at compile time that n == len(array0) == len(array1)
-
-    This means we have intervals
-
-    (i, n, k), (j, n, k)
-
-    which results in a loop counter with parameters:
-
-    (max(i, j), n, k)
-
-    Ignoring the issue of sanitizing the loop step there against overflow, we need an exact iteration count
-    so that the corresponding lowering looks like
-
-    array0[i + loop_index * k]
-    array1[j + loop_index * k]
-
-    which is unsafe if we cannot safely compute n - max(i, j) at runtime
-
-    If all bound variable are non-negative, we can always safely compute this stuff, and
-    sanitizing a non-unit step can be done by computing:
-        stop = max(start, stop)
-        stop -= (stop - start) % step
-
-    Without this, we have greater complexity in order to avoid injecting unsafe behavior during lowering
-    that was safe in the original source.
-
 
     References:
         LIVINSKII et. al, Random Testing for C and C++ Compilers with YARPGen
@@ -821,89 +789,50 @@ def make_loop_counter(iterables, syms):
         from_iterable = split_intervals(iterable)
         intervals.update(from_iterable)
 
-    unique_starts = set()
-    unique_stops = set()
-    unique_steps = set()
-
-    for start, stop, step in intervals:
-        unique_starts.add(start)
-        unique_stops.add(stop)
-        unique_steps.add(step)
-
-    unique_stops.discard(None)
-
-    # This should never fail.
-    assert unique_stops
-
     by_step = split_intervals_by_step(intervals)
 
-    can_normalize = True
+    opt_by_step = {}
 
     for step, spans in by_step.items():
-        # check if any span width cannot be safely computed
-        if not safe_to_compute_interval_width(spans, 64):
-            can_normalize = False
-            break
+        opt_by_step[step] = simplify_spans(spans, non_negative_terms)
 
-    if len(by_step) == 1:
-        step, spans = by_step.popitem()
+    interval_exprs = []
+
+    if len(opt_by_step) == 1:
+        step, spans = opt_by_step.popitem()
         if len(spans) == 1:
-            # fold step against possibly reduced bounds
-            pass
+            span, = spans
+            start, stop = span
+            return ir.AffineSeq(start, stop, step)
         else:
-            pass
+            # produces an interval (0, diff, step)
+            terms = []
+            for start, stop in spans:
+                diff = ir.BinOp(stop, start, "-")
+                terms.append(diff)
+            return ir.Min(tuple(terms))
     else:
-        pass
-
-
-    for step, spans in by_step.items():
-        pass
-
-    if have_unique_step:
-        step, = unique_steps
-        if have_unique_start:
-            # simple case
-            start, = unique_starts
-            if have_unique_stop:
-                stop, = unique_stops
+        # compute explicit interval counts
+        counts = []
+        seen = set()
+        for step, spans in opt_by_step.items():
+            diffs = []
+            for start, stop in spans:
+                diffs.append(ir.BinOp(stop, start, "-"))
+            if len(diffs) == 1:
+                diff = diffs.pop()
             else:
-                stop = ir.Min(tuple(unique_stops))
-        elif have_unique_stop:
-            # Todo: Even with step size > 0, we can't compute stop - start here unless we can prove
-            #       INT_MIN <= stop - start <= INT_MAX. It's probably worth checking this, since start
-            #       should virtually always be >= 0 in the absence of coding mistakes. Otherwise it pessimizes
-            #       code generation quite a bit. We could always enforce this.
-            start = ir.Max(tuple(unique_starts))
-            stop = ir.BinOp(stop, start, "-")
+                diff = ir.Min(tuple(diffs))
+
+            base_count = ir.BinOp(diff, step, "//")
+            test = ir.BinOp(diff, step, "%")
+            fringe = ir.Ternary(test, ir.One, ir.Zero)
+            count = ir.BinOp(base_count, fringe, "+")
+            counts.append(count)
+
+        if len(counts) == 1:
+            count = counts.pop()
         else:
-            # Normalize bounds after reducing over all bounds
-            # but still fold step. This is unsafe if parameters
-            # may be negative.
-            widths = set()
-            for start, stop, _ in intervals:
-                safe_stop = ir.Max(start, stop)
-                widths.add(ir.BinOp(safe_stop, start, "-"))
-            start = ir.Zero
-            stop = ir.Min(tuple(widths))
-            # Todo: This needs a sanitizer check for MAX_INT - stop < step
-        counter = ir.AffineSeq(start, stop, step)
-    else:
-        by_step = defaultdict(set)
-        counts = set()
+            count = ir.Min(tuple(counts))
 
-        for start, stop, step in intervals:
-            by_step[step].add((start, stop))
-
-        for step, starts_stops in by_step.items():
-            # again, safe with
-            min_width = find_min_interval_width(starts_stops)
-            if step == ir.One:
-                count = min_width
-            else:
-                base_count = ir.BinOp(min_width, step, "//")
-                fringe_test = ir.BinOp(min_width, step, "%")
-                fringe_count = ir.Ternary(fringe_test, ir.One, ir.Zero)
-                count = ir.BinOp(base_count, fringe_count, "+")
-            counts.add(count)
-        counter = ir.AffineSeq(ir.Zero, ir.Min(tuple(counts)), ir.One)
-    return counter
+        return count
