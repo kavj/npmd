@@ -443,6 +443,8 @@ class TreeBuilder(ast.NodeVisitor):
             raise CompilerError("or else clause not supported for for statements")
         iter_node = self.visit(node.iter)
         target_node = self.visit(node.target)
+        assert iter_node is not None
+        assert target_node is not None
         pos = extract_positional_info(node)
         targets = set()
         iterables = set()

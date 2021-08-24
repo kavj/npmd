@@ -368,7 +368,13 @@ def replace_enumerate(node: ir.Call):
                     msg = f"bad keyword combination {kwargs[0][0]} {kwargs[0][1]} in call to enumerate, expected" \
                           f"'iterable' and 'start'"
                     raise CompilerError(msg)
-        return ir.Enumerate(iterable, start)
+    else:
+        if nargs == 2:
+            iterable, start = node.args
+        else:
+            iterable, = node.args
+            start = ir.Zero
+    return ir.Enumerate(iterable, start)
 
 
 def replace_zip(node: ir.Call):
