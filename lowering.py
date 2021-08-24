@@ -796,8 +796,6 @@ def make_loop_interval(iterables, syms, non_negative_terms):
     for step, spans in by_step.items():
         opt_by_step[step] = simplify_spans(spans, non_negative_terms)
 
-    interval_exprs = []
-
     if len(opt_by_step) == 1:
         step, spans = opt_by_step.popitem()
         if len(spans) == 1:
@@ -810,7 +808,9 @@ def make_loop_interval(iterables, syms, non_negative_terms):
             for start, stop in spans:
                 diff = ir.BinOp(stop, start, "-")
                 terms.append(diff)
-            return ir.Min(tuple(terms))
+            count = ir.Min(tuple(terms))
+            interval = ir.AffineSeq(ir.Zero, count, ir.One)
+            return interval
     else:
         # compute explicit interval counts
         counts = []
@@ -834,5 +834,5 @@ def make_loop_interval(iterables, syms, non_negative_terms):
             count = counts.pop()
         else:
             count = ir.Min(tuple(counts))
-
-        return count
+        interval = ir.AffineSeq(ir.Zero, count, ir.One)
+        return interval
