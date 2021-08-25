@@ -654,8 +654,9 @@ def make_loop_interval(iterables, syms, non_negative_terms):
     Make loop interval of the form (start, stop, step).
 
     This tries to find a safe method of calculation.
-    It's probably worth forcing loops into countable range, but
-    this would mean some of them require instrumentation.
+
+    This assumes (with runtime verification if necessary)
+    that 'stop - start' will not overflow.
 
     References:
         LIVINSKII et. al, Random Testing for C and C++ Compilers with YARPGen
@@ -694,7 +695,7 @@ def make_loop_interval(iterables, syms, non_negative_terms):
             # produces an interval (0, diff, step)
             terms = []
             for start, stop in spans:
-                diff = ir.BinOp(stop, start, "-")
+                diff = find_safe_interval_width(start, stop, non_negative_terms)
                 terms.append(diff)
             count = ir.Min(tuple(terms))
             interval = ir.AffineSeq(ir.Zero, count, ir.One)
@@ -705,16 +706,19 @@ def make_loop_interval(iterables, syms, non_negative_terms):
         seen = set()
         for step, spans in opt_by_step.items():
             diffs = []
+            diff = None
             for start, stop in spans:
-                diffs.append(ir.BinOp(stop, start, "-"))
-
-            diff = ir.Min(tuple(diffs)) if len(diffs) != 1 else diffs.pop()
+                diff = find_safe_interval_width(start, stop, non_negative_terms)
+                diffs.append(diff)
+            if len(diffs) > 1:
+                diff = ir.Min(tuple(diffs))
             base_count = ir.BinOp(diff, step, "//")
             test = ir.BinOp(diff, step, "%")
             fringe = ir.Ternary(test, ir.One, ir.Zero)
             count = ir.BinOp(base_count, fringe, "+")
             counts.append(count)
 
+        assert(len(counts) > 0)
         count = ir.Min(tuple(counts)) if len(counts) != 1 else counts.pop()
         interval = ir.AffineSeq(ir.Zero, count, ir.One)
         return interval
