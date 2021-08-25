@@ -585,7 +585,7 @@ class AffineSeq(Expression):
 
     def __post_init__(self):
         assert isinstance(self.start, ValueRef)
-        assert isinstance(self.stop, ValueRef)
+        assert self.stop is None or isinstance(self.stop, ValueRef)
         assert isinstance(self.step, ValueRef)
 
     @property

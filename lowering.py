@@ -709,27 +709,23 @@ def make_loop_interval(iterables, non_negative_terms):
         return interval
 
 
-def make_loop_assigns(node: ir.ForLoop, interval, loop_index, loop_body_kill_list):
+def make_loop_assigns(node: ir.ForLoop, interval, loop_index):
     index_start, index_stop, index_step = interval
-    stmt_pos = node.pos
+    pos = node.pos
     assigns = []
     normalized_params = (ir.Zero, ir.One)
+    simplify_arithmetic = arithmetic_folding()
 
     if (index_start, index_step) == normalized_params:
         # normalized loop indices can pessimize dependence testing, but
         # we don't use explicit dependence tests here
         for target, iterable in unpack_iterated(node.target, node.iterable):
             iter_start, iter_stop, iter_step = interval_from_iterable(iterable)
-            if iter_start == ir.Zero:
-                if iter_step == ir.One:
-                    access_index = loop_index
-                else:
-                    access_index = ir.BinOp(iter_step, loop_index, "*")
-            elif iter_step == ir.One:
-                access_index = ir.BinOp(iter_start, loop_index, "+")
-            else:
-                offset = ir.BinOp(iter_step, loop_index, "*")
-                access_index = ir.BinOp(iter_start, offset, "+")
+            offset = ir.BinOp(loop_index, iter_step, "*")
+            expr = ir.BinOp(iter_start, offset,  "+")
+            expr = simplify_arithmetic(expr)
+            stmt = ir.Assign(target, expr, pos)
+            assigns.append()
     else:
         # verify that we have matching step
         for target, iterable in unpack_iterated(node.target, node.iterable):
@@ -741,13 +737,15 @@ def make_loop_assigns(node: ir.ForLoop, interval, loop_index, loop_body_kill_lis
             elif iter_start != index_start and index_start != ir.Zero:
                 msg = f"Internal Error: Non-conforming loop start."
                 raise ValueError(msg)
-            access_index = loop_index
-            if iter_start != ir.Zero:
-                access_index = ir.BinOp(access_index, iter_start, "+")
+            access_func = ir.BinOp(loop_index, iter_start, "+")
+            access_func = simplify_arithmetic(access_func)
             if isinstance(iterable, ir.AffineSeq):
-                value = access_index
+                value = access_func
             elif isinstance(iterable, ir.Subscript):
-                value = ir.Subscript(iterable.target, access_index)
+                if isinstance(iterable.slice, ir.Slice):
+                    pass
+                else:
+                    value = ir.Subscript(iterable.target, access_index)
             elif isinstance(iterable, ir.NameRef):
                 value = ir.Subscript(iterable, access_index)
             else:
@@ -758,8 +756,11 @@ def make_loop_assigns(node: ir.ForLoop, interval, loop_index, loop_body_kill_lis
     return assigns
 
 
-def make_single_index_loop(node: ir.ForLoop, non_negative_scalars):
+def make_single_index_loop(node: ir.ForLoop, non_negative_scalars, loop_index):
     # ignore enumerate indices
     iterables = {iterable for (_, iterable) in unpack_iterated(node.target, node.iterable, False)}
     interval = make_loop_interval(iterables, non_negative_scalars)
-    # Now, we need to make access functions.
+    assigns = make_loop_assigns(node, interval,loop_index)
+    assigns.extend(node.body)
+    repl = ir.ForLoop(loop_index, interval, assigns, node.pos)
+    return repl
