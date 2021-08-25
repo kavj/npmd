@@ -7,7 +7,8 @@ from functools import singledispatch, singledispatchmethod
 
 import ir
 from errors import CompilerError
-from utils import is_addition, is_division, is_multiplication, is_subtraction, wrap_constant, signed_integer_range
+from utils import is_addition, is_division, is_multiplication, is_subtraction, wrap_constant, signed_integer_range, \
+    unpack_iterated
 from visitor import ExpressionVisitor
 
 unaryops = {"+": operator.pos,
@@ -524,51 +525,36 @@ class arithmetic_folding(ExpressionVisitor):
         return node
 
 
-class interval_splitter(ExpressionVisitor):
-
-    def __call__(self, expr):
-        repl = self.lookup(expr)
-        return repl
-
-    @singledispatchmethod
-    def visit(self, iterable):
-        msg = f"No method to make counter for {iterable}."
-        raise NotImplementedError(msg)
-
-    @visit.register
-    def _(self, iterable: ir.NameRef):
-        return (ir.Zero, ir.Length(iterable), ir.One),
-
-    @visit.register
-    def _(self, iterable: ir.AffineSeq):
-        # Note: we have to return an interval even if the stop parameter is None
-        # Without this, the
-        return (iterable.start, iterable.stop, iterable.step),
-
-    @visit.register
-    def _(self, iterable: ir.Subscript):
-        if isinstance(iterable.slice, ir.Slice):
-            # determine the inverval based on slice parameters
-            # for a similar transform, see itertools.islice
-            start = iterable.start
-            step = iterable.step
-            base = (start, ir.Length(iterable.value), step)
-            if iterble.stop is None:
-                intervals = base,
-            else:
-                intervals = base, (start, iterable.stop, step)
-        else:
-            intervals = (ir.Zero, ir.Length(iterable), ir.One),
-        return intervals
+@singledispatch
+def interval_from_iterable(iterable):
+    msg = f"Cannot retrieve interval from iterable of type {iterable}."
+    raise NotImplementedError(msg)
 
 
-def get_sequence_step(iterable):
-    if isinstance(iterable, ir.Subscript):
-        if isinstance(iterable.slice, ir.Slice):
-            return iterable.slice.step
-    elif isinstance(iterable, ir.AffineSeq):
-        return iterable.step
-    return ir.One
+@interval_from_iterable.register
+def _(iterable: ir.AffineSeq):
+    return (iterable.start, iterable.stop, iterable.step)
+
+
+@interval_from_iterable.register
+def _(iterable: ir.NameRef):
+    return (ir.Zero, ir.Length(iterable), ir.One)
+
+
+@interval_from_iterable.register
+def _(iterable: ir.Subscript):
+    if isinstance(iterable.slice, ir.Slice):
+        slice_ = iterable.slice
+        start = slice_.start if slice_.start is not None else ir.Zero
+        stop = ir.Length(iterable.target)
+        if slice_.stop is not None:
+            stop = ir.Min(stop, slice_.stop)
+        step = slice_.step if slice_.step is not None else ir.One
+    else:
+        start = ir.Zero
+        stop = ir.Length(iterable)
+        step = ir.One
+    return start, stop, step
 
 
 def simplify_spans(spans, non_negative_terms):
@@ -648,7 +634,7 @@ def split_intervals_by_step(intervals):
     return by_step
 
 
-def make_loop_interval(iterables, syms, non_negative_terms):
+def make_loop_interval(iterables, non_negative_terms):
     """
 
     Make loop interval of the form (start, stop, step).
@@ -672,11 +658,10 @@ def make_loop_interval(iterables, syms, non_negative_terms):
     #       and eventually handle reversal.
 
     intervals = set()
-    split_intervals = interval_splitter()
 
     for iterable in iterables:
-        from_iterable = split_intervals(iterable)
-        intervals.update(from_iterable)
+        interval_params = interval_from_iterable(iterable)
+        intervals.update(interval_params)
 
     by_step = split_intervals_by_step(intervals)
 
@@ -722,3 +707,59 @@ def make_loop_interval(iterables, syms, non_negative_terms):
         count = ir.Min(tuple(counts)) if len(counts) != 1 else counts.pop()
         interval = ir.AffineSeq(ir.Zero, count, ir.One)
         return interval
+
+
+def make_loop_assigns(node: ir.ForLoop, interval, loop_index, loop_body_kill_list):
+    index_start, index_stop, index_step = interval
+    stmt_pos = node.pos
+    assigns = []
+    normalized_params = (ir.Zero, ir.One)
+
+    if (index_start, index_step) == normalized_params:
+        # normalized loop indices can pessimize dependence testing, but
+        # we don't use explicit dependence tests here
+        for target, iterable in unpack_iterated(node.target, node.iterable):
+            iter_start, iter_stop, iter_step = interval_from_iterable(iterable)
+            if iter_start == ir.Zero:
+                if iter_step == ir.One:
+                    access_index = loop_index
+                else:
+                    access_index = ir.BinOp(iter_step, loop_index, "*")
+            elif iter_step == ir.One:
+                access_index = ir.BinOp(iter_start, loop_index, "+")
+            else:
+                offset = ir.BinOp(iter_step, loop_index, "*")
+                access_index = ir.BinOp(iter_start, offset, "+")
+    else:
+        # verify that we have matching step
+        for target, iterable in unpack_iterated(node.target, node.iterable):
+            iter_start, iter_stop, iter_step = interval_from_iterable(iterable)
+            # check that interval assumptions hold
+            if iter_step != index_step:
+                msg = f"Internal Error: Non-conforming loop step."
+                raise ValueError(msg)
+            elif iter_start != index_start and index_start != ir.Zero:
+                msg = f"Internal Error: Non-conforming loop start."
+                raise ValueError(msg)
+            access_index = loop_index
+            if iter_start != ir.Zero:
+                access_index = ir.BinOp(access_index, iter_start, "+")
+            if isinstance(iterable, ir.AffineSeq):
+                value = access_index
+            elif isinstance(iterable, ir.Subscript):
+                value = ir.Subscript(iterable.target, access_index)
+            elif isinstance(iterable, ir.NameRef):
+                value = ir.Subscript(iterable, access_index)
+            else:
+                msg = f"Internal Error: Cannot make access function for type {type(iterable)}."
+                raise TypeError(msg)
+            assign = ir.Assign(target, value, pos)
+            assigns.append(assign)
+    return assigns
+
+
+def make_single_index_loop(node: ir.ForLoop, non_negative_scalars):
+    # ignore enumerate indices
+    iterables = {iterable for (_, iterable) in unpack_iterated(node.target, node.iterable, False)}
+    interval = make_loop_interval(iterables, non_negative_scalars)
+    # Now, we need to make access functions.

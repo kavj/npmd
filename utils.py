@@ -147,7 +147,7 @@ def unpack_iterated(target, iterable, include_enumerate_indices=True):
                 if include_enumerate_indices:
                     # enumerate is special, because it doesn't add
                     # constraints
-                    yield sec_target, iterable.start
+                    yield sec_target, ir.AffineSeq(iterable.start, None, ir.One)
             else:
                 msg = f"Enumerate must be unpacked to exactly two targets, received {len(target.elements)}."
                 raise CompilerError(msg)
