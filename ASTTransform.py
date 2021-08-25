@@ -453,7 +453,7 @@ class TreeBuilder(ast.NodeVisitor):
         # additional arithmetic and not all variable types may be fully known
         # at this point.
         try:
-            for target, iterable in unpack_iterated(target_node, iter_node, pos):
+            for target, iterable in unpack_iterated(target_node, iter_node, include_enumerate_indices=True):
                 targets.add(target)
                 iterables.add(iterable)
         except ValueError:

@@ -524,7 +524,7 @@ class arithmetic_folding(ExpressionVisitor):
         return node
 
 
-class interval_splitting(ExpressionVisitor):
+class interval_splitter(ExpressionVisitor):
 
     def __call__(self, expr):
         repl = self.lookup(expr)
@@ -571,126 +571,26 @@ def get_sequence_step(iterable):
     return ir.One
 
 
-def consolidate_spans(spans):
-    """
-    Try to simplify a group of (start, stop) interval expressions.
-    This does not assume that stop - start may be safely computed.
-    compute stop - start.
+def simplify_spans(spans, non_negative_terms):
+    by_stop = defaultdict(set)
 
-    """
-
-    starts = set()
-    stops = set()
     for start, stop in spans:
-        # we ignore anything unbounded
-        # since it doesn't affect iteration count
-        if stop is not None:
-            starts.add(start)
-            stops.add(stop)
+        by_stop[stop].add(start)
 
-    start_count = len(starts)
-    stop_count = len(stops)
+    repl = []
+    seen = set()
 
-    # Check for invalid terms before proceeding.
-    for term in itertools.chain(starts, stops):
-        if term.constant and not isinstance(term, ir.IntConst):
-            msg = f"Non-integral term {term} cannot be used as a range parameter."
-            raise CompilerError(msg)
-
-    # unbounded check
-    if stop_count == 0:
-        return
-
-    if start_count == 1:
-        start, = starts
-        if stop_count == 1:
-            stop, = stops
-        else:
-            stop_reduc = ir.Min(tuple(stops))
-            stop = simplify_commutative_min_max(stop_reduc)
-        reduced = (start, stop),
-
-    elif stop_count == 1:
-        stop, = stops
-        start_reduc = ir.Max(tuple(starts))
-        start = simplify_commutative_min_max(start_reduc)
-        reduced = (start, stop),
-
-    else:
-        reduced = spans
-
-    return reduced
-
-
-def MIN_INT(p: int) -> ir.IntConst:
-    """
-    minimum integer with p bits
-    """
-
-    assert p > 0
-    value = -(2 ** p)
-    return ir.IntConst(value)
-
-
-def MAX_INT(p: int) -> ir.IntConst:
-    """
-    max integer with p bits
-    """
-
-    assert p > 0
-    value = 2 ** p - 1
-    return ir.IntConst(value)
-
-
-class UnsafeArithmeticChecker(ExpressionVisitor):
-    """
-    Checks for definitely overflowing arithmetic.
-    """
-
-    def __init__(self, bitwidth):
-        self.lower = -(bound + 1)
-        self.upper = bound
-        self.folder = const_folding()
-
-    def overflows(self, term):
-        return not (self.lower <= term.value <= self.upper)
-
-    @singledispatchmethod
-    def visit(self, expr):
-        assert isinstance(expr, ir.Expression)
-        return False
-
-    @visit.register
-    def _(self, expr: ir.BinOp):
-        left = self.lookup(expr.left)
-        right = self.lookup(expr.right)
-        if left == True or right == True:
-            # If the operation hasn't been folded at this point an individual
-            # overflowing operand means the whole thing overflows.
-            return True
-        if expr.left.constant and expr.right.constant:
-            # constant with neither term overflowing
-            # If folding throws a compiler error, don't catch it
-            # since the entire thing is unsafe rather than merely
-            # overflowing at current precision.
-            folded = self.folder(expr)
-            if isinstance(folded, ir.IntConst):
-                if self.overflows(folded):
-                    return True
-        return False
-
-    @visit.register
-    def _(self, expr: ir.UnaryOp):
-        # don't catch compiler errors here
-        folded = self.folder(expr)
-        if folded.constant:
-            if isinstance(folded, ir.IntConst):
-                return self.overflows(folded)
-        return False
-
-    @visit.register
-    def _(self, expr: ir.Constant):
-        return self.overflows(expr)
+    for _, stop in spans:
+        if stop not in seen:
+            starts = by_stop[stop]
+            seen.add(stop)
+            if len(starts) == 1:
+                start, = starts
+            else:
+                start = ir.Max(tuple(starts))
+                start = simplify_commutative_min_max(start)
+            repl.append((start, stop))
+    return repl
 
 
 def is_non_negative(expr, non_negative_terms):
@@ -738,30 +638,7 @@ def find_safe_interval_width(a: ir.ValueRef, b: ir.ValueRef, non_negative_terms)
             return ir.BinOp(b, a, "-")
         else:
             return ir.BinOp(ir.Max(b, ir.Zero), a, "-")
-    # Todo: This should return a difference with overflow check expression.
-    return
-
-
-def simplify_spans(spans, non_negative_terms):
-    by_stop = defaultdict(set)
-
-    for start, stop in spans:
-        by_stop[stop].add(start)
-
-    repl = []
-    seen = set()
-
-    for _, stop in spans:
-        if stop not in seen:
-            starts = by_stop[stop]
-            seen.add(stop)
-            if len(starts) == 1:
-                start, = starts
-            else:
-                start = ir.Max(tuple(starts))
-                start = simplify_commutative_min_max(start)
-            repl.append((start, stop))
-    return repl
+    return ir.OFCheckedSub(b, a)
 
 
 def split_intervals_by_step(intervals):
@@ -794,7 +671,7 @@ def make_loop_interval(iterables, syms, non_negative_terms):
     #       and eventually handle reversal.
 
     intervals = set()
-    split_intervals = interval_splitting()
+    split_intervals = interval_splitter()
 
     for iterable in iterables:
         from_iterable = split_intervals(iterable)

@@ -125,13 +125,13 @@ def unpack_assignment(target, value, pos):
         yield target, value
 
 
-def unpack_iterated(target, iterable, pos):
+def unpack_iterated(target, iterable, include_enumerate_indices=True):
     if isinstance(iterable, ir.Zip):
         # must unpack
         if isinstance(target, ir.Tuple):
             if len(target.elements) == len(iterable.elements):
                 for t, v in zip(target.elements, iterable.elements):
-                    yield from unpack_iterated(t, v, pos)
+                    yield from unpack_iterated(t, v)
             else:
                 msg = f"Mismatched unpacking counts for {target} and {iterable}, {len(target.elements)} " \
                       f"and {(len(iterable.elements))}."
@@ -144,7 +144,10 @@ def unpack_iterated(target, iterable, pos):
             if len(target.elements) == 2:
                 first_target, sec_target = target.elements
                 yield first_target, iterable.iterable
-                yield sec_target, iterable.start
+                if include_enumerate_indices:
+                    # enumerate is special, because it doesn't add
+                    # constraints
+                    yield sec_target, iterable.start
             else:
                 msg = f"Enumerate must be unpacked to exactly two targets, received {len(target.elements)}."
                 raise CompilerError(msg)

@@ -85,7 +85,7 @@ class ReachingCheck(StmtVisitor):
     @visit.register
     def _(self, node: ir.ForLoop):
         with self.scoped():
-            for target, value in unpack_iterated(node.target, node.iterable, node.pos):
+            for target, value in unpack_iterated(node.target, node.iterable):
                 self.register_expr_reference(value, node)
                 self.mark_assigned(target)
                 self.register_expr_reference(target, node)
