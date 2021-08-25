@@ -713,10 +713,9 @@ def make_loop_assigns(node: ir.ForLoop, interval, loop_index):
     index_start, index_stop, index_step = interval
     pos = node.pos
     assigns = []
-    normalized_params = (ir.Zero, ir.One)
     simplify_arithmetic = arithmetic_folding()
 
-    if (index_start, index_step) == normalized_params:
+    if (index_start, index_step) == (ir.Zero, ir.One):
         # normalized loop indices can pessimize dependence testing, but
         # we don't use explicit dependence tests here
         for target, iterable in unpack_iterated(node.target, node.iterable):
@@ -724,8 +723,21 @@ def make_loop_assigns(node: ir.ForLoop, interval, loop_index):
             offset = ir.BinOp(loop_index, iter_step, "*")
             expr = ir.BinOp(iter_start, offset,  "+")
             expr = simplify_arithmetic(expr)
+            if isinstance(iterable, ir.Subscript):
+                if isinstance(iterable.slice, ir.Slice):
+                    # this works like itertools.islice in that we
+                    # build an iterator over the sliced region without
+                    # explicitly constructing a slice
+                    expr = ir.Subscript(iterable.target, expr)
+                else:
+                    indices = (iterable.slice, expr)
+                    expr = ir.Subscript(iterable.target, ir.Tuple(indices))
+            elif isinstance(iterable, ir.NameRef):
+                expr = ir.Subscript(iterable, expr)
+            elif not isinstance(iterable, ir.AffineSeq):
+                raise TypeError("Internal Error: unrecognized iterable type.")
             stmt = ir.Assign(target, expr, pos)
-            assigns.append()
+            assigns.append(stmt)
     else:
         # verify that we have matching step
         for target, iterable in unpack_iterated(node.target, node.iterable):
@@ -743,9 +755,15 @@ def make_loop_assigns(node: ir.ForLoop, interval, loop_index):
                 value = access_func
             elif isinstance(iterable, ir.Subscript):
                 if isinstance(iterable.slice, ir.Slice):
-                    pass
-                else:
+                    # if we reach this point, the step used by the loop
+                    # index should match iterable.slice.step
+                    assert iterable.slice.step == index_step
                     value = ir.Subscript(iterable.target, access_index)
+                else:
+                    # scalar subscript means we're iterating over the second dim
+                    # rather than the leading one
+                    indices = (iterable.slice, access_index)
+                    value = ir.Subscript(iterable.target, ir.Tuple(indices))
             elif isinstance(iterable, ir.NameRef):
                 value = ir.Subscript(iterable, access_index)
             else:
