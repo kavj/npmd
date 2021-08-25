@@ -693,7 +693,21 @@ class UnsafeArithmeticChecker(ExpressionVisitor):
         return self.overflows(expr)
 
 
-def may_compute_interval_width(a: ir.ValueRef, b: ir.ValueRef) -> typing.Union[bool, ir.ValueRef]:
+def is_non_negative(expr, non_negative_terms):
+    """
+    check for non-negative expressions, strictly intended for finite arithmetic.
+
+    """
+    if expr.constant:
+        return operator.ge(expr.value, 0)
+    elif expr in non_negative_terms:
+        return True
+    elif isinstance(expr, ir.Max):
+        return any(is_non_negative(subexpr, non_negative_terms) for subexpr in expr.subexprs)
+    return False
+
+
+def find_safe_interval_width(a: ir.ValueRef, b: ir.ValueRef, non_negative_terms) -> typing.Union[bool, ir.ValueRef]:
     """
 
     for a half-open interval [a, b)
@@ -711,22 +725,21 @@ def may_compute_interval_width(a: ir.ValueRef, b: ir.ValueRef) -> typing.Union[b
 
     """
 
-    if a.constant and b.constant:
-        return True
-
-    elif a.constant:
-        return operator.ge(a.value, 0)
-
-    elif isinstance(a, ir.Max):
-        # any non-zero interval
-        for subexpr in a.subexprs:
-            if subexpr.constant:
-                # check for forward step interval with
-                # a non-negative lower bound
-                if operator.ge(subexpr.value, 0):
-                    return True
-
-    return False
+    if a.constant:
+        if b.constant:
+            return wrap_constant(operator.sub(b.value, a.value))
+        elif is_non_negative(b, non_negative_terms):
+            return ir.BinOp(b, a, "-")
+        else:
+            return ir.BinOp(ir.Max(b, ir.Zero), a, "-")
+    elif is_non_negative(a, non_negative_terms):
+        # symbolic but strictly non-negative
+        if is_non_negative(b, non_negative_terms):
+            return ir.BinOp(b, a, "-")
+        else:
+            return ir.BinOp(ir.Max(b, ir.Zero), a, "-")
+    # Todo: This should return a difference with overflow check expression.
+    return
 
 
 def simplify_spans(spans, non_negative_terms):
@@ -751,14 +764,6 @@ def simplify_spans(spans, non_negative_terms):
     return repl
 
 
-def is_safe_to_compute_interval_widths(spans, non_negative_terms):
-    for start, stop in spans:
-        if isinstance(start, ir.Max):
-            if not any(s in non_negative_terms for s in start.subexprs):
-                return False
-    return True
-
-
 def split_intervals_by_step(intervals):
     by_step = defaultdict(set)
     for start, stop, step in intervals:
@@ -768,6 +773,12 @@ def split_intervals_by_step(intervals):
 
 def make_loop_interval(iterables, syms, non_negative_terms):
     """
+
+    Make loop interval of the form (start, stop, step).
+
+    This tries to find a safe method of calculation.
+    It's probably worth forcing loops into countable range, but
+    this would mean some of them require instrumentation.
 
     References:
         LIVINSKII et. al, Random Testing for C and C++ Compilers with YARPGen
@@ -819,20 +830,14 @@ def make_loop_interval(iterables, syms, non_negative_terms):
             diffs = []
             for start, stop in spans:
                 diffs.append(ir.BinOp(stop, start, "-"))
-            if len(diffs) == 1:
-                diff = diffs.pop()
-            else:
-                diff = ir.Min(tuple(diffs))
 
+            diff = ir.Min(tuple(diffs)) if len(diffs) != 1 else diffs.pop()
             base_count = ir.BinOp(diff, step, "//")
             test = ir.BinOp(diff, step, "%")
             fringe = ir.Ternary(test, ir.One, ir.Zero)
             count = ir.BinOp(base_count, fringe, "+")
             counts.append(count)
 
-        if len(counts) == 1:
-            count = counts.pop()
-        else:
-            count = ir.Min(tuple(counts))
+        count = ir.Min(tuple(counts)) if len(counts) != 1 else counts.pop()
         interval = ir.AffineSeq(ir.Zero, count, ir.One)
         return interval
