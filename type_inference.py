@@ -1,5 +1,6 @@
 import itertools
 import textwrap
+import typing
 
 from collections import defaultdict
 from contextlib import contextmanager
@@ -76,7 +77,7 @@ class ExprInfer(ExpressionVisitor):
         super().visit(node)
 
     @visit.register
-    def _(self, node: ir.BinOp):
+    def _(self, node: ir.BinOp) -> typing.Tuple:
         # no caching since they may change
         left = self.visit(node.left)
         right = self.visit(node.right)
@@ -99,7 +100,7 @@ class ExprInfer(ExpressionVisitor):
                   f"{formatted_sigs}."
             msg = textwrap.wrap(msg)
             raise CompilerError(msg)
-        return possible_types
+        return tuple(possible_types.keys())
 
 
 class TypingVisitor(StmtVisitor):
