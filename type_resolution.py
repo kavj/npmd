@@ -260,3 +260,41 @@ dispatch = {
     "&=": bitwise_inplace_dispatch,
     "^=": bitwise_inplace_dispatch,
 }
+
+
+def truth_type_from_type(base_type):
+    """
+    Truth cast interned type to interned truth type.
+    """
+    assert isinstance(base_type, ir.ScalarType)
+    if base_type.bits == 32:
+        return Predicate32 if base_type.integral else FPredicate32
+    elif base_type.bits == 64:
+        return FPredicate32 if base_type.integral else FPredicate64
+    else:
+        msg = f"Unknown type {base_type}."
+        raise ValueError(msg)
+
+
+def type_from_spec(bit_width, is_integral, is_boolean):
+    """
+    Return a type object from interned types.
+    """
+    if bit_width == 8:
+        if is_integral:
+            if is_boolean:
+                return BoolType
+        msg = "The only currently supported 8 bit format is integer boolean."
+        raise ValueError(msg)
+    if bit_width not in (32, 64):
+        msg = "Only 32 and 64 bit numeric data types are supported."
+        raise ValueError(msg)
+    if is_integral:
+        if bit_width == 64:
+            return Predicate64 if is_boolean else Int64
+        else:
+            return Predicate32 if is_boolean else Int32
+    elif bit_width == 64:
+        return FPredicate64 if is_boolean else Float64
+    else:
+        return FPredicate32 if is_boolean else Float32

@@ -15,7 +15,7 @@ from errors import CompilerError
 from visitor import StmtVisitor, ExpressionVisitor
 
 
-class ExprInfer(ExpressionVisitor):
+class ExprTypeInfer(ExpressionVisitor):
     """
     Intentionally basic implementation of the Cartesian Product Algorithm.
 
@@ -44,10 +44,9 @@ class ExprInfer(ExpressionVisitor):
 
     """
 
-    def __init__(self, types, disallowed):
+    def __init__(self, types):
         # types updated externally
         self._types = types
-        self._disallowed = disallowed
         # track what exprs use each parameter and vice-versa, so as to cascade updates
         # so we really need an ordered set here for safe dependency ordering
         # for now, try using ordered properties of dictionary key insertions in recent python versions
@@ -70,7 +69,7 @@ class ExprInfer(ExpressionVisitor):
                 api_sig.append(api_type)
             api_sigs.append(api_sig)
         formatted_sigs = ", ".join(str(sig) for sig in api_sigs)
-        return expr, formatted_sigs
+        return formatted_expr, formatted_sigs
 
     @singledispatchmethod
     def visit(self, node):
@@ -83,13 +82,11 @@ class ExprInfer(ExpressionVisitor):
         right = self.visit(node.right)
         possible_types = defaultdict(set)
         candidates = []
-        disallowed = self._disallowed.get(node, ())
         for pair in itertools.product(left, right):
             candidates.append(pair)
             match = tr.binops_dispatch.get(pair)
             if match is not None:
-                if match not in disallowed:
-                    possible_types[match].add(pair)
+                possible_types[match].add(pair)
         # error if no signature is feasible
         if len(possible_types) != 0:
             self._types[node] = possible_types
@@ -102,19 +99,51 @@ class ExprInfer(ExpressionVisitor):
             raise CompilerError(msg)
         return tuple(possible_types.keys())
 
+    @visit.register
+    def _(self, node: ir.UnaryOp):
+        return self.visit(node.operand)
 
-class TypingVisitor(StmtVisitor):
+    @visit.register
+    def _(self, node: ir.CompareOp):
+        # Todo: currently assumes all scalar types... need to generalize
+        left = self.visit(node.left)
+        right = self.visit(node.right)
+        bit_width = max(left.bits, right.bits)
+        is_integral = left.integral and right.integral
+        is_boolean = True
+        return tr.type_from_spec(bit_width, is_integral, is_boolean)
+
+    @visit.register
+    def _(self, node: ir.BoolOp):
+        max_bit_width = 0
+        is_integral = True
+        is_boolean = True
+        for operand in node.subexprs:
+            t = self.visit(operand)
+            is_integral &= t.is_integral
+            max_bit_width = max(max_bit_width, t.bits)
+        return tr.type_from_spec(max_bit_width, is_integral, is_boolean)
+
+
+class TypeAssign(StmtVisitor):
 
     def __init__(self, types):
         self.assigned = []
         self.types = types
+        self.loop = None
 
     def __call__(self, types):
         pass
 
     @contextmanager
-    def flow_region(self):
-        pass
+    def enclosing_loop(self, header):
+        assert isinstance(header, (ir.ForLoop, ir.WhileLoop))
+        stashed = self.loop
+        self.loop = header
+        yield
+        enclosing = self.loop
+        assert enclosing is header
+        self.loop = stashed
 
     @singledispatchmethod
     def visit(self, stmt):
@@ -125,7 +154,9 @@ class TypingVisitor(StmtVisitor):
     @visit.register
     def _(self, stmt: ir.Assign):
         # If name target, check type of rhs
-        pass
+        if isinstance(stmt.target, ir.NameRef):
+            value_type = self.visit(stmt.value)
+            self.types[stmt.target].add(value_type)
 
     @visit.register
     def _(self, stmt: ir.ForLoop):
