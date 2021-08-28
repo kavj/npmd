@@ -192,9 +192,9 @@ class CCodeGen(StmtVisitor):
             step_expr = f"{target} += {increm_by}"
         start = self.format(node.iterable.start)
         stop = self.format(node.iterable.stop)
-        stmt = f"for({target} = {start}; {target} < {stop}; {step_expr}"
+        stmt = f"for({target} = {start}; {target} < {stop}; {step_expr}){'{'}"
         self.print_line(stmt)
-
         with self.scoping():
             self.visit(node.body)
+        self.print_line("}")
 
