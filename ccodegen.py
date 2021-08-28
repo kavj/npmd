@@ -5,9 +5,9 @@ from functools import singledispatchmethod
 
 import ir
 from errors import CompilerError
-from pretty_printing import pretty_formatter
+from pretty_printing import pretty_formatter, binop_ordering
 from type_inference import ExprTypeInfer
-from visitor import StmtVisitor
+from visitor import StmtVisitor, ExpressionVisitor
 
 """
 
@@ -20,68 +20,13 @@ At this point, statements are serialized to the level expected by C code.
 """
 
 
-class ctx:
+class CTypeResolver:
 
-    def __init__(self, uniform, decl_map, type_mapping, lltype_mapping):
-        self.uniform_vars = uniform           # call invariant
-        self.decl_map = decl_map              # indicates where variable names must be declared
-        self.unique_call_names = set()        # qualified call names
-        self.type_mapping = type_mapping      # type -> {vars of this type}
-        self.lltype_mapping = lltype_mapping  # type -> {back end type}
+    # Take type from context, map to C data type.
+    # must handle simd types
 
-    def get_req_headers(self):
-        pass
-
-    def get_raw_array_pointer_name(self, basetype):
-        # move inside a class
-        t = basetype.dtype if isinstance(basetype, (ir.ArrayRef, ir.ViewRef)) else basetype
-        return self.lltype_mapping.get(t)
-
-    def get_raw_scalar_name(self, basetype):
-        return self.lltype_mapping.get(basetype)
-
-
-def extract_leading_dim(array):
-    return array.dims[0]
-
-
-def enter_for_loop(header: ir.ForLoop, lltypes):
-    loop_index = header.target
-    counter = header.iterable
-    # we'll need to add the exception code for illegal (here) step
-    if counter.reversed:
-        end_expr = ">"
-        if counter.step == ir.One:
-            step_expr = f"--{loop_index}"
-        else:
-            step_expr = f"{loop_index} -= {counter.step}"
-    else:
-        end_expr = "<"
-        if counter.step == ir.One:
-            step_expr = f"++{loop_index}"
-        else:
-            step_expr = f"{loop_index} += {counter.step}"
-
-    return f"for({str(lltypes[loop_index])} {loop_index.name} = {counter.start}; {loop_index} {end_expr}" \
-           f" {counter.stop}; {step_expr})"
-
-
-def generate_expression(expr):
-    return
-
-
-def enter_while_loop(header: ir.WhileLoop):
-    return f"while({generate_expression(header.test)})"
-
-
-class code_generator:
-    encoding: None
-    indent: str
-    decls: set
-    type_map: dict
-
-    def print(self):
-        pass
+    def __init__(self, ctx):
+        self.ctx = ctx
 
 
 class CodeEmitter:
@@ -117,16 +62,29 @@ class CodeEmitter:
         print(line, file=self.dest)
 
 
+class ExpressionResolver(ExpressionVisitor):
+    # resolve expression, given operands
+    # this is needed as simd types don't reliably
+    # work with arithmetic operators, across all compilers.
+
+    # This also needs to deal with adding parentheses
+    # maybe refactor from pretty_printing or import from it.
+
+    @singledispatchmethod
+    def visit(self, expr):
+        raise NotImplementedError
+
+
 class CCodeGen(StmtVisitor):
 
     # This is meant to be controlled by a codegen driver,
     # which manages opening/closing of a real or virtual destination file.
 
-    def __init__(self, ctx):
+    def __init__(self, ctx, dest):
         self.ctx = ctx
         self.infer_expr_type = ExprTypeInfer(self.ctx.types)
         self.format = pretty_formatter()
-        self.printer = CodeEmitter()
+        self.printer = CodeEmitter(ctx, dest)
 
     @contextmanager
     def function_context(self):
@@ -144,8 +102,14 @@ class CCodeGen(StmtVisitor):
     def print_line(self, stmt):
         self.printer.print_line(stmt)
 
+    def else_is_elif(self, stmt: ir.IfElse):
+        if len(stmt.else_branch) == 1:
+            if isinstance(stmt.else_branch[0], ir.IfElse):
+                return True
+        return False
+
     @contextmanager
-    def scoping(self):
+    def indented(self):
         with self.printer.indented():
             yield
 
@@ -171,6 +135,35 @@ class CCodeGen(StmtVisitor):
             raise NotImplementedError
         self.print_line(stmt)
 
+    def visit_elif(self, node: ir.IfElse):
+        test = self.visit(node.test)
+        branch_head = f"else if({test}){'{'}"
+        self.print_line(branch_head)
+        with self.indented():
+            self.visit(node.if_branch)
+        self.print_line("}")
+        self.visit_else_branch(node.else_branch)
+
+    def visit_else_branch(self, stmts: list):
+        num_stmts = len(stmts)
+        if num_stmts == 1 and isinstance(stmts[0], ir.IfElse):
+            self.visit_elif(stmts[0])
+        elif num_stmts > 0:
+            self.print_line("else{")
+            with self.indented():
+                self.visit(stmts)
+            self.print_line("}")
+
+    @visit.register
+    def _(self, node: ir.IfElse):
+        test = self.visit(node.test)
+        branch_head = f"if({test}){'{'}"
+        self.print_line(branch_head)
+        with self.indented():
+            self.visit(node.if_branch)
+        self.print_line("}")
+        self.visit_else_branch(node.else_branch)
+
     @visit.register
     def _(self, node: ir.ForLoop):
         # Printing is more restrictive, check that
@@ -194,7 +187,6 @@ class CCodeGen(StmtVisitor):
         stop = self.format(node.iterable.stop)
         stmt = f"for({target} = {start}; {target} < {stop}; {step_expr}){'{'}"
         self.print_line(stmt)
-        with self.scoping():
+        with self.indented():
             self.visit(node.body)
         self.print_line("}")
-
