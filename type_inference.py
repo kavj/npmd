@@ -110,6 +110,7 @@ class ExprTypeInfer(ExpressionVisitor):
         right = self.visit(node.right)
         output_types = []
         for ltype, rtype in itertools.product(left, right):
+            output_types.append(tr.merge_truth_types((ltype, rtype)))
             max_bit_width = max(ltype.bits, rtype.bits)
             is_integral = ltype.integral and rtype.integral
             t = tr.type_from_spec(max_bit_width, is_integral, is_boolean=True)
@@ -120,13 +121,8 @@ class ExprTypeInfer(ExpressionVisitor):
     def _(self, node: ir.BoolOp):
         input_types = [self.visit(operand) for operand in node.subexprs]
         output_types = []
-        for seq in itertools.product(*input_types):
-            max_bit_width = 0
-            is_integral = True
-            for t in seq:
-                is_integral &= t.is_integral
-                max_bit_width = max(max_bit_width, t.bits)
-            output_types.append(tr.type_from_spec(max_bit_width, is_integral, is_boolean=True))
+        for types in itertools.product(*input_types):
+            output_types.append(tr.merge_truth_types(types))
         return tuple(output_types)
 
 
