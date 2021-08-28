@@ -18,20 +18,14 @@ from visitor import StmtVisitor, ExpressionVisitor
 class ExprTypeInfer(ExpressionVisitor):
     """
     Intentionally basic implementation of the Cartesian Product Algorithm.
+    Everything eventually has to be resolvable to a fixed data type without promoting
+    non-constant integers to floating point values or similar.
 
-    The reasoning here is pretty simple.
-    Some cases, such as constants may be slightly ambiguous.
-
-    For example, to initialize a variable "a" to 1, most people would write
-    "a = 1", without considering whether it should be an integer or floating point value.
-    Allowing parametric polymorphism here via argument templating further complicates this,
-    as it reduces the cases where type annotations or typing "a = 1.0" for floating point values
-    would fix this.
-
-    Instead, we want to check that for any tuple of arguments formed from possible argument types,
-    the resulting expression has an unambiguous type.
-
-    As an example
+    As an example, most people will initialize "a" to "1" this way regardless of whether "a"
+    is used as an integer or floating point type past that point. In spite of this, the type of "c"
+    is unambiguous. In that sense, it should be okay to allow the use of a product like this as long
+    as it doesn't introduce type ambiguity into any downstream use, with use determined by variable name,
+    rather than explicit dataflow analysis.
 
     a = 1     # possible types (int, float)
     b = 2.5   # possible types (float)
@@ -150,8 +144,6 @@ class TypeAssign(StmtVisitor):
     def visit(self, stmt):
         return super().visit(stmt)
 
-    # Do functions belong here?
-
     @visit.register
     def _(self, stmt: ir.Assign):
         # If name target, check type of rhs
@@ -169,7 +161,10 @@ class TypeAssign(StmtVisitor):
     def _(self, stmt: ir.IfElse):
         test_type = self.visit(stmt.test)
         try:
-            truth_type = tr.truth_type_from_type(test_type)
+            # Todo: This could return None on no type match,
+            #   since the function is too low level to
+            #   produce meaningful error messages.
+            tr.truth_type_from_type(test_type)
         except TypeError:
             interface_type = pp.get_pretty_type(test_type)
             msg = f"Cannot truth cast {interface_type}."

@@ -1,10 +1,12 @@
-import ctypes
-import numpy as np
+import textwrap
 
 from contextlib import contextmanager
 from functools import singledispatchmethod
 
 import ir
+from errors import CompilerError
+from pretty_printing import pretty_formatter
+from type_inference import ExprTypeInfer
 from visitor import StmtVisitor
 
 """
@@ -16,42 +18,6 @@ This still needs a customized visitor to generate statements.
 At this point, statements are serialized to the level expected by C code.
 
 """
-
-
-class Typer:
-
-    def __init__(self, scalar_types, array_types, simd_types):
-        self.scalar_types = scalar_types
-        self.array_types = array_types
-        self.simd_types = simd_types
-
-
-def check_branch_assigns():
-    """
-    Find values assigned prior to being read on both sides of a branch.
-
-    """
-    pass
-
-
-def build_lltypes():
-    # bool is malleable, we may cast it implicitly
-    lltypes = {bool: "bool"}
-
-    # we don't have a ctypes type for int
-    # It's generally 2s complement and 4 bytes. Any exceptions need
-    # to be tracked according to the type returned by sys.system or similar
-    for t, sz in ((np.int32, 4), (np.int64, 8)):
-        if ctypes.sizeof(ctypes.c_long) == sz:
-            lltypes[t] = "long"
-        elif ctypes.sizeof(ctypes.c_longlong) == sz:
-            lltypes[t] = "long long"
-    for t, sz in ((np.float32, 4), (np.float64, 8)):
-        if ctypes.sizeof(ctypes.c_float) == sz:
-            lltypes[t] = "float"
-        elif ctypes.sizeof(ctypes.c_double) == sz:
-            lltypes[t] = "double"
-    return lltypes
 
 
 class ctx:
@@ -73,14 +39,6 @@ class ctx:
 
     def get_raw_scalar_name(self, basetype):
         return self.lltype_mapping.get(basetype)
-
-
-def enter_func(func, lltypes, return_type):
-    # func_name = extract_name(func.name)
-    rt = lltypes.get(return_type)
-    # assert rt is not None
-    # args = (f"{lltypes[arg]} {extract_name(arg)}" for arg in func.args)
-    # return f"{rt} {func_name} ({', '.join(arg for arg in args)})"
 
 
 def extract_leading_dim(array):
@@ -126,72 +84,117 @@ class code_generator:
         pass
 
 
-class indent_manager(ContextDecorator):
-    # tracks indentation
-    pass
+class CodeEmitter:
+
+    indent_type = "    "
+
+    def __init__(self, context, file, indent="    ", max_line_width=70):
+        self.ctx = context
+        self.file = file
+        self.indent = ""
+        self.single_indent = indent
+        self.max_line_width = max_line_width
+        self.tree = None
+        self.dest = None
+
+    def __call__(self, tree, dest):
+        # Todo: work these into context manager
+        self.tree = tree
+        self.dest = dest
+
+    @contextmanager
+    def indented(self):
+        indent_len = len(self.indent)
+        char_count = len(self.single_indent)
+        self.indent = f"{self.indent}{self.single_indent}"
+        yield
+        self.indent = self.indent[:-char_count]
+        if indent_len != len(self.indent):
+            raise RuntimeError
+
+    def print_line(self, line):
+        line = textwrap.wrap(line, width=self.max_line_width)
+        print(line, file=self.dest)
 
 
-class string_builder:
-    # should maybe be a base class
-    def __init__(self, types, encoding, linewrap=True, indent="    ", indent_level=0):
-        self.encoding = encoding
-        self.types = types
-        self.linewrap = linewrap
-        self.indent = indent
-        self.indent_level = indent_level
-        self.prefix = self.indent
+class CCodeGen(StmtVisitor):
 
-    def build_declarations(self):
-        # used to build declarations for all existing types at this point
-        decls = []
-        for t, names in self.types.items():
-            decls.append(f"{str(t)} {', '.join(name for name in names)};\n")
-        return decls
+    # This is meant to be controlled by a codegen driver,
+    # which manages opening/closing of a real or virtual destination file.
 
-    def print(self, stmt):
-        pass
+    def __init__(self, ctx):
+        self.ctx = ctx
+        self.infer_expr_type = ExprTypeInfer(self.ctx.types)
+        self.format = pretty_formatter()
+        self.printer = CodeEmitter()
 
-    @singledispatchmethod
-    def build_string(self, node, *args):
-        raise NotImplementedError
+    @contextmanager
+    def function_context(self):
+        # This should load function specific types from module
+        # context and set up variables
+        yield
 
+    def __call__(self, func: ir.Function):
+        self.declared = set()
+        self.visit(func)
 
-class scope_entry(ContextDecorator):
-    def __init__(self):
-        pass
+    def retrieve_type(self, ref):
+        return self.ctx.retrieve_type(ref)
 
-    def __enter__(self):
-        pass
+    def print_line(self, stmt):
+        self.printer.print_line(stmt)
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        pass
-
-
-class LoweringBuilder(StmtVisitor):
-
-    def __call__(self, entry, ctx_):
-        self.context = ctx_
+    @contextmanager
+    def scoping(self):
+        with self.printer.indented():
+            yield
 
     @singledispatchmethod
     def visit(self, node):
-        super().visit(node)
+        raise NotImplementedError
+
+    @visit.register
+    def _(self, node: ir.Assign):
+        # check types
+        rhs_type = self.retrieve_type(node.value)
+        lhs_type = self.retrieve_type(node.target)
+        if lhs_type != rhs_type:
+            raise CompilerError
+
+        target = self.format(node.target)
+        value = self.format(node.value)
+        if node.target in self.declared:
+            stmt = f"{target} = {value};"
+        else:
+            # Todo: declaration needs to obtain a
+            #     corresponding destination language type, in this case C.
+            raise NotImplementedError
+        self.print_line(stmt)
 
     @visit.register
     def _(self, node: ir.ForLoop):
-        pass
-        # bounds = lower_for_loop_header_bounds(node, self.ctx.symbols)
+        # Printing is more restrictive, check that
+        # we have a supported loop structure
+        assert isinstance(node.target, ir.NameRef)
+        assert isinstance(node.iterable, (ir.AffineSeq, ir.Reversed))
+        # check for unit step
+        if node.target in self.declared:
+            pass
+        else:
+            pass
+        # check whether we can use ++ op
+        # insufficient support for reversed() thus far.
+        target = self.format(node.target)
+        if node.iterable.step == ir.One:
+            step_expr = f"++{target}"
+        else:
+            increm_by = self.format(node.iterable.step)
+            step_expr = f"{target} += {increm_by}"
+        start = self.format(node.iterable.start)
+        stop = self.format(node.iterable.stop)
+        stmt = f"for({target} = {start}; {target} < {stop}; {step_expr}"
+        self.print_line(stmt)
 
-    @visit.register
-    def _(self, node: list):
-        repl = []
-        for stmt in node:
-            if isinstance(stmt, ir.ForLoop):
-                pass
-                # bounds = lower_for_loop_header_bounds(node, self.ctx.symbols)
-                loop_index = self.context.make_unique_name()
-                # These are all affine statements, thus simple
-                # entry_prologue = lower_iterator_access_funcs(stmt, loop_index)
-                # body = self.visit(stmt.body)
-                # header = ir.ForLoop([(loop_index, bounds)], body, stmt.pos)
-                # repl.append(header)
-            # elif isinstance()
+        with self.scoping():
+            self.visit(node.body)
+

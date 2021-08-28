@@ -79,6 +79,19 @@ class StmtBase:
     pos = None
 
 
+@dataclass(frozen=True)
+class VarDecl(StmtBase):
+    """
+    Variable declaration without explicit assignment.
+    This is a visibility hint for code gen to address a few edge cases, such as
+    variables that are bound on both sides of an "if else" branch statement, yet
+    possibly unbound before it.
+    """
+    name: NameRef
+    type: typing.Any
+    pos: Position
+
+
 Statement = typing.TypeVar('Statement', bound=StmtBase)
 
 
