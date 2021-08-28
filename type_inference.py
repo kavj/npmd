@@ -108,21 +108,26 @@ class ExprTypeInfer(ExpressionVisitor):
         # Todo: currently assumes all scalar types... need to generalize
         left = self.visit(node.left)
         right = self.visit(node.right)
-        bit_width = max(left.bits, right.bits)
-        is_integral = left.integral and right.integral
-        is_boolean = True
-        return tr.type_from_spec(bit_width, is_integral, is_boolean)
+        output_types = []
+        for ltype, rtype in itertools.product(left, right):
+            max_bit_width = max(ltype.bits, rtype.bits)
+            is_integral = ltype.integral and rtype.integral
+            t = tr.type_from_spec(max_bit_width, is_integral, is_boolean=True)
+            output_types.append(t)
+        return tuple(output_types)
 
     @visit.register
     def _(self, node: ir.BoolOp):
-        max_bit_width = 0
-        is_integral = True
-        is_boolean = True
-        for operand in node.subexprs:
-            t = self.visit(operand)
-            is_integral &= t.is_integral
-            max_bit_width = max(max_bit_width, t.bits)
-        return tr.type_from_spec(max_bit_width, is_integral, is_boolean)
+        input_types = [self.visit(operand) for operand in node.subexprs]
+        output_types = []
+        for seq in itertools.product(*input_types):
+            max_bit_width = 0
+            is_integral = True
+            for t in seq:
+                is_integral &= t.is_integral
+                max_bit_width = max(max_bit_width, t.bits)
+            output_types.append(tr.type_from_spec(max_bit_width, is_integral, is_boolean=True))
+        return tuple(output_types)
 
 
 class TypeAssign(StmtVisitor):
@@ -163,3 +168,15 @@ class TypeAssign(StmtVisitor):
         # check target assignments, update mapping
         # for nameref targets
         pass
+
+    @visit.register
+    def _(self, stmt: ir.IfElse):
+        test_type = self.visit(stmt.test)
+        try:
+            truth_type = tr.truth_type_from_type(test_type)
+        except TypeError:
+            interface_type = pp.get_pretty_type(test_type)
+            msg = f"Cannot truth cast {interface_type}."
+            raise CompilerError(msg)
+        self.visit(stmt.if_branch)
+        self.visit(stmt.else_branch)
