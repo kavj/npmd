@@ -75,7 +75,7 @@ class CompilerContext:
     def run_pipeline(self, file_name, type_map):
 
         with module_context():
-            module, symbols = parse_file(file_name, type_map)
+            module, symbols = parse_file(file_name)
 
             funcs = module.functions
 

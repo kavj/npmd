@@ -66,19 +66,6 @@ class CodeEmitter:
         print(line, file=self.dest)
 
 
-class ExpressionResolver(ExpressionVisitor):
-    # resolve expression, given operands
-    # this is needed as simd types don't reliably
-    # work with arithmetic operators, across all compilers.
-
-    # This also needs to deal with adding parentheses
-    # maybe refactor from pretty_printing or import from it.
-
-    @singledispatchmethod
-    def visit(self, expr):
-        raise NotImplementedError
-
-
 def else_is_elif(stmt: ir.IfElse):
     if len(stmt.else_branch) == 1:
         if isinstance(stmt.else_branch[0], ir.IfElse):
@@ -154,7 +141,8 @@ class CCodeGen(StmtVisitor):
         rhs_type = self.check_type(node.value)
         lhs_type = self.check_type(node.target)
         if lhs_type != rhs_type:
-            raise CompilerError
+            msg = f"Cannot cast type {rhs_type} to type {lhs_type} on assignment: line {node.pos.line_begin}."
+            raise CompilerError(msg)
 
         target = self.format(node.target)
         value = self.format(node.value)
@@ -164,6 +152,9 @@ class CCodeGen(StmtVisitor):
         #    unless the use of restrict or __restrict__ becomes necessary
         #    (supported on all compilers that compile CPython).
         if isinstance(node.target, ir.NameRef) and node.target not in self.declared:
+            if node.in_place:
+                msg = f"Inplace assignment cannot be performed against unbound variables, line: {node.pos.line_begin}."
+                raise CompilerError(msg)
             # For now, assume C99 back end,
             # compliant with PEP 7
             type_ = self.ctx.get_type(target)
