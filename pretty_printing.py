@@ -1,5 +1,6 @@
 from functools import singledispatchmethod
 from contextlib import contextmanager
+from itertools import islice
 
 import ir
 import type_resolution as tr
@@ -12,6 +13,10 @@ binop_ordering = {"**": 1, "*": 3, "@": 3, "/": 3, "//": 3, "%": 3, "+": 4, "-":
                   "==": 9}
 
 # Todo: Given the boolean refactoring, not should probably derive from BoolOp, similar to TRUTH.
+
+# Todo: Pretty printer should provide most of the infrastructure for C code gen. For plain C, most of the statement
+#       structure used is the same, so this should be handled as much as posible via different expression visitors.
+#       I'll also need to check for differences in operator precedence.
 
 # Note, python docs don't specify truth precedence, but it should match logical "not"
 
@@ -146,13 +151,46 @@ class pretty_formatter:
 
     @visit.register
     def _(self, node: ir.AND):
+        groups = []
+        start = 0
+        count = len(node.operands)
+        assert count > 1
+        while start < count:
+            # group things like a < b < c
+            # whether they arose from ir changes or input source
+            first = node.operands[0]
+            if isinstance(first, ir.CompareOp):
+                cmp_op = first.op
+                group = [first.left, first.right]
+                prev_rhs = first.right
+                for operand in islice(node.operands, start+1, None):
+                    if not (isinstance(operand, ir.CompareOp) and cmp_op == operand.op and operand.left == prev_rhs):
+                        break
+                    group.append(operand.right)
+                    prev_rhs = operand.right
+                groups.append((group, cmp_op))
+                start += len(group) - 1
+            else:
+                # something else, anded
+                cmp_op = None
+                groups.append((first, cmp_op))
+                start += 1
         operands = []
-        for operand in node.operands:
-            formatted = self.visit(operand)
-            if isinstance(operand, (ir.AND, ir.OR, ir.Ternary, ir.Tuple)):
-                formatted = parenthesized(formatted)
-            operands.append(formatted)
-        expr = " and ".join(operand for operand in operands)
+        expr = None
+        for group, cmp_op in groups:
+            if cmp_op is not None:
+                op = f" {cmp_op} "
+                chain = op.join(self.visit(suboperand) for suboperand in group)
+                operands.append(chain)
+            else:
+                # single expression
+                assert isinstance(group, ir.ValueRef)
+                formatted = self.visit(group)
+                if isinstance(group, (ir.AND, ir.OR, ir.Ternary, ir.Tuple)):
+                    formatted = parenthesized(formatted)
+                operands.append(formatted)
+            expr = "and ".join(operand for operand in operands)
+        assert expr is not None
         return expr
 
     @visit.register

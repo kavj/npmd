@@ -7,9 +7,11 @@ import numpy as np
 import ir
 import type_resolution as tr
 from ASTTransform import parse_file
+from canonicalize import NormalizePaths
+from reaching_check import ReachingCheck
 from dataclasses import dataclass
 from errors import module_context
-from symbol_table import wrap_input
+from utils import wrap_input
 from pretty_printing import pretty_printer
 
 
@@ -26,8 +28,7 @@ class ArrayArg(ir.ValueRef):
     Array argument. This ensures reaching definitions of array
     parameters are unambiguous.
     """
-    dims: typing.Tuple[typing.Union[ir.NameRef, ir.IntConst], ...]
-    dtype: typing.Hashable
+    spec: ir.ArrayInitSpec
     stride: typing.Optional[typing.Union[ir.NameRef, ir.IntConst]]
 
 
@@ -55,20 +56,21 @@ def make_array_arg_type(dims, dtype, stride=None):
     dims = tuple(wrap_input(d) for d in dims)
     if stride is not None:
         stride = wrap_input(stride)
-    return ArrayArg(dims, dtype, stride)
+    spec = ir.ArrayInitSpec(dims, dtype, fill_value=None)
+    return ArrayArg(spec, stride)
 
 
 class CompilerContext:
 
-    stages = []
+    stages = [NormalizePaths, ReachingCheck]
     pretty_print = pretty_printer()
 
-    def __init__(self, verbose=False, pretty_print_ir=False, pipeline=None):
+    def __init__(self, verbose=False, pretty_print_ir=False):
         self.verbose = verbose
         self.pretty_print_ir_stages = pretty_print_ir
-        if pipeline is None:
-            pipeline = [stage() for stage in CompilerContext.stages]
-        self.pipeline = pipeline
+        self.normalize_paths = NormalizePaths()
+        self.reaching_check = ReachingCheck()
+        self.pretty_print = pretty_printer()
 
     def run_pipeline(self, file_name, type_map):
 
@@ -79,14 +81,13 @@ class CompilerContext:
 
             if self.pretty_print_ir_stages:
                 print(f"file name: {file_name}\n")
-            for func in funcs:
+            for index, func in enumerate(funcs):
                 if self.pretty_print_ir_stages:
                     print(f"function: func.name\n")
-                table = symbols[func.name]
-                for stage in self.stages:
-                    func = stage(func, table)
-                    if self.pretty_print_ir_stages:
-                        self.pretty_print(func, symbols)
+                func = self.normalize_paths(func)
+                self.reaching_check(func)
+                funcs[index] = func
+        return module, symbols
 
 
 def name_and_source_from_path(file_path):
@@ -96,16 +97,17 @@ def name_and_source_from_path(file_path):
     return file_name, src
 
 
-def compile_module(src, file_name, type_map, verbose=False):
+def compile_module(file_name, type_map, verbose=False):
 
     if verbose:
         if file_name:
             print(f"Compiling: {file_name}")
-    tree, symbols = parse_file(src, type_map)
-    functions = []
     cc = CompilerContext(verbose=True, pretty_print_ir=True, pipeline=None)
-    for func in tree.functions:
-        for stage in cc.pipeline:
-            syms = symbols[func.name]
-            func = stage(func, syms)
-            functions.append(func)
+    return cc.run_pipeline(file_name, type_map)
+
+    # cc.run_pipeline(file_name, type_map)
+    # for func in tree.functions:
+    #    syms = symbols[func.name]
+    #    for stage in cc.pipeline:
+    #        func = stage(func, syms)
+    #    functions.append(func)

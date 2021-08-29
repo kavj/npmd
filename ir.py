@@ -6,6 +6,7 @@ import typing
 from abc import ABC, abstractmethod
 from collections.abc import Hashable
 from dataclasses import dataclass
+from enum import Enum, auto, unique
 from functools import cached_property
 
 binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
@@ -46,9 +47,14 @@ inplace_to_oop = {
     "@=": "@",
 }
 
-
 supported_builtins = frozenset({'iter', 'range', 'enumerate', 'zip', 'all', 'any', 'max', 'min', 'abs', 'pow',
                                 'round', 'reversed'})
+
+
+@unique
+class Sentinels(Enum):
+    UNSUPPORTED = auto()
+    NONE = auto()
 
 
 @dataclass(frozen=True)
@@ -64,7 +70,6 @@ clscond = typing.ClassVar[bool]
 
 @dataclass(frozen=True)
 class ScalarType:
-
     bits: int
     integral: bool
     boolean: bool
@@ -72,6 +77,19 @@ class ScalarType:
 
 class StmtBase:
     pos = None
+
+
+@dataclass(frozen=True)
+class VarDecl(StmtBase):
+    """
+    Variable declaration without explicit assignment.
+    This is a visibility hint for code gen to address a few edge cases, such as
+    variables that are bound on both sides of an "if else" branch statement, yet
+    possibly unbound before it.
+    """
+    name: NameRef
+    type: typing.Any
+    pos: Position
 
 
 Statement = typing.TypeVar('Statement', bound=StmtBase)
@@ -177,6 +195,17 @@ class ArrayType(ValueRef):
 
 
 @dataclass(frozen=True)
+class ArrayInitSpec(ValueRef):
+    dims: typing.Tuple[typing.Union[NameRef, IntConst], ...]
+    dtype: typing.Hashable
+    fill_value: typing.Optional[typing.Union[IntConst, FloatConst, BoolConst]]
+
+    def __post_init__(self):
+        assert isinstance(self.dims, tuple)
+        assert isinstance(self.dtype, Hashable)
+
+
+@dataclass(frozen=True)
 class ArrayRef(ValueRef):
     name: NameRef
     dims: typing.Tuple[typing.Union[NameRef, IntConst], ...]
@@ -198,7 +227,6 @@ class ArrayRef(ValueRef):
 
 @dataclass(frozen=True)
 class ViewRef:
-    # name: NameRef
     base: typing.Union[ArrayRef, ViewRef]
     slice: typing.Optional[typing.Union[IntConst, Slice, NameRef, BinOp, UnaryOp]]
     transposed: bool
@@ -259,6 +287,7 @@ class Min(Expression):
 
     def __post_init__(self):
         assert isinstance(self.values, tuple)
+        assert all(isinstance(v, ValueRef) for v in self.values)
 
     @property
     def subexprs(self):
@@ -275,6 +304,7 @@ class Max(Expression):
 
     def __post_init__(self):
         assert isinstance(self.values, tuple)
+        assert all(isinstance(v, ValueRef) for v in self.values)
 
     @property
     def subexprs(self):
@@ -331,6 +361,7 @@ class Tuple(Expression):
 
     def __post_init__(self):
         assert isinstance(self.elements, tuple)
+        assert all(isinstance(e, ValueRef) for e in self.elements)
 
     @property
     def subexprs(self):
@@ -343,6 +374,17 @@ class Tuple(Expression):
 
 
 Targetable = typing.TypeVar('Targetable', NameRef, Subscript, Tuple)
+
+
+@dataclass(frozen=True)
+class OFCheckedSub(Expression):
+    """
+    sentinel class for subtraction with overflow check.
+    This should lower to compiler specific extensions, since
+    there's a greater risk of ad hoc checks being optimized away.
+    """
+    left: ValueRef
+    right: ValueRef
 
 
 @dataclass(frozen=True)
@@ -368,10 +410,6 @@ class BinOp(Expression):
         yield self.right
 
     @cached_property
-    def is_compare_op(self):
-        return self.op in compareops
-
-    @cached_property
     def in_place(self):
         return self.op in inplace_ops
 
@@ -391,6 +429,7 @@ class CompareOp(Expression):
         assert isinstance(self.left, ValueRef)
         assert isinstance(self.right, ValueRef)
 
+    @property
     def subexprs(self):
         yield self.left
         yield self.right
@@ -416,6 +455,7 @@ class OR(BoolOp):
     def __post_init__(self):
         assert (isinstance(self.operands, tuple))
         assert len(self.operands) >= 2
+        assert all(isinstance(operand, ValueRef) for operand in self.operands)
 
     @property
     def subexprs(self):
@@ -433,6 +473,7 @@ class AND(BoolOp):
     def __post_init__(self):
         assert (isinstance(self.operands, tuple))
         assert len(self.operands) >= 2
+        assert all(isinstance(operand, ValueRef) for operand in self.operands)
 
     @property
     def subexprs(self):
@@ -450,6 +491,7 @@ class XOR(BoolOp):
     def __post_init__(self):
         assert (isinstance(self.operands, tuple))
         assert len(self.operands) >= 2
+        assert all(isinstance(operand, ValueRef) for operand in self.operands)
 
     @property
     def subexprs(self):
@@ -531,6 +573,8 @@ class Call(Expression):
     def __post_init__(self):
         assert isinstance(self.args, tuple)
         assert isinstance(self.keywords, tuple)
+        assert all(isinstance(arg, ValueRef) for arg in self.args)
+        assert all(isinstance(arg, ValueRef) for (key, arg) in self.keywords)
 
     @property
     def subexprs(self):
@@ -551,6 +595,11 @@ class AffineSeq(Expression):
     start: ValueRef
     stop: typing.Optional[ValueRef]
     step: ValueRef
+
+    def __post_init__(self):
+        assert isinstance(self.start, ValueRef)
+        assert self.stop is None or isinstance(self.stop, ValueRef)
+        assert isinstance(self.step, ValueRef)
 
     @property
     def reversed(self):
@@ -575,6 +624,11 @@ class Ternary(Expression):
     if_expr: ValueRef
     else_expr: ValueRef
 
+    def __post_init__(self):
+        assert isinstance(self.test, ValueRef)
+        assert isinstance(self.if_expr, ValueRef)
+        assert isinstance(self.else_expr, ValueRef)
+
     @property
     def subexprs(self):
         yield self.if_expr
@@ -591,6 +645,9 @@ class Reversed(Expression):
 
     iterable: ValueRef
 
+    def __post_init__(self):
+        assert isinstance(self.iterable, ValueRef)
+
     @property
     def subexprs(self):
         yield self.iterable
@@ -603,6 +660,7 @@ class UnaryOp(Expression):
 
     def __post_init__(self):
         assert self.op in unaryops
+        assert isinstance(self.operand, ValueRef)
 
     @property
     def subexprs(self):
@@ -638,6 +696,7 @@ class Zip(Expression):
 
     def __post_init__(self):
         assert isinstance(self.elements, tuple)
+        assert all(isinstance(e, ValueRef) for e in self.elements)
 
     @property
     def subexprs(self):
@@ -660,6 +719,10 @@ class Assign(StmtBase):
     value: ValueRef
     pos: Position
 
+    def __post_init__(self):
+        assert isinstance(self.target, ValueRef)
+        assert isinstance(self.value, ValueRef)
+
     @property
     def in_place(self):
         return isinstance(self.value, BinOp) and self.value.in_place
@@ -669,6 +732,9 @@ class Assign(StmtBase):
 class SingleExpr(StmtBase):
     expr: ValueRef
     pos: Position
+
+    def __post_init__(self):
+        assert isinstance(self.expr, ValueRef)
 
 
 @dataclass
@@ -688,6 +754,10 @@ class ForLoop(StmtBase):
     body: typing.List[Statement]
     pos: Position
 
+    def __post_init__(self):
+        assert isinstance(self.target, ValueRef)
+        assert isinstance(self.iterable, ValueRef)
+
 
 @dataclass
 class IfElse(StmtBase):
@@ -695,6 +765,9 @@ class IfElse(StmtBase):
     if_branch: typing.List[Statement]
     else_branch: typing.List[Statement]
     pos: Position
+
+    def __post_init__(self):
+        assert isinstance(self.test, ValueRef)
 
 
 @dataclass
@@ -711,6 +784,11 @@ class NameImport(StmtBase):
     as_name: NameRef
     pos: Position
 
+    def __post_init__(self):
+        assert isinstance(self.module, NameRef)
+        assert isinstance(self.name, NameRef)
+        assert isinstance(self.as_name, NameRef)
+
 
 @dataclass
 class Return(StmtBase):
@@ -723,3 +801,6 @@ class WhileLoop(StmtBase):
     test: ValueRef
     body: typing.List[Statement]
     pos: Position
+
+    def __post_init__(self):
+        assert isinstance(self.test, ValueRef)

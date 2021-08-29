@@ -1,12 +1,54 @@
+import builtins
+import keyword
 import numbers
+
+from functools import singledispatch
 
 import ir
 from errors import CompilerError
 from visitor import walk
 
+reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
+
+
+signed_integer_range = {p: (-(2**(p-1)-1), 2**(p-1)-1) for p in (8, 32, 64)}
+
 
 def get_expr_parameters(expr):
     return {subexpr for subexpr in walk(expr) if isinstance(subexpr, ir.NameRef)}
+
+
+def is_valid_identifier(name):
+    if isinstance(name, ir.NameRef):
+        name = name.name
+    return isinstance(name, str) and name.isidentifier() and (name not in reserved_names)
+
+
+@singledispatch
+def extract_name(node):
+    msg = f"Cannot extract name from node of type {type(node)}. This is probably a bug."
+    raise TypeError(msg)
+
+
+@extract_name.register
+def _(node: ir.NameRef):
+    return node.name
+
+
+@extract_name.register
+def _(node: ir.Function):
+    name = node.name
+    if isinstance(name, ir.NameRef):
+        name = name.name
+    return name
+
+
+@extract_name.register
+def _(node: ir.Call):
+    name = node.func
+    if isinstance(name, ir.NameRef):
+        name = name.name
+    return name
 
 
 def wrap_constant(c):
@@ -21,6 +63,56 @@ def wrap_constant(c):
         raise NotImplementedError(msg)
 
 
+@singledispatch
+def wrap_input(value):
+    msg = f"No method to wrap {value} of type {type(value)}."
+    raise NotImplementedError(msg)
+
+
+@wrap_input.register
+def _(value: str):
+    if not is_valid_identifier(value):
+        msg = f"{value} is not a valid variable name."
+        raise ValueError(msg)
+    return ir.NameRef(value)
+
+
+@wrap_input.register
+def _(value: ir.NameRef):
+    return value
+
+
+@wrap_input.register
+def _(value: ir.Constant):
+    return value
+
+
+@wrap_input.register
+def _(value: int):
+    return ir.IntConst(value)
+
+
+@wrap_input.register
+def _(value: bool):
+    return ir.BoolConst(value)
+
+
+@wrap_input.register
+def _(value: numbers.Integral):
+    if value == 0:
+        v = ir.Zero
+    elif value == 1:
+        v = ir.One
+    else:
+        v = ir.IntConst(value)
+    return v
+
+
+@wrap_input.register
+def _(value: numbers.Real):
+    return ir.FloatConst(value)
+
+
 def unpack_assignment(target, value, pos):
     if isinstance(target, ir.Tuple) and isinstance(value, ir.Tuple):
         if target.length != value.length:
@@ -33,13 +125,13 @@ def unpack_assignment(target, value, pos):
         yield target, value
 
 
-def unpack_iterated(target, iterable, pos):
+def unpack_iterated(target, iterable, include_enumerate_indices=True):
     if isinstance(iterable, ir.Zip):
         # must unpack
         if isinstance(target, ir.Tuple):
             if len(target.elements) == len(iterable.elements):
                 for t, v in zip(target.elements, iterable.elements):
-                    yield from unpack_iterated(t, v, pos)
+                    yield from unpack_iterated(t, v)
             else:
                 msg = f"Mismatched unpacking counts for {target} and {iterable}, {len(target.elements)} " \
                       f"and {(len(iterable.elements))}."
@@ -52,7 +144,10 @@ def unpack_iterated(target, iterable, pos):
             if len(target.elements) == 2:
                 first_target, sec_target = target.elements
                 yield first_target, iterable.iterable
-                yield sec_target, iterable.start
+                if include_enumerate_indices:
+                    # enumerate is special, because it doesn't add
+                    # constraints
+                    yield sec_target, ir.AffineSeq(iterable.start, None, ir.One)
             else:
                 msg = f"Enumerate must be unpacked to exactly two targets, received {len(target.elements)}."
                 raise CompilerError(msg)
@@ -107,6 +202,10 @@ def is_multiplication(node):
 
 def is_division(node):
     return isinstance(node, ir.BinOp) and node.op in ("/", "//", "/=", "//=")
+
+
+def is_truth_test(expr):
+    return isinstance(expr, (ir.TRUTH, ir.AND, ir.OR, ir.NOT, ir.BoolConst))
 
 
 def equals_unary_negate(node):

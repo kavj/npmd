@@ -6,14 +6,16 @@ import symtable
 import warnings
 
 from contextlib import contextmanager
+from itertools import islice
 from pathlib import Path
 
 import ir
+from canonicalize import replace_call
 from errors import CompilerError
-from symbol_table import st_from_pyst, wrap_input
-from canonicalize import replace_builtin_call
 from lowering import const_folding
-from utils import unpack_assignment, unpack_iterated
+from symbol_table import st_from_pyst
+from utils import unpack_assignment, unpack_iterated, wrap_input
+
 
 binaryops = {ast.Add: "+",
              ast.Sub: "-",
@@ -216,6 +218,8 @@ class TreeBuilder(ast.NodeVisitor):
                 msg = f"Only strings that can be converted to ascii text are supported. This is mainly intended" \
                       f"to facilitate simple printing support at some point."
                 raise CompilerError(msg)
+            # special case, by default strings are wrapped as names
+            # rather than constants.
             output = ir.StringConst(node.value)
         else:
             output = wrap_input(node.value)
@@ -243,7 +247,6 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_UnaryOp(self, node: ast.UnaryOp) -> ir.ValueRef:
         op = unaryops.get(type(node.op))
         operand = self.visit(node.operand)
-        operand = self.fold_if_constant(operand)
         if op == "+":  # This is a weird noop that can be ignored.
             expr = operand
         elif op == "not":
@@ -263,32 +266,14 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_BoolOp(self, node: ast.BoolOp) -> typing.Union[ir.BoolConst, ir.AND, ir.OR]:
         op = boolops[node.op]
         operands = []
-        seen = set()
         for value in node.values:
             value = self.visit(value)
-            if value.constant:
-                if operator.truth(value):
-                    if op == "and":
-                        continue
-                    else:  # op == "or"
-                        return ir.BoolConst(True)
-                else:
-                    if op == "and":
-                        return ir.BoolConst(False)
-                    else:  # op == "or"
-                        continue
-            else:
-                if value not in seen:
-                    seen.add(value)
-                    operands.append(value)
-        if len(operands) == 1:
-            expr = operands.pop()
+            operands.append(value)
+        operands = tuple(operands)
+        if op == "and":
+            expr = ir.AND(operands)
         else:
-            operands = tuple(operands)
-            if op == "and":
-                expr = ir.AND(operands)
-            else:
-                expr = ir.OR(operands)
+            expr = ir.OR(operands)
         return expr
 
     def visit_Compare(self, node: ast.Compare) -> typing.Union[ir.BinOp, ir.AND, ir.BoolConst]:
@@ -300,22 +285,14 @@ class TreeBuilder(ast.NodeVisitor):
         if len(node.ops) == 1:
             return initial_compare
         compares = [initial_compare]
-        seen = set()
-        for index, ast_op in enumerate(node.ops[1:], 1):
+        for ast_op, comparator in zip(islice(node.ops, 1, None), islice(node.comparators, 1, None)):
             left = right
-            right = self.visit(node.comparators[index])
+            right = self.visit(comparator)
+            # bad operators will fail at AST construction
             op = compareops[type(ast_op)]
             cmp = ir.CompareOp(left, right, op)
             cmp = self.fold_if_constant(cmp)
-            if cmp.constant:
-                if not operator.truth(cmp):
-                    return ir.BoolConst(False)
-            else:
-                if cmp not in seen:
-                    # Preserve the original comparison order, but
-                    # ignore duplicate expressions.
-                    seen.add(cmp)
-                    compares.append(cmp)
+            compares.append(cmp)
         return ir.AND(tuple(compares))
 
     def visit_Call(self, node: ast.Call) -> typing.Union[ir.ValueRef, ir.NameRef, ir.Call]:
@@ -333,20 +310,14 @@ class TreeBuilder(ast.NodeVisitor):
             # Most of the time this kind of conflict is an error. For example
             # we don't support overwriting zip, enumerate, etc. since we don't
             # really support customized iterator protocols anyway.
-            call_ = replace_builtin_call(call_)
+            call_ = replace_call(call_)
         return call_
 
     def visit_IfExp(self, node: ast.IfExp) -> ir.ValueRef:
         test = self.visit(node.test)
         on_true = self.visit(node.body)
         on_false = self.visit(node.orelse)
-        if test.constant:
-            if operator.truth(test):
-                expr = on_true
-            else:
-                expr = on_false
-        else:
-            expr = ir.Ternary(test, on_true, on_false)
+        expr = ir.Ternary(test, on_true, on_false)
         return expr
 
     def visit_Subscript(self, node: ast.Subscript) -> ir.Subscript:
@@ -440,6 +411,8 @@ class TreeBuilder(ast.NodeVisitor):
             raise CompilerError("or else clause not supported for for statements")
         iter_node = self.visit(node.iter)
         target_node = self.visit(node.target)
+        assert iter_node is not None
+        assert target_node is not None
         pos = extract_positional_info(node)
         targets = set()
         iterables = set()
@@ -448,7 +421,7 @@ class TreeBuilder(ast.NodeVisitor):
         # additional arithmetic and not all variable types may be fully known
         # at this point.
         try:
-            for target, iterable in unpack_iterated(target_node, iter_node, pos):
+            for target, iterable in unpack_iterated(target_node, iter_node, include_enumerate_indices=True):
                 targets.add(target)
                 iterables.add(iterable)
         except ValueError:

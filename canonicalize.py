@@ -1,9 +1,34 @@
+import numpy
 import operator
-from functools import singledispatchmethod
+
+from functools import singledispatchmethod, cached_property
+from itertools import zip_longest
 
 import ir
+import type_resolution as tr
 from errors import CompilerError
+from utils import extract_name, wrap_input
 from visitor import StmtTransformer
+
+
+def type_from_numpy_type(t: type):
+    if t == numpy.int32:
+        return tr.Int32
+    elif t == numpy.int64:
+        return tr.Int64
+    elif t == numpy.bool_:
+        return tr.BoolType
+    elif t == bool:
+        return tr.BoolType
+    elif t == numpy.float32:
+        return tr.Float32
+    elif t == numpy.float64:
+        return tr.Float64
+    elif t in (tr.Int32, tr.Int64, tr.Float32, tr.Float64):
+        return t
+    else:
+        msg = f"{t} is not a currently supported type."
+        raise CompilerError(msg)
 
 
 def find_unterminated_path(stmts):
@@ -151,177 +176,244 @@ class CallSpecialize:
     This is forced to consider default arguments, because some builtins require it.
     It does not support * or ** signatures.
 
+    Builders may raise exceptions on unsupported arguments, but they should explicitly
+    recognize all named argument fields.
+
+    Note: We may need to recognize optional fields, where None isn't immediately replaced.
+          For fields that default to None, where None is immediately replaced, just use
+          its replacement as a default instead.
+
     """
 
-    def __init__(self, name, args, repl, defaults, allows_keywords=False):
-        self.name = name
+    def __init__(self, args, builder, allow_keywords):
         if len({*args}) < len(args):
-            msg = f"Call lowering for {name} has duplicate argument fields, {args} received."
+            # relying on ordered dictionaries here is too error prone.
+            msg = f"Call lowering has duplicate argument fields, {args} received."
             raise ValueError(msg)
         self.args = args
-        self.defaults = defaults
-        self.allow_keywords = allows_keywords
-        # Check no duplicates
-        assert len(self.args) == len(args)
-        # Check anything with a default also appears in args
-        assert all(arg in self.args for (arg, value) in defaults.items())
-        # repl must know how to take a dictionary of arguments and construct
-        # a replacement node, suitable for downstream use
-        self.replacement = repl
+        self.allow_keywords = allow_keywords
+        self.builder = builder
 
-    @property
+    @cached_property
     def max_arg_count(self):
         return len(self.args)
 
-    @property
+    @cached_property
     def default_count(self):
-        return len(self.defaults)
+        return sum(1 for arg, default in self.args if default is not None)
 
-    @property
+    @cached_property
     def min_arg_count(self):
-        return len(self.args) - len(self.defaults)
+        return len(self.args) - self.default_count
 
-    def validate_call(self, args, keywords):
+    def __call__(self, node: ir.Call):
+        name = node.func
+        args = node.args
+        keywords = node.keywords
         arg_count = len(args)
         kw_count = len(keywords)
         if not self.allow_keywords and kw_count > 0:
-            raise CompilerError(f"Function {self.name} does not allow keyword arguments.")
+            kwargs = ", ".join(kw for (kw, _) in keywords)
+            raise CompilerError(f"Function {name} does not allow keyword arguments. Received keyword arguments:"
+                                f"{kwargs}.")
         mapped = {}
         unrecognized = set()
         duplicates = set()
-        missing = set()
         if arg_count + kw_count > self.max_arg_count:
-            raise CompilerError(f"Function {self.name} has {self.max_arg_count} fields. "
+            raise CompilerError(f"Function {name} has {self.max_arg_count} fields. "
                                 f"{arg_count + kw_count} arguments were provided.")
-        for field, arg in zip(self.args, args):
-            mapped[field] = arg
         for kw, value in keywords:
-            if kw not in self.args:
+            if kw in self.args:
+                if kw in mapped:
+                    duplicates.add(kw)
+                else:
+                    mapped[kw] = value
+            else:
                 unrecognized.add(kw)
-            elif kw in mapped:
-                duplicates.add(kw)
-            mapped[kw] = value
-        for field in self.args:
-            if field not in mapped:
-                if field in self.defaults:
-                    mapped[field] = self.defaults[field]
-                else:
-                    missing.add(field)
-        for u, v in unrecognized:
-            raise CompilerError(f"unrecognized field {u} in call to {self.name}")
-        return self.replacement(mapped)
-
-    def validate_simple_call(self, args):
-        # Check call with no keywords
-        arg_count = len(args)
-        mapped = {}
-        if arg_count > self.max_arg_count:
-            raise CompilerError(f"Signature for {self.name} accepts {self.max_arg_count} arguments. "
-                                f"{arg_count} arguments received.")
-        elif arg_count < self.min_arg_count:
-            raise CompilerError(f"Signature for {self.name} expects at least {self.min_arg_count} arguments, "
-                                f"{arg_count} arguments received.")
-        for field, arg in zip(self.args, args):
-            mapped[field] = arg
-        for field, value in self.defaults.items():
-            if field not in mapped:
-                mapped[field] = value
-        return mapped
-
-    def __call__(self, node):
-        # err (and warnings) could be logged, which might be better..
-        # This should still return None on invalid mapping.
-        if node.keywords:
-            if not self.allow_keywords:
-                raise ValueError(f"{self.name} does not allow keywords.")
-            else:
-                mapped = self.validate_call(node.args, node.keywords)
-                return self.replacement(mapped)
-        else:
-            mapped = self.validate_simple_call(node.args)
-            return self.replacement(mapped)
+        for (field, default), value in zip_longest(self.args.items(), args):
+            if field in mapped:
+                if value is not None:
+                    duplicates.add(field)
+                continue
+            # builder should handle cases that may not be None
+            mapped[field] = value
+        if unrecognized:
+            bad_kws = ", ".join(u for u in unrecognized)
+            msg = f"Unrecognized fields: {bad_kws} in call to {name}."
+            raise CompilerError(msg)
+        elif duplicates:
+            dupes = ", ".join(d for d in duplicates)
+            msg = f"Duplicate fields: {dupes} in call to {name}."
+            raise CompilerError(msg)
+        repl = self.builder(mapped)
+        return repl
 
 
-def replace_builtin_call(node: ir.Call):
-    name = node.func.name
-    if name == "enumerate":
-        args = node.args
-        kws = node.keywords
-        nargs = len(args)
-        nkws = len(kws)
-        if not (1 <= nargs + nkws <= 2):
-            msg = f"In call to enumerate: {node}, enumerate requires exactly 1 or 2 arguments, {nargs + nkws} " \
-                  f"arguments given."
-            raise CompilerError(msg)
-        elif nargs == 1:
-            iterable, = args
-            if kws:
-                if len(kws) != 1:
-                    msg = f"Call to enumerate: {node} contains too many keyword arguments."
-                    raise CompilerError(msg)
-                else:
-                    (kw, start), = kws
-                    if kw != "start":
-                        msg = f"Call to enumerate: {node} has unexpected keyword argument '{kw}'"
-                        raise CompilerError(msg)
-            else:
-                start = ir.Zero
-        elif nargs == 2:
-            if kws:
-                kws = tuple(k for (k, _) in kws)
-                msg = f"Call to enumerate with 2 positional arguments contains unexpected keyword arguments {kws}."
-                raise CompilerError(msg)
-            iterable, start = args
-        else:
-            raise CompilerError
-        return ir.Enumerate(iterable, start)
-    if name == "iter":
-        if node.args:
-            if len(node.args) != 1 or node.keywords:
-                msg = "Only the single argument form of iter: 'iter(iterable)' is supported"
-                raise CompilerError(msg)
-        elif node.keywords:
-            if len(node.keywords) > 1:
-                msg = f"The only supported keyword argument form of iter that is supported is 'iter(iterable)', " \
-                      f"received 2 or more keyword arguments."
-                raise CompilerError(msg)
-            kw, value = node.keywords
-            if kw != "iterable":
-                msg = "Unrecognized keyword {kw} in call to iter."
-                raise CompilerError(msg)
-        # no call specialization. within a loop this reduces to a noop, elsewhere it's unsupported
-        return node
-    elif name == "len":
-        if node.keywords:
-            msg = f"len does not support keyword arguments"
-            raise CompilerError(msg)
-        elif len(node.args) != 1:
-            msg = f"len expects exactly one positional argument, {len(node.args)} arguments received."
-            raise CompilerError(msg)
-        arg, = node.args
-        return ir.Length(arg)
-    elif name == "range":
-        if node.keywords:
-            msg = "Range does not support keyword arguments."
-            raise CompilerError(msg)
-        nargs = len(node.args)
-        if not (1 <= nargs <= 3):
-            msg = f"Range expects 1 to 3 arguments, {len(node.args)} given."
-            raise CompilerError(msg)
-        if nargs == 1:
-            start = ir.Zero
-            stop, = node.args
-            step = ir.One
-        elif nargs == 2:
-            start, stop = node.args
-            step = ir.One
-        else:
-            start, stop, step = node.args
-        return ir.AffineSeq(start, stop, step)
-    elif name == "zip":
-        if node.keywords:
-            msg = "Zip does not support keywords."
-            raise CompilerError(msg)
-        return ir.Zip(node.args)
+def replace_array_init(kwargs):
+    """
+    Replace a call to zeros, ones, or empty with a specialized node.
+
+    Only C ordering is supported at this time.
+
+    "like" is unsupported, because it requires handling alternative implementations
+    of the __array__ protocol.
+    """
+    order = extract_name(kwargs["order"])
+    like = extract_name(kwargs["like"])
+    if order != "C":
+        msg = "Only C ordering is supported at this time."
+        raise CompilerError(msg)
+    elif like is not None:
+        msg = "Numpy array initialization with 'like' parameter set is not yet supported."
+        raise CompilerError(msg)
+    dtype = type_from_numpy_type(kwargs["dtype"])
+    shape = tuple(wrap_input(s) for s in kwargs["shape"])
+    fill_value = ir.One
+    return ir.ArrayInitSpec(shape, dtype, fill_value)
+
+
+def replace_ones(kwargs):
+    kwargs["fill_value"] = ir.One
+    return replace_array_init(kwargs)
+
+
+def replace_zeros(kwargs):
+    kwargs["fill_value"] = ir.Zero
+    return replace_array_init(kwargs)
+
+
+def replace_empty(kwargs):
+    kwargs["fill_value"] = None
+    return replace_array_init(kwargs)
+
+
+def replace_iter(kwargs):
+    iterable = kwargs.get["iterable"]
+    if iterable is None:
+        msg = "iter is only supported with exactly one argument. No value found for iterable."
+        raise CompilerError(msg)
+    return iterable
+
+
+def replace_len(node: ir.Call):
+    if node.keywords:
+        msg = "'len' does not allow keyword arguments."
+        raise CompilerError(msg)
+    nargs = len(node.args)
+    if nargs != 1:
+        msg = f"'len' accepts a single argument. {nargs} provided"
+        raise CompilerError(msg)
+    iterable, = node.args
+    return ir.Length(iterable)
+
+
+def replace_range(node: ir.Call):
+    if node.keywords:
+        msg = "Call to 'range' does not support keyword arguments."
+        raise CompilerError(msg)
+    nargs = len(node.args)
+    # defaults
+    start = ir.Zero
+    step = ir.One
+    if nargs == 1:
+        stop, = node.args
+    elif nargs == 2:
+        start, stop = node.args
+    elif nargs == 3:
+        start, stop, step = node.args
     else:
+        msg = f"Range accepts 1 to 3 arguments, {nargs} provided."
+        raise CompilerError(msg)
+    return ir.AffineSeq(start, stop, step)
+
+
+def replace_enumerate(node: ir.Call):
+    nargs = len(node.args) + len(node.keywords)
+    if not (1 <= nargs <= 2):
+        msg = f"'enumerate' accepts either 1 or 2 arguments, {nargs} provided."
+        raise CompilerError(msg)
+    if node.keywords:
+        if node.args:
+            key, value = node.keywords
+            if key != "start":
+                if key == "iterable":
+                    msg = "keyword 'iterable' in call to enumerate shadows a positional argument."
+                else:
+                    msg = f"Unrecognized keyword {key} in call to enumerate"
+                raise CompilerError(msg)
+            start = value
+            iterable, = node.args
+        else:
+            if len(node.keywords) == 1:
+                key, iterable = node.keywords
+                if key != "iterable":
+                    msg = "Missing 'iterable' argument in call to enumerate"
+                    raise CompilerError(msg)
+                start = ir.Zero
+            else:
+                # dictionaries are not hashable, thus we have a tuple with explicit pairings
+                # we should factor out a duplicate key check earlier on
+                kwargs = node.keywords
+                iterable = None
+                start = None
+                for key, value in kwargs:
+                    if key == "iterable":
+                        iterable = value
+                    elif key == "start":
+                        start = value
+                    else:
+                        msg = f"Unrecognized keyword {key} in call to enumerate."
+                        raise CompilerError(msg)
+                if iterable is None or start is None:
+                    msg = f"bad keyword combination {kwargs[0][0]} {kwargs[0][1]} in call to enumerate, expected" \
+                          f"'iterable' and 'start'"
+                    raise CompilerError(msg)
+    else:
+        if nargs == 2:
+            iterable, start = node.args
+        else:
+            iterable, = node.args
+            start = ir.Zero
+    return ir.Enumerate(iterable, start)
+
+
+def replace_zip(node: ir.Call):
+    if node.keywords:
+        msg = "zip does not support keyword arguments."
+        raise CompilerError(msg)
+    return ir.Zip(node.args)
+
+
+replacers = {"enumerate": replace_enumerate,
+             "iter": replace_iter,
+             "len": replace_len,
+             "range": replace_range,
+             "zip": replace_zip,
+             "numpy.empty": CallSpecialize({"shape": None, "dtype": numpy.float64, "order": "C", "like": None},
+                                           replace_empty,
+                                           allow_keywords=True),
+             "numpy.ones": CallSpecialize({"shape": None, "dtype": numpy.float64, "order": "C", "like": None},
+                                          replace_ones,
+                                          allow_keywords=True),
+             "numpy.zeros": CallSpecialize({"shape": None, "dtype": numpy.float64, "order": "C", "like": None},
+                                           replace_zeros,
+                                           allow_keywords=True)
+             }
+
+
+def replace_call(node: ir.Call):
+    """
+    AST level replacement for functions that are specialized internally.
+    """
+    func_name = extract_name(node)
+    replacer = replacers.get(func_name)
+    if replacer is None:
+        if func_name.startswith("numpy."):
+            msg = f"Invalid or unsupported numpy call: {func_name}."
+            raise CompilerError(msg)
         return node
+        # Todo: expand this for (any,all later
+    # Todo: Some of the builtin calls follow strange overloading conventions
+    #       so they had to be separated. I may rework this further, as I hate type checks.
+    repl = replacer(node)
+    return repl

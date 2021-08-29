@@ -1,27 +1,13 @@
 from __future__ import annotations
 
-import builtins
 import itertools
-import keyword
-import numbers
 
-import numpy as np
-
-from functools import singledispatch
 
 import ir
 import type_resolution as tr
 
 from errors import CompilerError
-
-reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
-
-
-def extract_name(name):
-    if not isinstance(name, (str, ir.NameRef)):
-        msg = f"Expected a variable name, received type {type(name)}."
-        raise TypeError(msg)
-    return name.name if isinstance(name, ir.NameRef) else name
+from utils import extract_name, wrap_input
 
 
 def reduces_array_dims(ref):
@@ -32,56 +18,6 @@ def reduces_array_dims(ref):
     else:
         msg = "{ref} does not represent array view creation."
         raise TypeError(msg)
-
-
-def is_valid_identifier(name):
-    if isinstance(name, ir.NameRef):
-        name = name.name
-    return isinstance(name, str) and name.isidentifier() and (name not in reserved_names)
-
-
-@singledispatch
-def wrap_input(value):
-    msg = f"No method to wrap {value} of type {type(value)}."
-    raise NotImplementedError(msg)
-
-
-@wrap_input.register
-def _(value: str):
-    if not is_valid_identifier(value):
-        msg = f"{value} is not a valid variable name."
-        raise ValueError(msg)
-    return ir.NameRef(value)
-
-
-@wrap_input.register
-def _(value: ir.NameRef):
-    return value
-
-
-@wrap_input.register
-def _(value: ir.Constant):
-    return value
-
-
-@wrap_input.register
-def _(value: int):
-    return ir.IntConst(value)
-
-
-@wrap_input.register
-def _(value: bool):
-    return ir.BoolConst(value)
-
-
-@wrap_input.register
-def _(value: numbers.Integral):
-    return ir.IntConst(value)
-
-
-@wrap_input.register
-def _(value: numbers.Real):
-    return ir.FloatConst(value)
 
 
 def map_alias_to_qualified_names(import_nodes):
@@ -128,36 +64,6 @@ class symbol:
 
     def __hash__(self):
         return hash(self.name)
-
-
-# array creation nodes
-
-def make_numpy_call(node: ir.Call):
-    name = node.func
-    if name == "numpy.ones":
-        fill_value = ir.One
-    elif name == "numpy.zeros":
-        fill_value = ir.Zero
-    else:
-        if name != "numpy.empty":
-            raise NotImplementedError
-        fill_value = None
-    args = node.args
-    kwargs = node.keywords
-    if not (1 <= len(args) + len(kwargs) <= 2):
-        raise ValueError
-    params = {}
-    for name, value in zip(("shape", "dtype"), args):
-        params[name] = value
-    for key, value in kwargs:
-        if key in params:
-            raise KeyError
-        params[key] = value
-    shape = params["shape"]
-    dtype = params.get("dtype", np.float64)
-    # Todo: initializer didn't match the rest of this module. Rewrite later.
-    array_init = ()
-    return array_init
 
 
 class symbol_table:
