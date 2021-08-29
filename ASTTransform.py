@@ -6,6 +6,7 @@ import symtable
 import warnings
 
 from contextlib import contextmanager
+from itertools import islice
 from pathlib import Path
 
 import ir
@@ -266,32 +267,14 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_BoolOp(self, node: ast.BoolOp) -> typing.Union[ir.BoolConst, ir.AND, ir.OR]:
         op = boolops[node.op]
         operands = []
-        seen = set()
         for value in node.values:
             value = self.visit(value)
-            if value.constant:
-                if operator.truth(value):
-                    if op == "and":
-                        continue
-                    else:  # op == "or"
-                        return ir.BoolConst(True)
-                else:
-                    if op == "and":
-                        return ir.BoolConst(False)
-                    else:  # op == "or"
-                        continue
-            else:
-                if value not in seen:
-                    seen.add(value)
-                    operands.append(value)
-        if len(operands) == 1:
-            expr = operands.pop()
+            operands.append(value)
+        operands = tuple(operands)
+        if op == "and":
+            expr = ir.AND(operands)
         else:
-            operands = tuple(operands)
-            if op == "and":
-                expr = ir.AND(operands)
-            else:
-                expr = ir.OR(operands)
+            expr = ir.OR(operands)
         return expr
 
     def visit_Compare(self, node: ast.Compare) -> typing.Union[ir.BinOp, ir.AND, ir.BoolConst]:
@@ -303,22 +286,14 @@ class TreeBuilder(ast.NodeVisitor):
         if len(node.ops) == 1:
             return initial_compare
         compares = [initial_compare]
-        seen = set()
-        for index, ast_op in enumerate(node.ops[1:], 1):
+        for ast_op, comparator in zip(islice(node.ops, 1, None), islice(node.comparators, 1, None)):
             left = right
-            right = self.visit(node.comparators[index])
+            right = self.visit(comparator)
+            # bad operators will fail at AST construction
             op = compareops[type(ast_op)]
             cmp = ir.CompareOp(left, right, op)
             cmp = self.fold_if_constant(cmp)
-            if cmp.constant:
-                if not operator.truth(cmp):
-                    return ir.BoolConst(False)
-            else:
-                if cmp not in seen:
-                    # Preserve the original comparison order, but
-                    # ignore duplicate expressions.
-                    seen.add(cmp)
-                    compares.append(cmp)
+            compares.append(cmp)
         return ir.AND(tuple(compares))
 
     def visit_Call(self, node: ast.Call) -> typing.Union[ir.ValueRef, ir.NameRef, ir.Call]:
