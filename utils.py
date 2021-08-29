@@ -1,4 +1,5 @@
 import builtins
+import itertools
 import keyword
 import numbers
 
@@ -160,7 +161,7 @@ def unpack_iterated(target, iterable, include_enumerate_indices=True):
 
 
 def is_pow(expr):
-    return isinstance(expr, ir.BinOp) and expr.op in ("**", "**=")
+    return isinstance(expr, ir.BinOp) and expr.op in ir.pow_ops
 
 
 def is_fma_pattern(expr):
@@ -171,7 +172,7 @@ def is_fma_pattern(expr):
 
     """
 
-    if isinstance(expr, ir.BinOp) and expr.op in ("+", "+=", "-", "-="):
+    if isinstance(expr, ir.BinOp) and expr.op in itertools.chain(ir.add_ops, ir.subtract_ops):
         left = expr.left
         right = expr.right
         for operand in (left, right):
@@ -189,19 +190,60 @@ def is_fma_pattern(expr):
 
 
 def is_addition(node):
-    return isinstance(node, ir.BinOp) and node.op in ("+", "+=")
+    return isinstance(node, ir.BinOp) and node.op in ir.add_ops
 
 
 def is_subtraction(node):
-    return isinstance(node, ir.BinOp) and node.op in ("-", "-=")
+    return isinstance(node, ir.BinOp) and node.op in ir.subtract_ops
 
 
 def is_multiplication(node):
-    return isinstance(node, ir.BinOp) and node.op in ("*", "*=")
+    return isinstance(node, ir.BinOp) and node.op in ir.multiply_ops
+
+
+def is_bit_shift(node):
+    return isinstance(node, ir.BinOp) and node.op in ir.bit_shift_ops
+
+
+def is_logical_op(node):
+    return isinstance(node, ir.BoolOp)
+
+
+def is_compare(node):
+    """
+    This tests whether we have either a single compare or a chained comparison.
+    Chained comparisons are regarded as logical and nodes, where every operand
+    is a compare operation and for any consecutive comparisons, indexed by 'i' and 'i+1':
+        operands[i].right == operands[i+1].left
+
+    Note, this will ignore cases that are not laid out like:
+
+        (a cmp b) and (b cmp c) and (c cmp d)
+
+    but the internal passes attempt to factor everything this way.
+
+    """
+
+    if isinstance(node, ir.CompareOp):
+        return True
+
+    elif isinstance(node, ir.AND):
+        first = node.operands[0]
+        if not isinstance(first, ir.CompareOp):
+            return False
+        prev_rhs = first.right
+        for operand in itertools.islice(node.operands, 1, None):
+            if not isinstance(operand, ir.CompareOp) or prev_rhs != operand.left:
+                return False
+
+    else:
+        return False
+
+    return True
 
 
 def is_division(node):
-    return isinstance(node, ir.BinOp) and node.op in ("/", "//", "/=", "//=")
+    return isinstance(node, ir.BinOp) and node.op in ir.divide_ops
 
 
 def is_truth_test(expr):

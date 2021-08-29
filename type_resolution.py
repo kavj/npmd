@@ -1,5 +1,9 @@
+import itertools
+
 import numpy as np
 import ir
+
+import utils
 
 from errors import CompilerError
 
@@ -17,7 +21,6 @@ FPredicate32 = ir.ScalarType(bits=32, integral=False, boolean=True)
 FPredicate64 = ir.ScalarType(bits=64, integral=False, boolean=True)
 BoolType = ir.ScalarType(bits=8, integral=True, boolean=True)
 
-
 # defaults, can be overridden
 by_input_type = {np.int32: Int32,
                  np.int64: Int64,
@@ -26,14 +29,12 @@ by_input_type = {np.int32: Int32,
                  bool: BoolType,
                  np.bool_: BoolType}
 
-
 by_input_type_name = {"numpy.int32": Int32,
                       "numpy.int64": Int64,
                       "numpy.float32": Float32,
                       "numpy.float64": Float64,
                       "numpy.bool": BoolType,
                       "numpy.bool_": BoolType}
-
 
 # initially supported, untyped ints and other ranges require additional
 # work, and they are less commonly used
@@ -321,3 +322,8 @@ def merge_truth_types(types):
     else:
         msg = f"Unsupported bit width {bit_width}."
         raise CompilerError(msg)
+
+
+def resolve_binop_type(left_type, right_type, op):
+    assert op in itertools.chain(ir.binaryops, ir.inplace_ops)
+    # if utils.is_multiplication()

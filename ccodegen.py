@@ -75,6 +75,13 @@ class ExpressionResolver(ExpressionVisitor):
         raise NotImplementedError
 
 
+def else_is_elif(stmt: ir.IfElse):
+    if len(stmt.else_branch) == 1:
+        if isinstance(stmt.else_branch[0], ir.IfElse):
+            return True
+    return False
+
+
 class CCodeGen(StmtVisitor):
 
     # This is meant to be controlled by a codegen driver,
@@ -101,12 +108,6 @@ class CCodeGen(StmtVisitor):
 
     def print_line(self, stmt):
         self.printer.print_line(stmt)
-
-    def else_is_elif(self, stmt: ir.IfElse):
-        if len(stmt.else_branch) == 1:
-            if isinstance(stmt.else_branch[0], ir.IfElse):
-                return True
-        return False
 
     @contextmanager
     def indented(self):
@@ -142,16 +143,12 @@ class CCodeGen(StmtVisitor):
         with self.indented():
             self.visit(node.if_branch)
         self.print_line("}")
-        self.visit_else_branch(node.else_branch)
-
-    def visit_else_branch(self, stmts: list):
-        num_stmts = len(stmts)
-        if num_stmts == 1 and isinstance(stmts[0], ir.IfElse):
-            self.visit_elif(stmts[0])
-        elif num_stmts > 0:
+        if else_is_elif(node):
+            self.visit_elif(node.else_branch[0])
+        elif node.else_branch:
             self.print_line("else{")
             with self.indented():
-                self.visit(stmts)
+                self.visit(node.else_branch)
             self.print_line("}")
 
     @visit.register
@@ -162,7 +159,13 @@ class CCodeGen(StmtVisitor):
         with self.indented():
             self.visit(node.if_branch)
         self.print_line("}")
-        self.visit_else_branch(node.else_branch)
+        if else_is_elif(node):
+            self.visit_elif(node)
+        elif node.else_branch:
+            self.print_line("else{")
+            with self.indented():
+                self.visit(node.else_branch)
+            self.print_line("}")
 
     @visit.register
     def _(self, node: ir.ForLoop):

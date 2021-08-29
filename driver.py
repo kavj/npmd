@@ -102,7 +102,7 @@ def compile_module(file_name, type_map, verbose=False):
     if verbose:
         if file_name:
             print(f"Compiling: {file_name}")
-    cc = CompilerContext(verbose=True, pretty_print_ir=True, pipeline=None)
+    cc = CompilerContext(verbose=True, pretty_print_ir=True)
     return cc.run_pipeline(file_name, type_map)
 
     # cc.run_pipeline(file_name, type_map)

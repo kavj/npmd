@@ -778,7 +778,7 @@ def make_single_index_loop(node: ir.ForLoop, non_negative_scalars, loop_index):
     # ignore enumerate indices
     iterables = {iterable for (_, iterable) in unpack_iterated(node.target, node.iterable, False)}
     interval = make_loop_interval(iterables, non_negative_scalars)
-    assigns = make_loop_assigns(node, interval,loop_index)
+    assigns = make_loop_assigns(node, interval, loop_index)
     assigns.extend(node.body)
     repl = ir.ForLoop(loop_index, interval, assigns, node.pos)
     return repl
