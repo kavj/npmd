@@ -20,6 +20,10 @@ At this point, statements are serialized to the level expected by C code.
 """
 
 
+def map_internal_type_to_c99_type(type_):
+    raise NotImplementedError
+
+
 class CTypeResolver:
 
     # Take type from context, map to C data type.
@@ -82,6 +86,13 @@ def else_is_elif(stmt: ir.IfElse):
     return False
 
 
+def format_header(prefix, cond):
+    if cond is None:
+        return f"{prefix}{'{'}"
+    else:
+        return f"{prefix} ({cond}){'{'}"
+
+
 class CCodeGen(StmtVisitor):
 
     # This is meant to be controlled by a codegen driver,
@@ -100,19 +111,38 @@ class CCodeGen(StmtVisitor):
         yield
 
     def __call__(self, func: ir.Function):
-        self.declared = set()
+        self._declared = set()
         self.visit(func)
 
-    def retrieve_type(self, ref):
+    def declared(self, ref: ir.NameRef):
+        assert isinstance(ref, (ir.NameRef, ir.Subscript))
+        return ref in self._declared
+
+    def check_type(self, ref):
         return self.ctx.retrieve_type(ref)
 
     def print_line(self, stmt):
         self.printer.print_line(stmt)
 
+    def format_lvalue_ref(self, expr):
+        if isinstance(expr, ir.NameRef):
+            formatted = self.format(expr)
+            if not self.declared(expr):
+                type_ = self.check_type(expr)
+                # subject to change
+                formatted = f"{type_} {formatted}"
+            return formatted
+
     @contextmanager
-    def indented(self):
+    def scoped(self, prefix, cond):
+        if cond is None:
+            line = f"{prefix}{'{'}"
+        else:
+            line = f"{prefix} ({cond}){'{'}"
+        self.print_line(line)
         with self.printer.indented():
             yield
+        self.print_line("}")
 
     @singledispatchmethod
     def visit(self, node):
@@ -121,51 +151,47 @@ class CCodeGen(StmtVisitor):
     @visit.register
     def _(self, node: ir.Assign):
         # check types
-        rhs_type = self.retrieve_type(node.value)
-        lhs_type = self.retrieve_type(node.target)
+        rhs_type = self.check_type(node.value)
+        lhs_type = self.check_type(node.target)
         if lhs_type != rhs_type:
             raise CompilerError
 
         target = self.format(node.target)
         value = self.format(node.value)
-        if node.target in self.declared:
-            stmt = f"{target} = {value};"
-        else:
-            # Todo: declaration needs to obtain a
-            #     corresponding destination language type, in this case C.
-            raise NotImplementedError
+
+        # Todo: need to determine how much of the numpy api should be directly exposed.
+        #    At present, I am guessing anything that doesn't require the gil may be exposed,
+        #    unless the use of restrict or __restrict__ becomes necessary
+        #    (supported on all compilers that compile CPython).
+        if isinstance(node.target, ir.NameRef) and node.target not in self.declared:
+            # For now, assume C99 back end,
+            # compliant with PEP 7
+            type_ = self.ctx.get_type(target)
+            ctype_ = map_internal_type_to_c99_type(type_)
+            target = f"{ctype_} {target}"
+        stmt = f"{target} = {value};"
         self.print_line(stmt)
 
     def visit_elif(self, node: ir.IfElse):
         test = self.visit(node.test)
-        branch_head = f"else if({test}){'{'}"
-        self.print_line(branch_head)
-        with self.indented():
+        with self.scoped("else if", test):
             self.visit(node.if_branch)
-        self.print_line("}")
         if else_is_elif(node):
             self.visit_elif(node.else_branch[0])
         elif node.else_branch:
-            self.print_line("else{")
-            with self.indented():
+            with self.scoped("else", None):
                 self.visit(node.else_branch)
-            self.print_line("}")
 
     @visit.register
     def _(self, node: ir.IfElse):
         test = self.visit(node.test)
-        branch_head = f"if({test}){'{'}"
-        self.print_line(branch_head)
-        with self.indented():
+        with self.scoped("if", test):
             self.visit(node.if_branch)
-        self.print_line("}")
         if else_is_elif(node):
             self.visit_elif(node)
         elif node.else_branch:
-            self.print_line("else{")
-            with self.indented():
+            with self.scoped("else", None):
                 self.visit(node.else_branch)
-            self.print_line("}")
 
     @visit.register
     def _(self, node: ir.ForLoop):
@@ -174,13 +200,9 @@ class CCodeGen(StmtVisitor):
         assert isinstance(node.target, ir.NameRef)
         assert isinstance(node.iterable, (ir.AffineSeq, ir.Reversed))
         # check for unit step
-        if node.target in self.declared:
-            pass
-        else:
-            pass
+        target = self.format_lvalue_ref(node.target)
         # check whether we can use ++ op
         # insufficient support for reversed() thus far.
-        target = self.format(node.target)
         if node.iterable.step == ir.One:
             step_expr = f"++{target}"
         else:
@@ -188,8 +210,40 @@ class CCodeGen(StmtVisitor):
             step_expr = f"{target} += {increm_by}"
         start = self.format(node.iterable.start)
         stop = self.format(node.iterable.stop)
-        stmt = f"for({target} = {start}; {target} < {stop}; {step_expr}){'{'}"
-        self.print_line(stmt)
-        with self.indented():
+        # implements range semantics with forward step, with the caveat
+        # that any escaping value of target must be copied out in the loop body
+        cond = f"{target} = {start}; {target} < {stop}; {step_expr}"
+        with self.scoped("for", cond):
             self.visit(node.body)
-        self.print_line("}")
+
+    @visit.register
+    def _(self, node: ir.WhileLoop):
+        cond = self.format(node.test)
+        with self.scoped("while", cond):
+            self.visit(node.body)
+
+    @visit.register
+    def _(self, node: ir.Break):
+        self.print_line("break;")
+
+    @visit.register
+    def _(self, node: ir.Continue):
+        self.print_line("continue;")
+
+    @visit.register
+    def _(self, node: ir.Assign):
+        target = self.format(node.target)
+        value = self.format(node.value)
+        if node.in_place:
+            assert isinstance(node.value, ir.BinOp)
+            op = node.value.op
+        else:
+            op = "="
+        line = f"{target} {op} {value};"
+        self.print_line(line)
+
+    @visit.register
+    def _(self, node: ir.SingleExpr):
+        expr = self.format(node.expr)
+        line = f"{expr};"
+        self.print_line(line)

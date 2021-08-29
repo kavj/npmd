@@ -246,6 +246,14 @@ def is_division(node):
     return isinstance(node, ir.BinOp) and node.op in ir.divide_ops
 
 
+def is_floor_divide(node):
+    return isinstance(node, ir.BinOp) and node.op in ir.floor_divide_ops
+
+
+def is_true_divide(node):
+    return isinstance(node, ir.BinOp) and node.op in ir.true_divide_ops
+
+
 def is_truth_test(expr):
     return isinstance(expr, (ir.TRUTH, ir.AND, ir.OR, ir.NOT, ir.BoolConst))
 
