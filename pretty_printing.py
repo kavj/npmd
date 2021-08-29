@@ -174,6 +174,7 @@ class pretty_formatter:
                 # something else, anded
                 cmp_op = None
                 groups.append((first, cmp_op))
+                start += 1
         operands = []
         expr = None
         for group, cmp_op in groups:
