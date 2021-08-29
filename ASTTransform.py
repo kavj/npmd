@@ -247,7 +247,6 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_UnaryOp(self, node: ast.UnaryOp) -> ir.ValueRef:
         op = unaryops.get(type(node.op))
         operand = self.visit(node.operand)
-        operand = self.fold_if_constant(operand)
         if op == "+":  # This is a weird noop that can be ignored.
             expr = operand
         elif op == "not":
@@ -318,13 +317,7 @@ class TreeBuilder(ast.NodeVisitor):
         test = self.visit(node.test)
         on_true = self.visit(node.body)
         on_false = self.visit(node.orelse)
-        if test.constant:
-            if operator.truth(test):
-                expr = on_true
-            else:
-                expr = on_false
-        else:
-            expr = ir.Ternary(test, on_true, on_false)
+        expr = ir.Ternary(test, on_true, on_false)
         return expr
 
     def visit_Subscript(self, node: ast.Subscript) -> ir.Subscript:
