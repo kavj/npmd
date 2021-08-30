@@ -7,7 +7,7 @@ import ir
 from errors import CompilerError
 from pretty_printing import pretty_formatter, binop_ordering
 from type_inference import ExprTypeInfer
-from visitor import StmtVisitor, ExpressionVisitor
+from visitor import StmtVisitor
 
 """
 
@@ -35,35 +35,48 @@ class CTypeResolver:
 
 class CodeEmitter:
 
-    indent_type = "    "
-
     def __init__(self, context, file, indent="    ", max_line_width=70):
         self.ctx = context
         self.file = file
-        self.indent = ""
         self.single_indent = indent
         self.max_line_width = max_line_width
+        self.line_formatter = textwrap.TextWrapper(tabsize=4, break_long_words=False, break_on_hyphens=False)
         self.tree = None
         self.dest = None
 
     def __call__(self, tree, dest):
         # Todo: work these into context manager
+        assert self.indent_len == 0
         self.tree = tree
         self.dest = dest
+        assert self.indent_len == 0
+
+    @property
+    def indent(self):
+        return self.line_formatter.initial_indent
+
+    @indent.setter
+    def indent(self, indent_):
+        self.line_formatter.initial_indent = indent_
+        self.line_formatter.subsequent_indent = indent_
+
+    @property
+    def indent_len(self):
+        return len(self.line_formatter.initial_indent)
 
     @contextmanager
     def indented(self):
-        indent_len = len(self.indent)
-        char_count = len(self.single_indent)
-        self.indent = f"{self.indent}{self.single_indent}"
+        initial_indent = self.indent
+        scoped_indent = f"{initial_indent}{self.single_indent}"
+        self.indent = scoped_indent
         yield
-        self.indent = self.indent[:-char_count]
-        if indent_len != len(self.indent):
-            raise RuntimeError
+        assert self.indent == scoped_indent
+        self.indent = initial_indent
 
     def print_line(self, line):
-        line = textwrap.wrap(line, width=self.max_line_width)
-        print(line, file=self.dest)
+        lines = self.line_formatter.wrap(line)
+        for line in lines:
+            print(line, file=self.dest)
 
 
 def else_is_elif(stmt: ir.IfElse):
@@ -108,9 +121,6 @@ class CCodeGen(StmtVisitor):
     def check_type(self, ref):
         return self.ctx.retrieve_type(ref)
 
-    def print_line(self, stmt):
-        self.printer.print_line(stmt)
-
     def format_lvalue_ref(self, expr):
         if isinstance(expr, ir.NameRef):
             formatted = self.format(expr)
@@ -126,10 +136,10 @@ class CCodeGen(StmtVisitor):
             line = f"{prefix}{'{'}"
         else:
             line = f"{prefix} ({cond}){'{'}"
-        self.print_line(line)
+        self.printer.print_line(line)
         with self.printer.indented():
             yield
-        self.print_line("}")
+        self.printer.print_line("}")
 
     @singledispatchmethod
     def visit(self, node):
@@ -161,7 +171,7 @@ class CCodeGen(StmtVisitor):
             ctype_ = map_internal_type_to_c99_type(type_)
             target = f"{ctype_} {target}"
         stmt = f"{target} = {value};"
-        self.print_line(stmt)
+        self.printer.print_line(stmt)
 
     def visit_elif(self, node: ir.IfElse):
         test = self.visit(node.test)
@@ -215,11 +225,11 @@ class CCodeGen(StmtVisitor):
 
     @visit.register
     def _(self, node: ir.Break):
-        self.print_line("break;")
+        self.printer.print_line("break;")
 
     @visit.register
     def _(self, node: ir.Continue):
-        self.print_line("continue;")
+        self.printer.print_line("continue;")
 
     @visit.register
     def _(self, node: ir.Assign):
@@ -231,10 +241,10 @@ class CCodeGen(StmtVisitor):
         else:
             op = "="
         line = f"{target} {op} {value};"
-        self.print_line(line)
+        self.printer.print_line(line)
 
     @visit.register
     def _(self, node: ir.SingleExpr):
         expr = self.format(node.expr)
         line = f"{expr};"
-        self.print_line(line)
+        self.printer.print_line(line)
