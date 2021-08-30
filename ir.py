@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import Enum, auto, unique
 from functools import cached_property
 
+from errors import CompilerError
 
 # Note: operations are split this way to avoid incorrectly accepting bad inplace to out of place conversions.
 binary_ops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
@@ -180,6 +181,10 @@ class StringConst(Constant):
 
     def __post_init__(self):
         assert isinstance(self.value, str)
+        if any(ord(v) > 127 for v in self.value):
+            msg = f"Only strings that can be converted to ascii text are supported. This is mainly intended" \
+                  f"to facilitate simple printing support at some point."
+            raise CompilerError(msg)
 
 
 # commonly used
