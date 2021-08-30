@@ -67,175 +67,55 @@ matmul_inplace = {"@="}
 bitwise = {"<<", ">>", "|", "&", "^"}
 bitwise_inplace = {"<<=", ">>=", "|=", "&=", "^="}
 
-# Python's normal dispatching rules make for potentially inefficient SIMD code. It's possible to solve around them
-# in a lot of cases, but they may be sensitive to type perturbations as a result of minor assignment differences.
-# Instead we're assigning rules meant to unify integer variables to 32 or 64 bit mode with the same treatment applied
-# to floating point. By default, for now, we're disallowing downcast on write. Efficient simd upcast on read is usually
-# provided by the ISA. Some of these things can impact register pressure, so we'll need to provide some hooks to
-# manipulate unroll factor used by vectorization.
-
+# no support for arbitrary arithmetic on predicate or plain boolean types
 
 binops_dispatch = {
-    (int, int): int,
-    (int, float): float,
-    (int, np.int32): np.int64,
-    (int, np.int64): np.int64,
-    (int, np.float32): np.float64,
-    (int, np.float64): np.float64,
-
-    (float, int): float,
-    (float, float): float,
-    (float, np.int32): np.float64,
-    (float, np.int64): np.float64,
-    (float, np.float32): np.float64,
-    (float, np.float64): np.float64,
-
-    (np.int32, int): np.int64,
-    (np.int32, float): np.float64,
-    (np.int32, np.int32): np.int32,
-    (np.int32, np.int64): np.int64,
-    (np.int32, np.float32): np.float64,
-    (np.int32, np.float64): np.float64,
-
-    (np.int64, int): np.int64,
-    (np.int64, float): np.float64,
-    (np.int64, np.int32): np.int64,
-    (np.int64, np.int64): np.int64,
-    (np.int64, np.float32): np.float64,
-    (np.int64, np.float64): np.float64,
-
-    (np.float32, int): np.float64,
-    (np.float32, float): np.float64,
-    (np.float32, np.int32): np.float64,
-    (np.float32, np.int64): np.float64,
-    (np.float32, np.float32): np.float32,
-    (np.float32, np.float64): np.float64,
-
-    (np.float64, int): np.float64,
-    (np.float64, float): np.float64,
-    (np.float64, np.int32): np.float64,
-    (np.float64, np.int64): np.float64,
-    (np.float64, np.float32): np.float64,
-    (np.float64, np.float64): np.float64,
+    (Int32, Int32): Int32,
+    (Int32, Int64): Int64,
+    (Int32, Float32): Float64,
+    (Int32, Float64): Float64,
+    (Int64, Int32): Int64,
+    (Int64, Int64): Int64,
+    (Int64, Float32): Float64,
+    (Int64, Float64): Float64,
+    (Float32, Int32): Float64,
+    (Float32, Int64): Float64,
+    (Float32, Float32): Float64,
+    (Float32, Float64): Float64,
+    (Float64, Int32): Float64,
+    (Float64, Int64): Float64,
+    (Float64, Float32): Float64,
+    (Float64, Float64): Float64
 }
 
-# This extends Numpy's rules for inplace array operations to also apply to scalars.
-# This means that inplace operations cannot apply type promotion.
 
-binops_inplace_dispatch = {
-    (int, int),
-    (int, np.int32),
-    (int, np.int64),
-
-    (float, int),
-    (float, float),
-    (float, np.int32),
-    (float, np.int64),
-    (float, np.float32),
-    (float, np.float64),
-
-    (np.int32, np.int32),
-
-    (np.int64, int),
-    (np.int64, np.int32),
-    (np.int64, np.int64),
-
-    (np.float32, np.float32),
-
-    (np.float64, int),
-    (np.float64, float),
-    (np.float64, np.int32),
-    (np.float64, np.int64),
-    (np.float64, np.float32),
-    (np.float64, np.float64),
+true_div_dispatch = {
+    (Int32, Int32): Float64,
+    (Int32, Int64): Float64,
+    (Int32, Float32): Float64,
+    (Int32, Float64): Float64,
+    (Int64, Int32): Float64,
+    (Int64, Int64): Float64,
+    (Int64, Float32): Float64,
+    (Int64, Float64): Float64,
+    (Float32, Int32): Float64,
+    (Float32, Int64): Float64,
+    (Float32, Float32): Float32,
+    (Float32, Float64): Float64,
+    (Float64, Int32): Float64,
+    (Float64, Int64): Float64,
+    (Float64, Float32): Float64,
+    (Float64, Float64): Float64
 }
 
-div_dispatch = {
-    (int, int): float,
-    (int, float): float,
-    (int, np.int32): np.float64,
-    (int, np.int64): np.float64,
-    (int, np.float32): np.float64,
-    (int, np.float64): np.float64,
-
-    (float, int): float,
-    (float, float): float,
-    (float, np.int32): np.float64,
-    (float, np.int64): np.float64,
-    (float, np.float32): np.float64,
-    (float, np.float64): np.float64,
-
-    (np.int32, int): np.float64,
-    (np.int32, float): np.float64,
-    (np.int32, np.int32): np.float64,
-    (np.int32, np.int64): np.float64,
-    (np.int32, np.float32): np.float64,
-    (np.int32, np.float64): np.float64,
-
-    (np.int64, int): np.float64,
-    (np.int64, float): np.float64,
-    (np.int64, np.int32): np.float64,
-    (np.int64, np.int64): np.float64,
-    (np.int64, np.float32): np.float64,
-    (np.int64, np.float64): np.float64,
-
-    (np.float32, int): np.float64,
-    (np.float32, float): np.float64,
-    (np.float32, np.int32): np.float64,
-    (np.float32, np.int64): np.float64,
-    (np.float32, np.float32): np.float32,
-    (np.float32, np.float64): np.float64,
-
-    (np.float64, int): np.float64,
-    (np.float64, float): np.float64,
-    (np.float64, np.int32): np.float64,
-    (np.float64, np.int64): np.float64,
-    (np.float64, np.float32): np.float64,
-    (np.float64, np.float64): np.float64,
-}
-
-# This rejects cases that require integer to float conversion,
-# since they violate static typing rules.
-div_inplace_dispatch = {
-
-    (float, int),
-    (float, float),
-    (float, np.int32),
-    (float, np.int64),
-    (float, np.float32),
-    (float, np.float64),
-
-    (np.float32, np.float32),
-
-    (np.float64, int),
-    (np.float64, float),
-    (np.float64, np.int32),
-    (np.float64, np.int64),
-    (np.float64, np.float32),
-    (np.float64, np.float64),
-}
 
 bitwise_dispatch = {
-    (int, int): int,
-    (int, np.int32): np.int64,
-    (int, np.int64): np.int64,
-    (np.int32, int): np.int64,
-    (np.int32, np.int32): np.int32,
-    (np.int32, np.int64): np.int64,
-    (np.int64, int): np.int64,
-    (np.int64, np.int32): np.int64,
-    (np.int64, np.int64): np.int64,
+    (Int32, Int32): Int32,
+    (Int32, Int64): Int64,
+    (Int64, Int32): Int64,
+    (Int64, Int64): Int64
 }
 
-bitwise_inplace_dispatch = {
-    (int, int),
-    (int, np.int32),
-    (int, np.int64),
-    (np.int32, np.int32),
-    (np.int64, int),
-    (np.int64, np.int32),
-    (np.int64, np.int64),
-}
 
 dispatch = {
     "+": binops_dispatch,
@@ -244,24 +124,24 @@ dispatch = {
     "//": binops_dispatch,
     "%": binops_dispatch,
     "**": binops_dispatch,
-    "/": div_dispatch,
+    "/": true_div_dispatch,
     "<<": bitwise_dispatch,
     ">>": bitwise_dispatch,
     "|": bitwise_dispatch,
     "&": bitwise_dispatch,
     "^": bitwise_dispatch,
-    "+=": binops_inplace_dispatch,
-    "-=": binops_inplace_dispatch,
-    "*=": binops_inplace_dispatch,
-    "//=": binops_inplace_dispatch,
-    "%=": binops_inplace_dispatch,
-    "**=": binops_inplace_dispatch,
-    "/=": div_inplace_dispatch,
-    "<<=": bitwise_inplace_dispatch,
-    ">>=": bitwise_inplace_dispatch,
-    "|=": bitwise_inplace_dispatch,
-    "&=": bitwise_inplace_dispatch,
-    "^=": bitwise_inplace_dispatch,
+    "+=": binops_dispatch,
+    "-=": binops_dispatch,
+    "*=": binops_dispatch,
+    "//=": binops_dispatch,
+    "%=": binops_dispatch,
+    "**=": binops_dispatch,
+    "/=": true_div_dispatch,
+    "<<=": bitwise_dispatch,
+    ">>=": bitwise_dispatch,
+    "|=": bitwise_dispatch,
+    "&=": bitwise_dispatch,
+    "^=": bitwise_dispatch,
 }
 
 
@@ -325,5 +205,5 @@ def merge_truth_types(types):
 
 
 def resolve_binop_type(left_type, right_type, op):
-    assert op in itertools.chain(ir.binaryops, ir.inplace_ops)
+    assert op in itertools.chain(ir.binary_ops, ir.in_place_ops)
     # if utils.is_multiplication()

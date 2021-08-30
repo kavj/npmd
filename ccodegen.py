@@ -33,6 +33,13 @@ class CTypeResolver:
         self.ctx = ctx
 
 
+def parenthesized(expr):
+    # This is its own thing to avoid too much inline text formatting
+    # and allow for a more detailed implementation if redundancy
+    # issues ever arise.
+    return f"({expr})"
+
+
 class CodeEmitter:
 
     def __init__(self, context, file, indent="    ", max_line_width=70):
@@ -66,12 +73,12 @@ class CodeEmitter:
 
     @contextmanager
     def indented(self):
-        initial_indent = self.indent
-        scoped_indent = f"{initial_indent}{self.single_indent}"
+        base_indent = self.indent
+        scoped_indent = f"{base_indent}{self.single_indent}"
         self.indent = scoped_indent
         yield
         assert self.indent == scoped_indent
-        self.indent = initial_indent
+        self.indent = base_indent
 
     def print_line(self, line):
         lines = self.line_formatter.wrap(line)

@@ -104,6 +104,7 @@ class VarDecl(StmtBase):
     """
     name: NameRef
     type: typing.Any
+    initial_value: typing.Optional[ValueRef]
     pos: Position
 
 
