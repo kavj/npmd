@@ -10,9 +10,10 @@ from ASTTransform import parse_file
 from canonicalize import NormalizePaths
 from reaching_check import ReachingCheck
 from dataclasses import dataclass
-from errors import module_context
+from errors import error_context
 from utils import wrap_input
 from pretty_printing import pretty_printer
+from type_inference import TypeInfer
 
 
 version = sys.version_info
@@ -62,30 +63,29 @@ def make_array_arg_type(dims, dtype, stride=None):
 
 class CompilerContext:
 
+    # these need to accept type info
     stages = [NormalizePaths, ReachingCheck]
     pretty_print = pretty_printer()
 
-    def __init__(self, verbose=False, pretty_print_ir=False):
-        self.verbose = verbose
-        self.pretty_print_ir_stages = pretty_print_ir
+    def __init__(self):
+        self.stages = []
         self.normalize_paths = NormalizePaths()
         self.reaching_check = ReachingCheck()
         self.pretty_print = pretty_printer()
 
     def run_pipeline(self, file_name, type_map):
-
-        with module_context():
+        with error_context():
             module, symbols = parse_file(file_name)
 
             funcs = module.functions
 
-            if self.pretty_print_ir_stages:
-                print(f"file name: {file_name}\n")
+            print(f"file name: {file_name}\n")
             for index, func in enumerate(funcs):
-                if self.pretty_print_ir_stages:
-                    print(f"function: func.name\n")
                 func = self.normalize_paths(func)
+                func_types = type_map[func.name]
+                infer_types = TypeInfer(func_types)
                 self.reaching_check(func)
+                infer_types(func)
                 funcs[index] = func
         return module, symbols
 
@@ -102,7 +102,7 @@ def compile_module(file_name, type_map, verbose=False):
     if verbose:
         if file_name:
             print(f"Compiling: {file_name}")
-    cc = CompilerContext(verbose=True, pretty_print_ir=True)
+    cc = CompilerContext()
     return cc.run_pipeline(file_name, type_map)
 
     # cc.run_pipeline(file_name, type_map)

@@ -225,7 +225,7 @@ class IteratedExprInfer(ExpressionVisitor):
         return self.visit(expr.operand)
 
 
-class TypeAssign(StmtVisitor):
+class TypeInfer(StmtVisitor):
 
     def __init__(self, types):
         self.assigned = []
