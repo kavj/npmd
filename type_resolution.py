@@ -89,6 +89,24 @@ binops_dispatch = {
     (Float64, Float64): Float64
 }
 
+cmp_dispatch = {
+    (Int32, Int32): Predicate32,
+    (Int32, Int64): Predicate64,
+    (Int32, Float32): FPredicate32,
+    (Int32, Float64): FPredicate64,
+    (Int64, Int32): Predicate32,
+    (Int64, Int64): Predicate64,
+    (Int64, Float32): FPredicate64,
+    (Int64, Float64): FPredicate64,
+    (Float32, Int32): FPredicate32,
+    (Float32, Int64): FPredicate64,
+    (Float32, Float32): FPredicate32,
+    (Float32, Float64): FPredicate64,
+    (Float64, Int32): Float64,
+    (Float64, Int64): Float64,
+    (Float64, Float32): Float64,
+    (Float64, Float64): Float64
+}
 
 true_div_dispatch = {
     (Int32, Int32): Float64,

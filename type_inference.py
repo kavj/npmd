@@ -23,6 +23,21 @@ class TypeMismatch:
         self.msg = TypeMismatch.formatter.wrap(msg)
 
 
+def sigs_from_types(*type_vars):
+    yield from itertools.product(*(tv.types for tv in type_vars))
+
+
+def get_array_dim_reduced_type(base_type):
+    if not isinstance(base_type, ir.ArrayType):
+        msg = f"Cannot iterate over type {base_type}."
+        return TypeMismatch(msg)
+    ndims = base_type.ndims - 1
+    dtype = base_type.dtype
+    if ndims == 0:
+        return dtype
+    return ir.ArrayType(ndims, dtype)
+
+
 class ExprTypeInfer(ExpressionVisitor):
     """
     Intentionally basic implementation of the Cartesian Product Algorithm.
@@ -83,20 +98,14 @@ class ExprTypeInfer(ExpressionVisitor):
 
     @visit.register
     def _(self, node: ir.Subscript):
-        type_ = self._types.get(node.value)
-        if isinstance(type_, ir.ArrayType):
+        array_type = self.visit(node.value)
+        if not isinstance(array_type, ir.ArrayType):
             # would be better not to raise here..
-            msg = f"Cannot subscript non-array type {type_}."
+            msg = f"Cannot subscript non-array type {array_type}."
             raise CompilerError(msg)
-        dtype = type_.dtype
-
-        if not isinstance(node.slice, ir.Slice):
-            ndims = type_.ndims - 1
-            if ndims == 0:
-                type_ = dtype
-            else:
-                type_ = ir.ArrayType(ndims, dtype)
-        return type_
+        if isinstance(node.slice, ir.Slice):
+            return array_type.dtype
+        return get_array_dim_reduced_type(array_type)
 
     @visit.register
     def _(self, node: ir.NameRef):
@@ -107,18 +116,17 @@ class ExprTypeInfer(ExpressionVisitor):
         # no caching since they may change
         left = self.visit(node.left)
         right = self.visit(node.right)
-        for type_ in itertools.chain(left, right):
-            if isinstance(type_, TypeMismatch):
-                return type_
+        expr_type = tr.binops_dispatch.get((left, right))
+        if expr_type is None:
+            msg = f"No signature match for operator {node.op} with candidate signatures: ({left}, {right})."
+            return TypeMismatch(msg)
         possible_types = set()
         invalid_sigs = []
-        for pair in itertools.product(left, right):
+        for pair in sigs_from_types(left, right):
             type_ = tr.binops_dispatch.get((left, right))
             if type_ is None:
                 invalid_sigs.append(pair)
                 continue
-                # msg = f"No signature match for operator {node.op} with types ({pair[0]}, {pair[1]})."
-                # return TypeMismatch(msg)
             possible_types.add(type_)
         # error if no signature is feasible
         if len(possible_types) == 0:
@@ -134,35 +142,39 @@ class ExprTypeInfer(ExpressionVisitor):
     @visit.register
     def _(self, node: ir.CompareOp):
         # Todo: currently assumes all scalar types... need to generalize
-        left = self.visit(node.left)
-        right = self.visit(node.right)
-        output_types = []
-        for ltype, rtype in itertools.product(left, right):
-            output_types.append(tr.merge_truth_types((ltype, rtype)))
-            max_bit_width = max(ltype.bits, rtype.bits)
-            is_integral = ltype.integral and rtype.integral
-            t = tr.type_from_spec(max_bit_width, is_integral, is_boolean=True)
-            output_types.append(t)
-        return tuple(output_types)
+        ltype = self.visit(node.left)
+        rtype = self.visit(node.right)
+        left_dtype = ltype.dtype if isinstance(ltype, ir.ArrayType) else ltype
+        right_dtype = rtype.dtype if isinstance(ltype, ir.ArrayType) else rtype
+        predicate_type = tr.cmp_dispatch.get((left_dtype, right_dtype))
+        if predicate_type is None:
+            if left_dtype.boolean and right_dtype.boolean:
+                msg = "Comparison operators not supported for boolean types."
+            else:
+                msg = f"Cannot form comparison for types {left_dtype}, {right_dtype}."
+            return TypeMismatch(msg)
+        return predicate_type
 
     @visit.register
     def _(self, node: ir.BoolOp):
-        input_types = [self.visit(operand) for operand in node.subexprs]
-        output_types = []
-        for types in itertools.product(*input_types):
-            output_types.append(tr.merge_truth_types(types))
-        return tuple(output_types)
-
-
-def get_array_iterator_target_type(base_type):
-    if not isinstance(base_type, ir.ArrayType):
-        msg = f"Cannot iterate over type {base_type}."
-        return TypeMismatch(msg)
-    ndims = base_type.ndims - 1
-    dtype = base_type.dtype
-    if ndims == 0:
-        return dtype
-    return ir.ArrayType(ndims, dtype)
+        types = []
+        for operand in node.subexprs:
+            types.append(self.visit(operand))
+        predicate_types = []
+        for sig in itertools.product(itertools.islice(types, 0, -1), itertools.islice(types, 1, None)):
+            pt = tr.cmp_dispatch.get(sig)
+            assert pt is not None
+            predicate_types.append(pt)
+        # pick predicate type sufficient for any
+        bits = max(pt.bits for pt in predicate_types)
+        is_integral = True
+        for pt in predicate_types:
+            if bits == pt.bits:
+                if not pt.integral:
+                    is_integral = False
+                    break
+        predicate_type = tr.type_from_spec(bits, is_integral, True)
+        return predicate_type
 
 
 class IteratedExprInfer(ExpressionVisitor):
@@ -196,7 +208,7 @@ class IteratedExprInfer(ExpressionVisitor):
         base_type = self.types.get(expr)
         if isinstance(base_type, TypeMismatch):
             return base_type
-        return get_array_iterator_target_type(base_type)
+        return get_array_dim_reduced_type(base_type)
 
     @visit.register
     def _(self, expr: ir.Subscript):
@@ -207,7 +219,7 @@ class IteratedExprInfer(ExpressionVisitor):
             index_type = self.expr_typer.visit(expr.slice)
             if isinstance(index_type, ir.ScalarType):
                 if index_type.integral:
-                    return get_array_iterator_target_type(base_type)
+                    return get_array_dim_reduced_type(base_type)
         else:
             msg = f"{type(expr)} cannot be subscripted."
             return TypeMismatch(msg)
@@ -218,7 +230,7 @@ class IteratedExprInfer(ExpressionVisitor):
         base_type = self.expr_typer.visit(expr)
         if isinstance(base_type, TypeMismatch):
             return base_type
-        return get_array_iterator_target_type(base_type)
+        return get_array_dim_reduced_type(base_type)
 
     @visit.register
     def _(self, expr: ir.UnaryOp):
