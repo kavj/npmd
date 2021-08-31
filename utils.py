@@ -161,7 +161,7 @@ def unpack_iterated(target, iterable, include_enumerate_indices=True):
 
 
 def is_pow(expr):
-    return isinstance(expr, ir.BinOp) and expr.op in ir.pow_ops
+    return isinstance(expr, ir.BinOp) and expr.op in ("**", "**=")
 
 
 def is_fma_pattern(expr):

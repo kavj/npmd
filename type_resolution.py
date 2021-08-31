@@ -3,7 +3,6 @@ import itertools
 import numpy as np
 import ir
 
-import utils
 
 from errors import CompilerError
 
@@ -20,6 +19,8 @@ Predicate64 = ir.ScalarType(bits=64, integral=True, boolean=True)
 FPredicate32 = ir.ScalarType(bits=32, integral=False, boolean=True)
 FPredicate64 = ir.ScalarType(bits=64, integral=False, boolean=True)
 BoolType = ir.ScalarType(bits=8, integral=True, boolean=True)
+
+DefaultInt = Int32 if np.int_(0).itemsize == 4 else Int64
 
 # defaults, can be overridden
 by_input_type = {np.int32: Int32,

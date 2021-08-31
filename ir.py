@@ -212,6 +212,7 @@ class ArrayType(ValueRef):
 
     def __post_init__(self):
         assert isinstance(self.ndims, int)
+        assert self.ndims > 0
         assert isinstance(self.dtype, Hashable)
 
 

@@ -1,18 +1,24 @@
 import itertools
 import textwrap
-import typing
 
 from collections import defaultdict
 from contextlib import contextmanager
 from functools import singledispatchmethod
 
 import ir
+import utils
 
 import pretty_printing as pp
 import type_resolution as tr
 
 from errors import CompilerError
 from visitor import StmtVisitor, ExpressionVisitor
+
+
+class TypeMismatch:
+
+    def __init__(self, msg):
+        self.msg = msg
 
 
 class ExprTypeInfer(ExpressionVisitor):
@@ -47,6 +53,10 @@ class ExprTypeInfer(ExpressionVisitor):
         self._used_by = defaultdict(dict)
         self.format_expr = pp.pretty_formatter()
 
+    def __call__(self, expr):
+        assert isinstance(expr, ir.ValueRef)
+        return self.visit(expr)
+
     def format_type_error(self, expr, type_sigs):
         """
         Format type mismatches discovered internally to something corresponding to numpy api types.
@@ -59,21 +69,45 @@ class ExprTypeInfer(ExpressionVisitor):
                 api_type = pp.get_pretty_type(param)
                 if api_type is None:
                     msg = f"Unrecognized implementation type {param}."
-                    raise TypeError(msg)
+                    return TypeMismatch(msg)
                 api_sig.append(api_type)
             api_sigs.append(api_sig)
         formatted_sigs = ", ".join(str(sig) for sig in api_sigs)
-        return formatted_expr, formatted_sigs
+        return TypeMismatch(formatted_expr + formatted_sigs)
 
     @singledispatchmethod
     def visit(self, node):
         super().visit(node)
 
     @visit.register
-    def _(self, node: ir.BinOp) -> typing.Tuple:
+    def _(self, node: ir.Subscript):
+        type_ = self._types.get(node.value)
+        if isinstance(type_, ir.ArrayType):
+            # would be better not to raise here..
+            msg = f"Cannot subscript non-array type {type_}."
+            raise CompilerError(msg)
+        dtype = type_.dtype
+
+        if not isinstance(node.slice, ir.Slice):
+            ndims = type_.ndims - 1
+            if ndims == 0:
+                type_ = dtype
+            else:
+                type_ = ir.ArrayType(ndims, dtype)
+        return type_
+
+    @visit.register
+    def _(self, node: ir.NameRef):
+        return self._types.get(node)
+
+    @visit.register
+    def _(self, node: ir.BinOp):
         # no caching since they may change
         left = self.visit(node.left)
         right = self.visit(node.right)
+        for types in itertools.chain(left, right):
+            if isinstance(types, TypeMismatch):
+                return types
         possible_types = defaultdict(set)
         candidates = []
         for pair in itertools.product(left, right):
@@ -120,11 +154,88 @@ class ExprTypeInfer(ExpressionVisitor):
         return tuple(output_types)
 
 
+class IteratedExprInfer(ExpressionVisitor):
+    """
+    Infer type for an expression that is directly iterated over
+    """
+
+    def __init__(self, types):
+        self.expr_typer = ExprTypeInfer(types)
+        self.types = types
+
+    @singledispatchmethod
+    def visit(self, expr):
+        msg = f"No handler for type {type(expr)}"
+        return TypeMismatch(msg)
+
+    @visit.register
+    def _(self, expr: ir.AffineSeq):
+        start = self.expr_typer.visit(expr.start)
+        stop = self.expr_typer.visit(expr.stop)
+        step = self.expr_typer.visit(expr.step)
+        for label, term in zip(("start", "stop", "step"), (start, stop, step)):
+            if not isinstance(term, ir.ScalarType) or not term.integral:
+                msg = f"Parameter {label} must have integer type."
+                return TypeMismatch(msg)
+        # should add standard integer lookup here
+        return tr.Int64
+
+    @visit.register
+    def _(self, expr: ir.NameRef):
+        base_type = self.types.get(expr)
+        if isinstance(base_type, TypeMismatch):
+            return base_type
+        elif isinstance(base_type, ir.ArrayType):
+            ndims = base_type.ndims - 1
+            dtype = base_type.dtype
+            if ndims == 0:
+                return dtype
+            else:
+                return ir.ArrayType(ndims, dtype)
+        elif isinstance(base_type, ir.AffineSeq):
+            return tr.Int64
+        else:
+            msg = f"Cannot iterate over type {base_type}."
+            return TypeMismatch(msg)
+
+    @visit.register
+    def _(self, expr: ir.Subscript):
+        base_type = self.expr_typer.visit(expr.value)
+        if isinstance(base_type, ir.ArrayType):
+            if isinstance(expr.slice, ir.Slice):
+                return base_type
+            index_type = self.expr_typer.visit(expr.slice)
+            if isinstance(index_type, ir.ScalarType):
+                if index_type.integral:
+                    ndims = base_type.ndims - 1
+                    dtype = base_type.dtype
+                    if ndims == 0:
+                        return dtype
+                    else:
+                        return ir.ArrayType(ndims, dtype)
+        else:
+            msg = f"{type(expr)} cannot be subscripted."
+            return TypeMismatch(msg)
+
+    @visit.register
+    def _(self, expr: ir.BinOp):
+        assert not expr.in_place
+        ltype = self.visit(expr.left)
+        rtype = self.visit(expr.right)
+        # this needs shared parameter info
+
+    @visit.register
+    def _(self, expr: ir.UnaryOp):
+        pass
+
+
 class TypeAssign(StmtVisitor):
 
     def __init__(self, types):
         self.assigned = []
         self.types = types
+        self.expr_typer = ExprTypeInfer(types)
+        self.iterated_typer = IteratedExprInfer(types)
         self.loop = None
 
     def __call__(self, types):
@@ -153,9 +264,14 @@ class TypeAssign(StmtVisitor):
 
     @visit.register
     def _(self, stmt: ir.ForLoop):
-        # check target assignments, update mapping
-        # for nameref targets
-        pass
+        for target, iterable in utils.unpack_iterated(stmt.target, stmt.iterable, True):
+            if not isinstance(target, ir.NameRef):
+                continue
+            type_ = self.iterated_typer.visit(iterable)
+            if isinstance(type_, TypeMismatch):
+                return type_
+            if not isinstance(type_, (ir.ArrayType, ir.AffineSeq)):
+                self.types[target].add(iterable)
 
     @visit.register
     def _(self, stmt: ir.IfElse):
