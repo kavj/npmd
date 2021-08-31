@@ -17,8 +17,10 @@ from visitor import StmtVisitor, ExpressionVisitor
 
 class TypeMismatch:
 
+    formatter = textwrap.TextWrapper(break_long_words=False, break_on_hyphens=False)
+
     def __init__(self, msg):
-        self.msg = msg
+        self.msg = TypeMismatch.formatter.wrap(msg)
 
 
 class ExprTypeInfer(ExpressionVisitor):
@@ -105,27 +107,25 @@ class ExprTypeInfer(ExpressionVisitor):
         # no caching since they may change
         left = self.visit(node.left)
         right = self.visit(node.right)
-        for types in itertools.chain(left, right):
-            if isinstance(types, TypeMismatch):
-                return types
-        possible_types = defaultdict(set)
-        candidates = []
+        for type_ in itertools.chain(left, right):
+            if isinstance(type_, TypeMismatch):
+                return type_
+        possible_types = set()
+        invalid_sigs = []
         for pair in itertools.product(left, right):
-            candidates.append(pair)
-            match = tr.binops_dispatch.get(pair)
-            if match is not None:
-                possible_types[match].add(pair)
+            type_ = tr.binops_dispatch.get((left, right))
+            if type_ is None:
+                invalid_sigs.append(pair)
+                continue
+                # msg = f"No signature match for operator {node.op} with types ({pair[0]}, {pair[1]})."
+                # return TypeMismatch(msg)
+            possible_types.add(type_)
         # error if no signature is feasible
-        if len(possible_types) != 0:
-            self._types[node] = possible_types
-        else:
-            formatted_expr, formatted_sigs = self.format_type_error(node, candidates)
-            # there is a remote possibility this could produce a long list
-            msg = f"No candidate signature matches expression {formatted_expr}. Candidate signatures are" \
-                  f"{formatted_sigs}."
-            msg = textwrap.wrap(msg)
-            raise CompilerError(msg)
-        return tuple(possible_types.keys())
+        if len(possible_types) == 0:
+            sigs = tuple(pair for pair in invalid_sigs)
+            msg = f"No signature match for operator {node.op} with candidate signatures: {sigs}."
+            return TypeMismatch(msg)
+        return tuple(possible_types)
 
     @visit.register
     def _(self, node: ir.UnaryOp):
@@ -154,6 +154,17 @@ class ExprTypeInfer(ExpressionVisitor):
         return tuple(output_types)
 
 
+def get_array_iterator_target_type(base_type):
+    if not isinstance(base_type, ir.ArrayType):
+        msg = f"Cannot iterate over type {base_type}."
+        return TypeMismatch(msg)
+    ndims = base_type.ndims - 1
+    dtype = base_type.dtype
+    if ndims == 0:
+        return dtype
+    return ir.ArrayType(ndims, dtype)
+
+
 class IteratedExprInfer(ExpressionVisitor):
     """
     Infer type for an expression that is directly iterated over
@@ -165,7 +176,7 @@ class IteratedExprInfer(ExpressionVisitor):
 
     @singledispatchmethod
     def visit(self, expr):
-        msg = f"No handler for type {type(expr)}"
+        msg = f"Cannot iterate over type {type(expr)}"
         return TypeMismatch(msg)
 
     @visit.register
@@ -185,18 +196,7 @@ class IteratedExprInfer(ExpressionVisitor):
         base_type = self.types.get(expr)
         if isinstance(base_type, TypeMismatch):
             return base_type
-        elif isinstance(base_type, ir.ArrayType):
-            ndims = base_type.ndims - 1
-            dtype = base_type.dtype
-            if ndims == 0:
-                return dtype
-            else:
-                return ir.ArrayType(ndims, dtype)
-        elif isinstance(base_type, ir.AffineSeq):
-            return tr.Int64
-        else:
-            msg = f"Cannot iterate over type {base_type}."
-            return TypeMismatch(msg)
+        return get_array_iterator_target_type(base_type)
 
     @visit.register
     def _(self, expr: ir.Subscript):
@@ -207,12 +207,7 @@ class IteratedExprInfer(ExpressionVisitor):
             index_type = self.expr_typer.visit(expr.slice)
             if isinstance(index_type, ir.ScalarType):
                 if index_type.integral:
-                    ndims = base_type.ndims - 1
-                    dtype = base_type.dtype
-                    if ndims == 0:
-                        return dtype
-                    else:
-                        return ir.ArrayType(ndims, dtype)
+                    return get_array_iterator_target_type(base_type)
         else:
             msg = f"{type(expr)} cannot be subscripted."
             return TypeMismatch(msg)
@@ -220,13 +215,14 @@ class IteratedExprInfer(ExpressionVisitor):
     @visit.register
     def _(self, expr: ir.BinOp):
         assert not expr.in_place
-        ltype = self.visit(expr.left)
-        rtype = self.visit(expr.right)
-        # this needs shared parameter info
+        base_type = self.expr_typer.visit(expr)
+        if isinstance(base_type, TypeMismatch):
+            return base_type
+        return get_array_iterator_target_type(base_type)
 
     @visit.register
     def _(self, expr: ir.UnaryOp):
-        pass
+        return self.visit(expr.operand)
 
 
 class TypeAssign(StmtVisitor):
@@ -238,8 +234,10 @@ class TypeAssign(StmtVisitor):
         self.iterated_typer = IteratedExprInfer(types)
         self.loop = None
 
-    def __call__(self, types):
-        pass
+    def __call__(self, stmt):
+        assert self.loop is None
+        self.visit(stmt)
+        assert self.loop is None
 
     @contextmanager
     def enclosing_loop(self, header):
