@@ -89,7 +89,7 @@ binops_dispatch = {
     (Float64, Float64): Float64
 }
 
-cmp_dispatch = {
+compare_dispatch = {
     (Int32, Int32): Predicate32,
     (Int32, Int64): Predicate64,
     (Int32, Float32): FPredicate32,

@@ -146,7 +146,7 @@ class ExprTypeInfer(ExpressionVisitor):
         rtype = self.visit(node.right)
         left_dtype = ltype.dtype if isinstance(ltype, ir.ArrayType) else ltype
         right_dtype = rtype.dtype if isinstance(ltype, ir.ArrayType) else rtype
-        predicate_type = tr.cmp_dispatch.get((left_dtype, right_dtype))
+        predicate_type = tr.compare_dispatch.get((left_dtype, right_dtype))
         if predicate_type is None:
             if left_dtype.boolean and right_dtype.boolean:
                 msg = "Comparison operators not supported for boolean types."
@@ -157,24 +157,14 @@ class ExprTypeInfer(ExpressionVisitor):
 
     @visit.register
     def _(self, node: ir.BoolOp):
-        types = []
+        truth_types = []
         for operand in node.subexprs:
-            types.append(self.visit(operand))
-        predicate_types = []
-        for sig in itertools.product(itertools.islice(types, 0, -1), itertools.islice(types, 1, None)):
-            pt = tr.cmp_dispatch.get(sig)
-            assert pt is not None
-            predicate_types.append(pt)
-        # pick predicate type sufficient for any
-        bits = max(pt.bits for pt in predicate_types)
-        is_integral = True
-        for pt in predicate_types:
-            if bits == pt.bits:
-                if not pt.integral:
-                    is_integral = False
-                    break
-        predicate_type = tr.type_from_spec(bits, is_integral, True)
-        return predicate_type
+            type_ = self.visit(operand)
+            if isinstance(type_, ir.ArrayType):
+                msg = f"Cannot truth test array type {operand}."
+                return TypeMismatch(msg)
+            truth_types.append(tr.truth_type_from_type(type_))
+        return tr.merge_truth_types(truth_types)
 
 
 class IteratedExprInfer(ExpressionVisitor):
@@ -193,14 +183,12 @@ class IteratedExprInfer(ExpressionVisitor):
 
     @visit.register
     def _(self, expr: ir.AffineSeq):
-        start = self.expr_typer.visit(expr.start)
-        stop = self.expr_typer.visit(expr.stop)
-        step = self.expr_typer.visit(expr.step)
-        for label, term in zip(("start", "stop", "step"), (start, stop, step)):
-            if not isinstance(term, ir.ScalarType) or not term.integral:
+        for label, param in zip(("start", "stop", "step"), expr.subexprs):
+            param_type = self.expr_typer.visit(param)
+            if not isinstance(param_type, ir.ScalarType) or not param_type.integral:
                 msg = f"Parameter {label} must have integer type."
                 return TypeMismatch(msg)
-        # should add standard integer lookup here
+        # use fixed size for now
         return tr.Int64
 
     @visit.register
@@ -241,6 +229,7 @@ class TypeAssign(StmtVisitor):
 
     def __init__(self, types):
         self.assigned = []
+        self.errors = []
         self.types = types
         self.expr_typer = ExprTypeInfer(types)
         self.iterated_typer = IteratedExprInfer(types)
@@ -248,8 +237,14 @@ class TypeAssign(StmtVisitor):
 
     def __call__(self, stmt):
         assert self.loop is None
+        assert not self.errors
+        errors = None
         self.visit(stmt)
         assert self.loop is None
+        if self.errors:
+            errors = self.errors
+            self.errors = []
+        return errors
 
     @contextmanager
     def enclosing_loop(self, header):
@@ -270,7 +265,11 @@ class TypeAssign(StmtVisitor):
         # If name target, check type of rhs
         if isinstance(stmt.target, ir.NameRef):
             value_type = self.visit(stmt.value)
-            self.types[stmt.target].add(value_type)
+            existing = self.types.get(stmt.value)
+            if existing is not None:
+                if value_type != existing:
+                    msg = f"Type conflict for {stmt.target}, {existing} and {value_type}, line: {stmt.pos.line_begin}."
+                    self.errors.append(TypeMismatch(msg))
 
     @visit.register
     def _(self, stmt: ir.ForLoop):
@@ -280,20 +279,19 @@ class TypeAssign(StmtVisitor):
             type_ = self.iterated_typer.visit(iterable)
             if isinstance(type_, TypeMismatch):
                 return type_
-            if not isinstance(type_, (ir.ArrayType, ir.AffineSeq)):
-                self.types[target].add(iterable)
+            existing = self.types.get(target)
+            if existing is not None:
+                if existing != type_:
+                    msg = f"Type conflict for {target}, {existing} and {type_}, line: {stmt.pos.line_begin}."
+                    self.errors.append(TypeMismatch(msg))
+            else:
+                self.types[target] = type_
+
+    @visit.register
+    def _(self, stmt: ir.WhileLoop):
+        self.visit(stmt.body)
 
     @visit.register
     def _(self, stmt: ir.IfElse):
-        test_type = self.visit(stmt.test)
-        try:
-            # Todo: This could return None on no type match,
-            #   since the function is too low level to
-            #   produce meaningful error messages.
-            tr.truth_type_from_type(test_type)
-        except TypeError:
-            interface_type = pp.get_pretty_type(test_type)
-            msg = f"Cannot truth cast {interface_type}."
-            raise CompilerError(msg)
         self.visit(stmt.if_branch)
         self.visit(stmt.else_branch)
