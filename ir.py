@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import Enum, auto, unique
 from functools import cached_property
 
+import ir
 from errors import CompilerError
 
 # Note: operations are split this way to avoid incorrectly accepting bad inplace to out of place conversions.
@@ -271,6 +272,43 @@ class ViewRef:
     @cached_property
     def name(self):
         return self.base.name
+
+
+@dataclass(frozen=True)
+class SlidingWindowViewRef:
+    """
+    This partially implements numpy's sliding window view.
+    It has to be part of the IR to avoid inference here.
+
+    This may be added to ir once it's stable...
+
+
+    Consider the following
+
+    Here we can't packetize edges, as this may not have uniform width.
+    If n > len(a) - width + 1, then some iterations are truncated.
+
+    def example(a, width, n, output):
+       for i in range(n):
+           output[i] = f(a[i:i+width])
+
+    Here it's actually decidable that we have uniform iteration width,
+    because len must be non-negative and width < 1 is treated as an error
+    to simplify runtime logic. Note that the iteration range would be wrong
+    even for zero.
+
+    def example2(a, width, output):
+       for i in range(len(a)-width+1):
+           output[i] = f(a[i:i+width])
+
+    """
+
+    base: typing.Union[ArrayRef, ViewRef]
+    width: ValueRef
+    stride: ValueRef
+
+    def __post_init__(self):
+        assert isinstance(self.base, (ArrayRef, ViewRef))
 
 
 @dataclass(frozen=True)

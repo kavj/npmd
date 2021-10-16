@@ -111,7 +111,7 @@ class symbol_table:
         """
         shortcut to get type info only
         """
-        name = wrap_input(name)
+        name = extract_name(name)
         return self.types.get(name)
 
     def is_typed(self, name):

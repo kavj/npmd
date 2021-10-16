@@ -114,6 +114,12 @@ def _(value: numbers.Real):
     return ir.FloatConst(value)
 
 
+@wrap_input.register
+def _(value: tuple):
+    elts = tuple(wrap_input(elt) for elt in value)
+    return ir.Tuple(elts)
+
+
 def unpack_assignment(target, value, pos):
     if isinstance(target, ir.Tuple) and isinstance(value, ir.Tuple):
         if target.length != value.length:

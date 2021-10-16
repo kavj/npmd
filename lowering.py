@@ -7,7 +7,7 @@ from functools import singledispatch, singledispatchmethod
 
 import ir
 from errors import CompilerError
-from utils import is_addition, is_division, is_multiplication, is_subtraction, wrap_constant, signed_integer_range, \
+from utils import is_addition, is_division, is_multiplication, is_subtraction, wrap_constant, signed_eger_range, \
     unpack_iterated
 from visitor import ExpressionVisitor
 

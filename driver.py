@@ -10,7 +10,7 @@ from ASTTransform import parse_file
 from canonicalize import NormalizePaths
 from reaching_check import ReachingCheck
 from dataclasses import dataclass
-from errors import error_context
+from errors import error_context, CompilerError
 from utils import wrap_input
 from pretty_printing import pretty_printer
 from type_inference import TypeInfer
@@ -61,6 +61,17 @@ def make_array_arg_type(dims, dtype, stride=None):
     return ArrayArg(spec, stride)
 
 
+def resolve_types(types):
+    internal_types = {}
+    for name, type_ in types.items():
+        internal_type = tr.by_input_type.get(type_)
+        if internal_type is None:
+            msg = f"No internal type matches type {type_}."
+            raise CompilerError(msg)
+        internal_types[name] = type_
+    return internal_types
+
+
 class CompilerContext:
 
     # these need to accept type info
@@ -78,7 +89,6 @@ class CompilerContext:
             module, symbols = parse_file(file_name)
 
             funcs = module.functions
-
             print(f"file name: {file_name}\n")
             for index, func in enumerate(funcs):
                 func = self.normalize_paths(func)
@@ -86,6 +96,7 @@ class CompilerContext:
                 infer_types = TypeInfer(func_types)
                 self.reaching_check(func)
                 infer_types(func)
+                symbols[func.name].types = func_types
                 funcs[index] = func
         return module, symbols
 
