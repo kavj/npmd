@@ -1,15 +1,16 @@
 import math
-import numbers
 import operator
 import typing
-from collections import defaultdict, deque
-from functools import singledispatch, singledispatchmethod
+import numpy as np
+from collections import Counter, defaultdict, deque
+from functools import singledispatchmethod
 
 import ir
+import type_resolution as tr
 from errors import CompilerError
-from utils import is_addition, is_division, is_multiplication, is_subtraction, wrap_constant, signed_eger_range, \
-    unpack_iterated
-from visitor import ExpressionVisitor
+from utils import is_addition, is_division, is_multiplication, is_pow, is_subtraction, is_truth_test, wrap_constant, \
+    unpack_iterated, equals_unary_negate
+from visitor import ExpressionVisitor, ExpressionTransformer, StmtTransformer
 
 unaryops = {"+": operator.pos,
             "-": operator.neg,
@@ -89,84 +90,114 @@ def rewrite_pow(expr):
         return expr
 
 
-@singledispatchmethod
-def simplify_commutative_min_max(node):
-    msg = f"Internal Error: Expected min or max ir node, received {type(node)}."
-    raise TypeError(msg)
+class ReductionToSelect(ExpressionTransformer):
+    """
+    Turn min, max, min reduction, max reduction into easily printable expression types.
+    """
+
+    def __call__(self, node):
+        return self.visit(node)
+
+    def serialize_reduction(self, node, op):
+        subexprs = node.subexprs
+        first_term = self.visit(next(subexprs))
+        nested = first_term
+        # turn this into a nesting of single min ops
+        for subexpr in subexprs:
+            subexpr = self.visit(subexpr)
+            predicate = ir.CompareOp(nested, subexpr, op)
+            nested = ir.Select(predicate, nested, subexpr)
+        # if we are left with a one term expression,
+        # then this is either an error or should have been tagged as an array reduction
+        if nested == first_term:
+            msg = f"single term reduction is ambiguous and should not have made it to this point {first_term}"
+            raise RuntimeError(msg)
+        return nested
+
+    @singledispatchmethod
+    def visit(self, node):
+        return super().visit(node)
+
+    @visit.register
+    def _(self, node: ir.Min):
+        interm = super().visit(node)
+        return self.serialize_reduction(interm, "<")
+
+    @visit.register
+    def _(self, node: ir.Max):
+        interm = super().visit(node)
+        return self.serialize_reduction(interm, ">")
+
+    @visit.register
+    def _(self, node: ir.MinReduction):
+        interm = super().visit(node)
+        return self.serialize_reduction(interm, "<")
+
+    @visit.register
+    def _(self, node: ir.MaxReduction):
+        return self.serialize_reduction(node, ">")
 
 
-@simplify_commutative_min_max.register
-def _(node: ir.Max):
-    numeric = set()
-    seen = set()
-    unchecked = deque(node.subexprs)
-    unique = deque()
+class MinMaxSimplifier(ExpressionTransformer):
 
-    while unchecked:
-        value = unchecked.popleft()
-        if value.constant:
-            numeric.add(value.value)
-        elif value not in seen:
-            seen.add(value)
-            if isinstance(value, ir.Max):
-                # Since this handles expressions that are assumed to
-                # be commutative and not overflow or contain unordered
-                # operands, we can inline nested max terms the first time
-                # a unique max expression is encountered.
-                unchecked.extend(value.values)
+    @singledispatchmethod
+    def visit(self, node):
+        return super().visit(node)
+
+    @visit.register
+    def _(self, node: ir.MaxReduction):
+        numeric = set()
+        symbolic = set()
+        for subexpr in node.subexprs:
+            subexpr = self.visit(subexpr)
+            if isinstance(subexpr, ir.Constant):
+                numeric.add(subexpr.value)
             else:
-                unique.append(value)
-
-    if unique:
+                symbolic.add(subexpr)
         if numeric:
-            as_const = wrap_constant(max(numeric))
-            unique.append(as_const)
-        if len(unique) > 1:
-            repl = ir.Max(tuple(unique))
-        else:
-            repl, = unique
-    elif numeric:
-        repl = wrap_constant(max(numeric))
-    else:
-        # should never happen
-        raise ValueError("Internal Error: commutative min max simplification.")
+            numeric = wrap_constant(np.max(tuple(numeric)))
+            if numeric == ir.NAN or not symbolic:
+                return numeric
+            symbolic.add(numeric)
+        return ir.MaxReduction(symbolic)
 
-    return repl
-
-
-@simplify_commutative_min_max.register
-def _(node: ir.Min):
-    numeric = set()
-    seen = set()
-    unchecked = deque(node.values)
-    unique = deque()
-
-    while unchecked:
-        value = unchecked.popleft()
-        if value.constant:
-            numeric.add(value.value)
-        elif value not in seen:
-            seen.add(value)
-            if isinstance(value, ir.Min):
-                unchecked.extend(value.values)
+    @visit.register
+    def _(self, node: ir.MinReduction):
+        numeric = set()
+        symbolic = set()
+        for subexpr in node.subexprs:
+            subexpr = self.visit(subexpr)
+            if isinstance(subexpr, ir.Constant):
+                numeric.add(subexpr.value)
             else:
-                unique.append(value)
-
-    if unique:
+                symbolic.add(subexpr)
         if numeric:
-            as_const = wrap_constant(min(numeric))
-            unique.append(as_const)
-        if len(unique) > 1:
-            repl = ir.Min(tuple(unique))
-        else:
-            repl, = unique
-    elif numeric:
-        repl = wrap_constant(min(numeric))
-    else:
-        # should never happen
-        raise ValueError("Internal Error: commutative min max simplification.")
+            numeric = wrap_constant(np.min(tuple(numeric)))
+            if numeric == ir.NAN or not symbolic:
+                return numeric
+            symbolic.add(numeric)
+        return ir.MinReduction(symbolic)
 
-    return repl
+    @visit.register
+    def _(self, node: ir.Min):
+        a = self.visit(node.a)
+        b = self.visit(node.b)
+        if a == b:
+            return a
+        elif ir.NAN in (a,b):
+            # follow numpy rules
+            return ir.NAN
+        return ir.Min(a,b)
+
+    @visit.register
+    def _(self, node: ir.Max):
+        a = self.visit(node.a)
+        b = self.visit(node.b)
+        if a == b:
+            return a
+        elif ir.NAN in (a,b):
+            return ir.NAN
+        return ir.Max(a,b)
 
 
 # Todo: A lot of this can't be done consistently without type information. Some folding of constants
@@ -175,7 +206,7 @@ def _(node: ir.Min):
 #       in a way that may differ from compiler sanitization flags.
 
 
-class const_folding(ExpressionVisitor):
+class const_folding(ExpressionTransformer):
     # These don't reject large integer values, since they may be intermediate values.
     # It only matters if they are explicitly bound to a fixed width data type that
     # cannot contain them.
@@ -233,17 +264,16 @@ class const_folding(ExpressionVisitor):
             # if propagated
             if operand.op == expr.op:
                 expr = operand.operand
-            return result
         return expr
 
     @visit.register
-    def _(self, expr: ir.Ternary):
+    def _(self, expr: ir.Select):
         test = self.lookup(expr.test)
-        if_expr = self.lookup(expr.if_expr)
-        else_expr = self.lookup(expr.else_expr)
+        on_true = self.lookup(expr.on_true)
+        on_false = self.lookup(expr.on_false)
         if test.constant:
-            return if_expr if operator.truth(test) else else_expr
-        return ir.Ternary(test, if_expr, else_expr)
+            return on_true if operator.truth(test) else on_false
+        return ir.Select(test, on_true, on_false)
 
     @visit.register
     def _(self, expr: ir.AND):
@@ -322,11 +352,6 @@ class const_folding(ExpressionVisitor):
         return expr
 
 
-@singledispatch
-def simplify_commutative_min_max(node):
-    raise NotImplementedError
-
-
 def unwrap_truth_tested(expr):
     """
     Extract truth tested operands. This helps limit isinstance checks for cases
@@ -338,7 +363,7 @@ def unwrap_truth_tested(expr):
     return expr
 
 
-class arithmetic_folding(ExpressionVisitor):
+class arithmetic_folding(ExpressionTransformer):
     """
     Non-recursive visitor for folding identity ops
 
@@ -347,12 +372,9 @@ class arithmetic_folding(ExpressionVisitor):
 
     """
 
-    def __call__(self, expr):
-        return self.lookup(expr)
-
     @singledispatchmethod
     def visit(self, expr):
-        raise NotImplementedError
+        return super().visit(expr)
 
     @visit.register
     def _(self, node: ir.BinOp):
@@ -386,6 +408,8 @@ class arithmetic_folding(ExpressionVisitor):
             elif right == ir.Zero:
                 return left
             elif equals_unary_negate(right):
+                # Todo: this is not entirely correct... as it may not be a unary node
+                # need something like extract unary operand..
                 return ir.BinOp(left, right.operand, "+=" if node.in_place else "+")
             elif equals_unary_negate(left):
                 assert not node.in_place
@@ -416,8 +440,7 @@ class arithmetic_folding(ExpressionVisitor):
     def _(self, node: ir.UnaryOp):
         if isinstance(node.operand, ir.UnaryOp) and node.operand == node.op:
             return node.operand.operand
-        else:
-            return node
+        return node
 
     @visit.register
     def _(self, node: ir.AND):
@@ -454,7 +477,7 @@ class arithmetic_folding(ExpressionVisitor):
 
     @visit.register
     def _(self, node: ir.NOT):
-        if not applies_truth_test(node.operand):
+        if not is_truth_test(node.operand):
             return node
         if isinstance(node.operand, ir.BinOp):
             op = node.operand.op
@@ -474,7 +497,7 @@ class arithmetic_folding(ExpressionVisitor):
         elif isinstance(node, ir.NOT):
             # remove double negation
             operand = node.operand.operand
-            if not applies_truth_test(operand):
+            if not is_truth_test(operand):
                 # If the unwrapped type doesn't already export a truth test
                 # we need to indicate this explicitly.
                 operand = ir.TRUTH(operand)
@@ -486,25 +509,25 @@ class arithmetic_folding(ExpressionVisitor):
         # This will leave truth casts on constant integers
         # and floats, since the only gain there is a loss
         # of clarity.
-        if applies_truth_test(node.operand):
+        if is_truth_test(node.operand):
             node = node.operand
         return node
 
     @visit.register
-    def _(node: ir.Ternary):
-        if node.if_expr == node.else_expr:
-            return if_expr
+    def _(node: ir.Select):
+        if node.on_true == node.on_false:
+            return node.on_true
         elif node.test.constant:
-            return node.if_expr if operator.truth(node.test) else node.else_expr
+            return node.on_true if operator.truth(node.test) else node.on_false
         test = node.test
         if isinstance(test, ir.BinOp):
-            if_expr = node.if_expr
-            else_expr = node.else_expr
+            on_true = node.on_true
+            on_false = node.on_false
             test = node.test
             if test.op in ("<", "<="):
-                if if_expr == test.left and else_expr == test.right:
-                    return ir.Min((if_expr, else_expr))
-                elif else_expr == test.right and if_expr == test.left:
+                if on_true == test.left and on_false == test.right:
+                    return ir.Min((on_true, on_false))
+                elif on_false == test.right and on_true == test.left:
                     # This is almost negated. The issue is if in the destination assembly:
                     #
                     #     min(a,b) is implemented as a if a <= b else b
@@ -514,271 +537,236 @@ class arithmetic_folding(ExpressionVisitor):
                     #  This does not follow Python's min/max conventions, which are too error prone.
                     #  Those can arbitrarily propagate or suppress nans as a side effect of
                     #  determining type from the leading operand.
-                    return ir.Max((else_expr, if_expr))
+                    return ir.Max((on_false, on_true))
 
             elif test.op in (">", ">="):
-                if if_expr == test.left and else_expr == test.right:
-                    return ir.Max((if_expr, else_expr))
-                elif if_expr == test.right and else_expr == test.left:
+                if on_true == test.left and on_false == test.right:
+                    return ir.Max((on_true, on_false))
+                elif on_true == test.right and on_false == test.left:
                     # right if left < right else left
-                    return ir.Min((else_expr, if_expr))
+                    return ir.Min((on_false, on_true))
         return node
 
 
-@singledispatch
-def interval_from_iterable(iterable):
-    msg = f"Cannot retrieve interval from iterable of type {iterable}."
-    raise NotImplementedError(msg)
+class IntervalBuilder(ExpressionVisitor):
+
+    @singledispatchmethod
+    def visit(self, iterable):
+        msg = f"No method to generate interval for {iterable} of type {type(iterable)}."
+        raise TypeError(msg)
+
+    @visit.register
+    def _(self, iterable: ir.AffineSeq):
+        return (iterable.start, iterable.stop, iterable.step)
+
+    @visit.register
+    def _(self, iterable: ir.NameRef):
+        return (ir.Zero, ir.SingleDimRef(iterable, ir.Zero), ir.One)
+
+    @visit.register
+    def _(self, iterable: ir.Subscript):
+        if isinstance(iterable.slice, ir.Slice):
+            slice_ = iterable.slice
+            start = slice_.start
+            if start is None:
+                start = ir.Zero
+            stop = ir.SingleDimRef(iterable.target, ir.Zero)
+            if slice_.stop is not None:
+                stop = ir.Min(stop, slice_.stop)
+            step = slice_.step
+            if step is None:
+                step = ir.One
+        else:
+            start = ir.Zero
+            stop = ir.SingleDimRef(iterable, ir.One)
+            step = ir.One
+        return start, stop, step
 
 
-@interval_from_iterable.register
-def _(iterable: ir.AffineSeq):
-    return (iterable.start, iterable.stop, iterable.step)
-
-
-@interval_from_iterable.register
-def _(iterable: ir.NameRef):
-    return (ir.Zero, ir.Length(iterable), ir.One)
-
-
-@interval_from_iterable.register
-def _(iterable: ir.Subscript):
-    if isinstance(iterable.slice, ir.Slice):
-        slice_ = iterable.slice
-        start = slice_.start if slice_.start is not None else ir.Zero
-        stop = ir.Length(iterable.target)
-        if slice_.stop is not None:
-            stop = ir.Min(stop, slice_.stop)
-        step = slice_.step if slice_.step is not None else ir.One
+def _compute_iter_count(diff, step):
+    # Todo: may insert an extra round of constant folding here..
+    if step == ir.Zero:
+        msg = "Zero step loop iterator encountered."
+        raise CompilerError(msg)
+    elif step == ir.One:
+        count = diff
     else:
-        start = ir.Zero
-        stop = ir.Length(iterable)
-        step = ir.One
-    return start, stop, step
+        on_false = ir.BinOp(diffs, step, "//")
+        modulo = ir.BinOp(diffs, step, "%")
+        on_true = ir.BinOp(on_false, ir.One, "+")
+        count = ir.Select(predicate=modulo, on_true=on_true, on_false=on_false)
+    return count
 
 
-def simplify_spans(spans, non_negative_terms):
-    by_stop = defaultdict(set)
-
-    for start, stop in spans:
-        by_stop[stop].add(start)
-
-    repl = []
-    seen = set()
-
-    for _, stop in spans:
-        if stop not in seen:
-            starts = by_stop[stop]
-            seen.add(stop)
-            if len(starts) == 1:
-                start, = starts
-            else:
-                start = ir.Max(tuple(starts))
-                start = simplify_commutative_min_max(start)
-            repl.append((start, stop))
-    return repl
+def _find_range_intersection(by_step):
+    if len(by_step) == 0:
+        return set()
+    diff_sets = iter(by_step.value())
+    initial = next(diff_sets)
+    for d in diff_sets:
+        initial.intersection_update(d)
+    return initial
 
 
-def is_non_negative(expr, non_negative_terms):
-    """
-    check for non-negative expressions, strictly intended for finite arithmetic.
-
-    """
-    if expr.constant:
-        return operator.ge(expr.value, 0)
-    elif expr in non_negative_terms:
-        return True
-    elif isinstance(expr, ir.Max):
-        return any(is_non_negative(subexpr, non_negative_terms) for subexpr in expr.subexprs)
-    return False
-
-
-def find_safe_interval_width(a: ir.ValueRef, b: ir.ValueRef, non_negative_terms) -> typing.Union[bool, ir.ValueRef]:
-    """
-
-    for a half-open interval [a, b)
-    check if either "a" is non-negative or "b - a" is computable at compile time.
-    If "b - a" overflows available fixed precision, it must be handled elsewhere.
-
-    References:
-        LIVINSKII et. al, Random Testing for C and C++ Compilers with YARPGen
-        Dietz et. al, Understanding Integer Overflow in C/C++
-
-        Bachmann et. al, Chains of Recurrences - a method to expedite the evaluation of closed-form functions
-        https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html
-        https://developercommunity.visualstudio.com/t/please-implement-integer-overflow-detection/409051
-        https://numpy.org/doc/stable/user/building.html
-
-    """
-
-    if a.constant:
-        if b.constant:
-            return wrap_constant(operator.sub(b.value, a.value))
-        elif is_non_negative(b, non_negative_terms):
-            return ir.BinOp(b, a, "-")
-        else:
-            return ir.BinOp(ir.Max(b, ir.Zero), a, "-")
-    elif is_non_negative(a, non_negative_terms):
-        # symbolic but strictly non-negative
-        if is_non_negative(b, non_negative_terms):
-            return ir.BinOp(b, a, "-")
-        else:
-            return ir.BinOp(ir.Max(b, ir.Zero), a, "-")
-    return ir.OFCheckedSub(b, a)
-
-
-def split_intervals_by_step(intervals):
-    by_step = defaultdict(set)
+def _find_shared_interval(intervals):
+    starts = set()
+    stops = set()
+    steps = set()
     for start, stop, step in intervals:
-        by_step[step].add((start, stop))
-    return by_step
+        starts.add(start)
+        stops.add(stop)
+        steps.add(step)
 
+    # enumerate doesn't declare a bound, so it shows up as None
+    stops.discard(None)
+    simplify_min_max = MinMaxSimplifier()
+    simplify_expr = arithmetic_folding()
 
-def make_loop_interval(iterables, non_negative_terms):
-    """
-
-    Make loop interval of the form (start, stop, step).
-
-    This tries to find a safe method of calculation.
-
-    This assumes (with runtime verification if necessary)
-    that 'stop - start' will not overflow.
-
-    References:
-        LIVINSKII et. al, Random Testing for C and C++ Compilers with YARPGen
-        Dietz et. al, Understanding Integer Overflow in C/C++
-        Bachmann et. al, Chains of Recurrences - a method to expedite the evaluation of closed-form functions
-        https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html
-        https://developercommunity.visualstudio.com/t/please-implement-integer-overflow-detection/409051
-        https://numpy.org/doc/stable/user/building.html
-
-    """
-
-    # Todo: This should be a loop transform pass, since it needs to inject error handling for complicated parameters
-    #       and eventually handle reversal.
-
-    intervals = set()
-
-    for iterable in iterables:
-        interval_params = interval_from_iterable(iterable)
-        intervals.update(interval_params)
-
-    by_step = split_intervals_by_step(intervals)
-
-    opt_by_step = {}
-
-    for step, spans in by_step.items():
-        opt_by_step[step] = simplify_spans(spans, non_negative_terms)
-
-    if len(opt_by_step) == 1:
-        step, spans = opt_by_step.popitem()
-        if len(spans) == 1:
-            span, = spans
-            start, stop = span
-            return ir.AffineSeq(start, stop, step)
-        else:
-            # produces an interval (0, diff, step)
-            terms = []
-            for start, stop in spans:
-                diff = find_safe_interval_width(start, stop, non_negative_terms)
-                terms.append(diff)
-            count = ir.Min(tuple(terms))
-            interval = ir.AffineSeq(ir.Zero, count, ir.One)
-            return interval
-    else:
-        # compute explicit interval counts
-        counts = []
-        seen = set()
-        for step, spans in opt_by_step.items():
-            diffs = []
-            diff = None
-            for start, stop in spans:
-                diff = find_safe_interval_width(start, stop, non_negative_terms)
-                diffs.append(diff)
-            if len(diffs) > 1:
-                diff = ir.Min(tuple(diffs))
-            base_count = ir.BinOp(diff, step, "//")
-            test = ir.BinOp(diff, step, "%")
-            fringe = ir.Ternary(test, ir.One, ir.Zero)
-            count = ir.BinOp(base_count, fringe, "+")
-            counts.append(count)
-
-        assert(len(counts) > 0)
-        count = ir.Min(tuple(counts)) if len(counts) != 1 else counts.pop()
-        interval = ir.AffineSeq(ir.Zero, count, ir.One)
-        return interval
-
-
-def make_loop_assigns(node: ir.ForLoop, interval, loop_index):
-    index_start, index_stop, index_step = interval
-    pos = node.pos
-    assigns = []
-    simplify_arithmetic = arithmetic_folding()
-
-    if (index_start, index_step) == (ir.Zero, ir.One):
-        # normalized loop indices can pessimize dependence testing, but
-        # we don't use explicit dependence tests here
-        for target, iterable in unpack_iterated(node.target, node.iterable):
-            iter_start, iter_stop, iter_step = interval_from_iterable(iterable)
-            offset = ir.BinOp(loop_index, iter_step, "*")
-            expr = ir.BinOp(iter_start, offset,  "+")
-            expr = simplify_arithmetic(expr)
-            if isinstance(iterable, ir.Subscript):
-                if isinstance(iterable.slice, ir.Slice):
-                    # this works like itertools.islice in that we
-                    # build an iterator over the sliced region without
-                    # explicitly constructing a slice
-                    expr = ir.Subscript(iterable.target, expr)
-                else:
-                    indices = (iterable.slice, expr)
-                    expr = ir.Subscript(iterable.target, ir.Tuple(indices))
-            elif isinstance(iterable, ir.NameRef):
-                expr = ir.Subscript(iterable, expr)
-            elif not isinstance(iterable, ir.AffineSeq):
-                raise TypeError("Internal Error: unrecognized iterable type.")
-            stmt = ir.Assign(target, expr, pos)
-            assigns.append(stmt)
-    else:
-        # verify that we have matching step
-        for target, iterable in unpack_iterated(node.target, node.iterable):
-            iter_start, iter_stop, iter_step = interval_from_iterable(iterable)
-            # check that interval assumptions hold
-            if iter_step != index_step:
-                msg = f"Internal Error: Non-conforming loop step."
-                raise ValueError(msg)
-            elif iter_start != index_start and index_start != ir.Zero:
-                msg = f"Internal Error: Non-conforming loop start."
-                raise ValueError(msg)
-            access_func = ir.BinOp(loop_index, iter_start, "+")
-            access_func = simplify_arithmetic(access_func)
-            if isinstance(iterable, ir.AffineSeq):
-                value = access_func
-            elif isinstance(iterable, ir.Subscript):
-                if isinstance(iterable.slice, ir.Slice):
-                    # if we reach this point, the step used by the loop
-                    # index should match iterable.slice.step
-                    assert iterable.slice.step == index_step
-                    value = ir.Subscript(iterable.target, access_index)
-                else:
-                    # scalar subscript means we're iterating over the second dim
-                    # rather than the leading one
-                    indices = (iterable.slice, access_index)
-                    value = ir.Subscript(iterable.target, ir.Tuple(indices))
-            elif isinstance(iterable, ir.NameRef):
-                value = ir.Subscript(iterable, access_index)
+    if len(steps) == 1:
+        # If there's only one step size, we can
+        # avoid explicitly computing iteration count
+        step = steps.pop()
+        step = simplify_expr(step)
+        if len(starts) == 1:
+            start = starts.pop()
+            if len(stops) == 1:
+                stop = stops.pop()
+                simplify_expr(stop)
             else:
-                msg = f"Internal Error: Cannot make access function for type {type(iterable)}."
-                raise TypeError(msg)
-            assign = ir.Assign(target, value, pos)
-            assigns.append(assign)
-    return assigns
+                stop = ir.MinReduction({simplify_expr(s) for s in stops})
+                stop = simplify_min_max(stop)
+            return start, stop, step
+        elif len(stops) == 1:
+            stop = stops.pop()
+            stop = simplify_expr(stop)
+            start = {simplify_expr(s) for s in starts}
+            start = ir.MaxReduction(start)
+            start = simplify_min_max(start)
+            diff = ir.BinOp(stop, start, "-")
+            diff = simplify_arith(diff)
+            return ir.Zero, diff, step
+
+    # collect steps to minimize division and modulo ops required
+    by_step = defaultdict(set)
+    by_diff = defaultdict(set)
+    for start, stop, step in intervals:
+        diff = ir.BinOp(stop, start, "-")
+        diff = simplify_expr(diff)
+        by_step[step].add(diff)
+
+    for step, diffs in by_step.items():
+        by_step[frozenset(diffs)].add(step)
+
+    # combine steps if possible
+    for diff, steps in by_diff.items():
+        if len(steps) != 1:
+            # remove combinable entries
+            for step in steps:
+                by_step.pop(step)
+            steps = ir.MaxReduction(steps)
+            steps = simplify_commutative_min_max(steps)
+            by_step[steps].update(diff)
+
+    by_step_refined = {}
+
+    for step, diffs in by_step.items():
+        diffs = ir.Min(diffs)
+        diffs = simplify_commutative_min_max(diffs)
+        by_step_refined[step] = diffs
+
+    # Now compute explicit counts, since we don't use explicit dependency testing
+    # this isn't a big deal
+
+    counts = set()
+    for step, diff in by_step_refined.items():
+        count = _compute_iter_count(diff, step)
+        count = simplify_expr(count)
+        counts.add(count)
+    counts = ir.Min(counts)
+    counts = simplify_commutative_min_max(counts)
+    return ir.Zero, counts, ir.One
 
 
-def make_single_index_loop(node: ir.ForLoop, non_negative_scalars, loop_index):
-    # ignore enumerate indices
-    iterables = {iterable for (_, iterable) in unpack_iterated(node.target, node.iterable, False)}
-    interval = make_loop_interval(iterables, non_negative_scalars)
-    assigns = make_loop_assigns(node, interval, loop_index)
-    assigns.extend(node.body)
-    repl = ir.ForLoop(loop_index, interval, assigns, node.pos)
+def make_single_index_loop(header: ir.ForLoop, symbols):
+    """
+
+        Make loop interval of the form (start, stop, step).
+
+        This tries to find a safe method of calculation.
+
+        This assumes (with runtime verification if necessary)
+        that 'stop - start' will not overflow.
+
+        References:
+            LIVINSKII et. al, Random Testing for C and C++ Compilers with YARPGen
+            Dietz et. al, Understanding Integer Overflow in C/C++
+            Bachmann et. al, Chains of Recurrences - a method to expedite the evaluation of closed-form functions
+            https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html
+            https://developercommunity.visualstudio.com/t/please-implement-integer-overflow-detection/409051
+            https://numpy.org/doc/stable/user/building.html
+
+    """
+
+    by_iterable = {}
+    intervals = set()
+    interval_from_iterable = IntervalBuilder()
+    for _, iterable in unpack_iterated(header.target, header.iterable):
+        interval = interval_from_iterable(iterable)
+        by_iterable[iterable] = interval
+        intervals.add(interval)
+
+    # loop_interval = _find_shared_interval(intervals)
+    loop_start, loop_stop, loop_step = _find_shared_interval(intervals)
+    loop_expr = ir.AffineSeq(loop_start, loop_stop, loop_step)
+    # Todo: this needs a default setting to avoid excessive casts
+    loop_counter = symbols.make_unique_name_like("i", type_=tr.Int32)
+    body = []
+    pos = header.pos
+    simplify_expr = arithmetic_folding()
+
+    for target, iterable in unpack_iterated(header.target, header.iterable):
+        (start, _, step) = by_iterable[iterable]
+        assert step == loop_step
+        assert (start == loop_start) or (loop_start == ir.Zero)
+        if step == loop_step:
+            if start == loop_start:
+                index = loop_counter
+            else:
+                assert loop_start == ir.Zero
+                index = ir.BinOp(loop_counter, start, "+")
+        else:
+            # loop counter must be normalized
+            assert loop_start == ir.Zero
+            assert loop_step == ir.One
+            index = ir.BinOp(step, loop_counter, "*")
+            if start != ir.Zero:
+                index = ir.BinOp(start, index, "+")
+
+        value = index if isinstance(iterable, ir.AffineSeq) else ir.Subscript(iterable, index)
+        assign = ir.Assign(target, value, pos)
+        body.append(assign)
+
+    # Todo: this doesn't hoist initial setup
+    body.extend(header.body)
+    repl = ir.ForLoop(loop_counter, loop_expr, body, pos)
     return repl
+
+
+class loop_lowering(StmtTransformer):
+
+    def __init__(self, symbols):
+        self.symbols = symbols
+
+    def __call__(self, node):
+        return self.visit(node)
+
+    @singledispatchmethod
+    def visit(self, node):
+        return super().visit(node)
+
+    @visit.register
+    def _(self, node: ir.ForLoop):
+        interm =  make_single_index_loop(node, self.symbols)
+        body = self.visit(interm.body)
+        repl = ir.ForLoop(interm.target, interm.iterable, body, node.pos)
+        return repl

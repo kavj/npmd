@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import numbers
 import operator
 import typing
@@ -192,11 +193,15 @@ class StringConst(Constant):
 
 Zero = IntConst(0)
 One = IntConst(1)
+Neg_One = IntConst(-1)
+NAN = FloatConst(math.nan)
+TRUE = BoolConst(True)
+FALSE = BoolConst(False)
 
 
 # Top Level
 
-
+# Todo: add typing to these to avoid needing constant access to symbol table
 @dataclass(frozen=True)
 class NameRef(ValueRef):
     # variable name ref
@@ -218,18 +223,38 @@ class ArrayType(ValueRef):
 
 
 @dataclass(frozen=True)
-class ArrayInitSpec(ValueRef):
-    dims: typing.Tuple[typing.Union[NameRef, IntConst], ...]
+class ArrayInit(Expression):
+    ndims: int
     dtype: typing.Hashable
+    dims: typing.Tuple[typing.Union[NameRef, IntConst], ...]
     fill_value: typing.Optional[typing.Union[IntConst, FloatConst, BoolConst]]
 
     def __post_init__(self):
-        assert isinstance(self.dims, tuple)
+        assert isinstance(self.ndims, numbers.Integral)
+        assert self.dims is None or isinstance(self.dims, tuple)
         assert isinstance(self.dtype, Hashable)
+
+    @property
+    def subexprs(self):
+        for d in self.dims:
+            yield d
 
 
 @dataclass(frozen=True)
-class ArrayRef(ValueRef):
+class ArrayArg(Expression):
+    ndims: int
+    dtype: typing.Hashable
+    dims: typing.Optional[typing.Tuple[typing.Tuple[int, int], ...]]
+    evol: typing.Optional[str]
+
+    @property
+    def subexprs(self):
+        for d in self.dims:
+            yield d
+
+
+@dataclass(frozen=True)
+class ArrayRef(Expression):
     name: NameRef
     dims: typing.Tuple[typing.Union[NameRef, IntConst], ...]
     dtype: typing.Hashable
@@ -247,12 +272,36 @@ class ArrayRef(ValueRef):
     def ndims(self):
         return len(self.dims)
 
+    @property
+    def subexprs(self):
+        for d in self.dims:
+            yield d
+
 
 @dataclass(frozen=True)
-class ViewRef:
+class SingleDimRef(Expression):
+    base: ValueRef
+    dim: IntConst
+
+    def __post_init__(self):
+        if not isinstance(self.dim, IntConst):
+            msg = f"Expected integer constant, received {self.dim} of type {type(self.dim)}."
+            raise TypeError(msg)
+
+    @property
+    def subexprs(self):
+        yield self.base
+        yield self.dim
+
+
+# Todo: changes here should be bested as the component yielded by loop unpacking.
+
+@dataclass(frozen=True)
+class IteratedViewRef:
+    expr: ValueRef
     base: typing.Union[ArrayRef, ViewRef]
-    slice: typing.Optional[typing.Union[IntConst, Slice, NameRef, BinOp, UnaryOp]]
-    transposed: bool
+    iterated: typing.Optional[bool] = True
+    transpose: typing.Optional[bool] = False
 
     def __post_init__(self):
         assert isinstance(self.base, (ArrayRef, ViewRef))
@@ -261,17 +310,6 @@ class ViewRef:
     @cached_property
     def dtype(self):
         return self.base.dtype
-
-    @cached_property
-    def ndims(self):
-        if isinstance(self.slice, Slice):
-            return self.base.ndims
-        else:
-            return self.base.ndims - 1
-
-    @cached_property
-    def name(self):
-        return self.base.name
 
 
 @dataclass(frozen=True)
@@ -303,24 +341,14 @@ class SlidingWindowViewRef:
 
     """
 
-    base: typing.Union[ArrayRef, ViewRef]
+    expr: ValueRef
+    base: ValueRef
     width: ValueRef
     stride: ValueRef
+    iterated: typing.Optional[bool] = True
 
     def __post_init__(self):
-        assert isinstance(self.base, (ArrayRef, ViewRef))
-
-
-@dataclass(frozen=True)
-class Length(Expression):
-    value: ValueRef
-
-    def __post_init__(self):
-        assert isinstance(self.value, ValueRef)
-
-    @property
-    def subexprs(self):
-        yield self.value
+        assert isinstance(self.base, ValueRef)
 
 
 @dataclass(frozen=True)
@@ -329,8 +357,12 @@ class Subscript(Expression):
     slice: ValueRef
 
     def __post_init__(self):
-        assert isinstance(self.value, ValueRef)
-        assert isinstance(self.slice, ValueRef)
+        if not isinstance(self.value, ValueRef):
+            msg = f"Expected ValueRef, got {self.value}, type: {type(self.value)}."
+            raise TypeError(msg)
+        elif not isinstance(self.slice, ValueRef):
+            msg = f"Expected ValueRef, got {self.slice}, type: {type(self.slice)}."
+            raise TypeError(msg)
 
     @property
     def subexprs(self):
@@ -340,36 +372,74 @@ class Subscript(Expression):
 
 @dataclass(frozen=True)
 class Min(Expression):
-    """
-    Min iteration count over a number of counters
-    """
-    values: typing.Tuple[ValueRef, ...]
+    left: ValueRef
+    right: ValueRef
 
-    def __post_init__(self):
-        assert isinstance(self.values, tuple)
-        assert all(isinstance(v, ValueRef) for v in self.values)
+    def __init__(self, left, right):
+        assert isinstance(left, ValueRef)
+        assert isinstance(right, ValueRef)
+        object.__setattr__(self, "left", left)
+        object.__setattr__(self, "right", right)
 
     @property
     def subexprs(self):
-        for subexpr in self.values:
-            yield subexpr
+        yield self.left
+        yield self.right
+
+
+@dataclass(frozen=True)
+class MinReduction(Expression):
+    values: typing.Union[typing.Set, typing.FrozenSet]
+
+    def __init__(self, *values):
+        if len(values) == 1:
+            values, = values
+            if isinstance(values, set):
+                values = frozenset(values)
+            object.__setattr__(self, "values", values)
+        else:
+            object.__setattr__(self, "values", frozenset(v for v in values))
+
+    @property
+    def subexprs(self):
+        for v in self.values:
+            yield v
 
 
 @dataclass(frozen=True)
 class Max(Expression):
-    """
-    Max iteration count over a number of counters
-    """
-    values: typing.Tuple[ValueRef, ...]
+    left: ValueRef
+    right: ValueRef
 
-    def __post_init__(self):
-        assert isinstance(self.values, tuple)
-        assert all(isinstance(v, ValueRef) for v in self.values)
+    def __init__(self, left, right):
+        assert isinstance(left, ValueRef)
+        assert isinstance(right, ValueRef)
+        object.__setattr__(self, "left", left)
+        object.__setattr__(self, "right", right)
 
     @property
     def subexprs(self):
-        for subexpr in self.values:
-            yield subexpr
+        yield self.left
+        yield self.right
+
+
+@dataclass(frozen=True)
+class MaxReduction(Expression):
+    values: typing.Union[typing.Set, typing.FrozenSet]
+
+    def __init__(self, *values):
+        if len(values) == 1:
+            values, = values
+            if isinstance(values, set):
+                values = frozenset(values)
+            object.__setattr__(self, "values", values)
+        else:
+            object.__setattr__(self, "values", frozenset(v for v in values))
+
+    @property
+    def subexprs(self):
+        for v in self._values:
+            yield v
 
 
 @dataclass
@@ -385,9 +455,14 @@ class Module:
     This aggregates imports and Function graphs
 
     """
-
+    name: str
     functions: typing.List[Function]
     imports: typing.List[typing.Any]
+
+    def lookup(self, func_name):
+        for func in self.functions:
+            if func.name == func_name:
+                return func
 
 
 @dataclass(frozen=True)
@@ -434,22 +509,6 @@ class Tuple(Expression):
 
 
 Targetable = typing.TypeVar('Targetable', NameRef, Subscript, Tuple)
-
-
-@dataclass(frozen=True)
-class OFCheckedSub(Expression):
-    """
-    sentinel class for subtraction with overflow check.
-    This should lower to compiler specific extensions, since
-    there's a greater risk of ad hoc checks being optimized away.
-    """
-    left: ValueRef
-    right: ValueRef
-
-    @property
-    def subexprs(self):
-        yield self.left
-        yield self.right
 
 
 @dataclass(frozen=True)
@@ -679,26 +738,26 @@ class AffineSeq(Expression):
 
 
 @dataclass(frozen=True)
-class Ternary(Expression):
+class Select(Expression):
     """
     A Python if expression.
-    
+
     """
 
-    test: ValueRef
-    if_expr: ValueRef
-    else_expr: ValueRef
+    predicate: ValueRef
+    on_true: ValueRef
+    on_false: ValueRef
 
     def __post_init__(self):
-        assert isinstance(self.test, ValueRef)
-        assert isinstance(self.if_expr, ValueRef)
-        assert isinstance(self.else_expr, ValueRef)
+        assert isinstance(self.predicate, ValueRef)
+        assert isinstance(self.on_true, ValueRef)
+        assert isinstance(self.on_false, ValueRef)
 
     @property
     def subexprs(self):
-        yield self.if_expr
-        yield self.test
-        yield self.else_expr
+        yield self.predicate
+        yield self.on_true
+        yield self.on_false
 
 
 @dataclass(frozen=True)
@@ -820,8 +879,21 @@ class ForLoop(StmtBase):
     pos: Position
 
     def __post_init__(self):
-        assert isinstance(self.target, ValueRef)
-        assert isinstance(self.iterable, ValueRef)
+        if not isinstance(self.target, ValueRef):
+            msg = f"Expected ValueRef, got {self.target}, type: {type(self.target)}."
+            raise TypeError(msg)
+        elif not isinstance(self.iterable, ValueRef):
+            msg = f"Expected ValueRef, got {self.iterable}, type: {type(self.iterable)}."
+            raise TypeError(msg)
+
+
+@dataclass(frozen=True)
+class ParallelLoop(StmtBase):
+    loop: ForLoop
+
+    def __post_init__(self):
+        if not isinstance(loop, ForLoop):
+            raise CompilerError("Can only parallelize for loops.")
 
 
 @dataclass
@@ -833,6 +905,27 @@ class IfElse(StmtBase):
 
     def __post_init__(self):
         assert isinstance(self.test, ValueRef)
+
+
+@dataclass(frozen=True)
+class ImportRef:
+    module: str
+    member: typing.Optional[str]
+    alias: typing.Optional[str]
+    pos: Position
+
+    @property
+    def name(self):
+        if self.alias is not None:
+            return self.alias
+        elif self.member is not None:
+            return self.member
+        else:
+            return self.module
+
+    @property
+    def is_module_import(self):
+        return self.member is None
 
 
 @dataclass
@@ -869,3 +962,32 @@ class WhileLoop(StmtBase):
 
     def __post_init__(self):
         assert isinstance(self.test, ValueRef)
+
+
+@dataclass(frozen=True)
+class gather(Expression):
+    array: ValueRef
+    stride: ValueRef
+    count: IntConst
+
+    def subexprs(self):
+        yield self.array
+        yield self.stride
+
+
+@dataclass(frozen=True)
+class unroll(ir.Expression):
+    array: ValueRef
+    count: IntConst
+
+    def subexprs(self):
+        yield self.array
+
+
+@dataclass(frozen=True)
+class interleave(ir.Expression):
+    arrays: typing.Tuple[ir.ValueRef, ...]
+
+    def subexprs(self):
+        for a in self.arrays:
+            yield a

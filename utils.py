@@ -3,16 +3,38 @@ import itertools
 import keyword
 import numbers
 
-from functools import singledispatch
+from contextlib import contextmanager
+from functools import singledispatch, singledispatchmethod
 
 import ir
 from errors import CompilerError
-from visitor import walk
+from visitor import walk, StmtVisitor
 
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
 
 
 signed_integer_range = {p: (-(2**(p-1)-1), 2**(p-1)-1) for p in (8, 32, 64)}
+
+
+class ReturnGather(StmtVisitor):
+
+    @contextmanager
+    def tracking(self):
+        self.exprs = set()
+
+    def __call__(self, entry):
+        with self.tracking():
+            self.visit(entry)
+            exprs = self.exprs
+        return exprs
+
+    @singledispatchmethod
+    def visit(self, node):
+        super().visit(node)
+
+    @visit.register
+    def _(self, node: ir.Return):
+        self.exprs.add(node.value)
 
 
 def get_expr_parameters(expr):
@@ -29,6 +51,11 @@ def is_valid_identifier(name):
 def extract_name(node):
     msg = f"Cannot extract name from node of type {type(node)}. This is probably a bug."
     raise TypeError(msg)
+
+
+@extract_name.register
+def _(node: str):
+    return node
 
 
 @extract_name.register
@@ -150,11 +177,11 @@ def unpack_iterated(target, iterable, include_enumerate_indices=True):
         if isinstance(target, ir.Tuple):
             if len(target.elements) == 2:
                 first_target, sec_target = target.elements
-                yield first_target, iterable.iterable
                 if include_enumerate_indices:
                     # enumerate is special, because it doesn't add
                     # constraints
-                    yield sec_target, ir.AffineSeq(iterable.start, None, ir.One)
+                    yield first_target, ir.AffineSeq(iterable.start, None, ir.One)
+                yield from unpack_iterated(sec_target, iterable.iterable)
             else:
                 msg = f"Enumerate must be unpacked to exactly two targets, received {len(target.elements)}."
                 raise CompilerError(msg)

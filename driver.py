@@ -1,19 +1,26 @@
+import numbers
 import os
 import sys
 import typing
 
 import numpy as np
 
-import ir
-import type_resolution as tr
-from ASTTransform import parse_file
-from canonicalize import NormalizePaths
-from reaching_check import ReachingCheck
 from dataclasses import dataclass
+from pathlib import Path
+
+import ir
+
+import type_interface as ti
+import type_resolution as tr
+
+from ASTTransform import build_module_ir_and_symbols
+from ccodegen import codegen
+from canonicalize import NormalizePaths
 from errors import error_context, CompilerError
-from utils import wrap_input
+from lowering import loop_lowering
 from pretty_printing import pretty_printer
-from type_inference import TypeInfer
+from reaching_check import ReachingCheck
+from utils import wrap_input
 
 
 version = sys.version_info
@@ -21,44 +28,6 @@ version = sys.version_info
 # amount of this code, so error messages ignore it.
 if sys.version_info.minor < 8:
     raise RuntimeError(f"Python 3.8 or above is required.")
-
-
-@dataclass(frozen=True)
-class ArrayArg(ir.ValueRef):
-    """
-    Array argument. This ensures reaching definitions of array
-    parameters are unambiguous.
-    """
-    spec: ir.ArrayInitSpec
-    stride: typing.Optional[typing.Union[ir.NameRef, ir.IntConst]]
-
-
-def get_scalar_type(input_type):
-    if input_type == np.float32:
-        return tr.Float32
-    elif input_type == np.float64:
-        return tr.Float64
-    elif input_type == np.int32:
-        return tr.Int32
-    elif input_type == np.int64:
-        return tr.Int64
-    elif input_type == bool:
-        return tr.BoolType
-    else:
-        msg = f"Supported types are {np.float32}, {np.float64}, {np.int32}, {np.int64}, {bool}, received {input_type}."
-        raise ValueError(msg)
-
-
-def make_array_arg_type(dims, dtype, stride=None):
-    """
-    Parameterized array type suitable for use as an argument.
-    """
-    dtype = get_scalar_type(dtype)
-    dims = tuple(wrap_input(d) for d in dims)
-    if stride is not None:
-        stride = wrap_input(stride)
-    spec = ir.ArrayInitSpec(dims, dtype, fill_value=None)
-    return ArrayArg(spec, stride)
 
 
 def resolve_types(types):
@@ -72,22 +41,18 @@ def resolve_types(types):
     return internal_types
 
 
-class CompilerContext:
+class CompilerDriver:
 
-    # these need to accept type info
-    stages = [NormalizePaths, ReachingCheck]
-    pretty_print = pretty_printer()
-
-    def __init__(self):
-        self.stages = []
+    def __init__(self, types):
+        self.build_module = ModuleBuilder()
         self.normalize_paths = NormalizePaths()
         self.reaching_check = ReachingCheck()
-        self.pretty_print = pretty_printer()
+        self.pretty_print = pretty_printer(ctx_)
+        self.ctx = ctx_
 
     def run_pipeline(self, file_name, type_map):
         with error_context():
-            module, symbols = parse_file(file_name)
-
+            module = self.build_module(file_name)
             funcs = module.functions
             print(f"file name: {file_name}\n")
             for index, func in enumerate(funcs):
@@ -96,9 +61,20 @@ class CompilerContext:
                 infer_types = TypeInfer(func_types)
                 self.reaching_check(func)
                 infer_types(func)
-                symbols[func.name].types = func_types
+                # symbols[func.name].types = func_types
                 funcs[index] = func
-        return module, symbols
+        return module
+
+    def pretty_print_tree(self, module, func_name=None):
+        with self.ctx.module_scope(module.name):
+            if func_name is not None:
+                with self.ctx.function_scope(func_name):
+                    func = module.lookup(func_name)
+                    self.pretty_print(func, self.ctx.current_function)
+            else:
+                for func in module.functions:
+                    with self.ctx.function_scope(func.name):
+                        self.pretty_print(func, self.ctx.current_function)
 
 
 def name_and_source_from_path(file_path):
@@ -108,17 +84,39 @@ def name_and_source_from_path(file_path):
     return file_name, src
 
 
-def compile_module(file_name, type_map, verbose=False):
+# stub for now, since we may need to remake typed passes later
+# per function or incorporate context management
+def build_function_pipeline():
+    pipeline = [NormalizePaths(),
+                ReachingCheck()]
+    return pipeline
 
+
+def compile_module(file_path, types, verbose=False, print_result=True, out=None):
+    # pipeline = build_function_pipeline()
     if verbose:
-        if file_name:
-            print(f"Compiling: {file_name}")
-    cc = CompilerContext()
-    return cc.run_pipeline(file_name, type_map)
-
-    # cc.run_pipeline(file_name, type_map)
-    # for func in tree.functions:
-    #    syms = symbols[func.name]
-    #    for stage in cc.pipeline:
-    #        func = stage(func, syms)
-    #    functions.append(func)
+        if file_path:
+            print(f"Compiling: {file_name}:")
+    modname = file_path.name
+    modname, _ = os.path.splitext(modname)
+    if not modname:
+        msg = "No module specified"
+        raise CompilerError(msg)
+    mod_ir, symbols = build_module_ir_and_symbols(file_path, types)
+    funcs = []
+    norm_paths = NormalizePaths()
+    # rc = ReachingCheck()
+    for func in mod_ir.functions:
+        s = symbols.get(func.name)
+        ll = loop_lowering(s)
+        func = norm_paths(func)
+        func = ll(func)
+        funcs.append(func)
+        if print_result:
+            from pretty_printing import pretty_printer
+            pp = pretty_printer()
+            pp(func, s)
+    if out is None:
+        # try in same folder
+        out = Path.cwd()
+    codegen(out, funcs, symbols, modname)

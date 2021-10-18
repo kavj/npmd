@@ -1,4 +1,4 @@
-from functools import singledispatchmethod, lru_cache
+from functools import singledispatchmethod
 
 import ir
 
@@ -23,154 +23,42 @@ def walk_unique(node):
 
 class ExpressionVisitor:
     """
-    Since expressions are immutable and hashable, we can cache their results.
+    Base class for an expression visitor for cases that do not reconstruct their arguments.
 
     """
 
-    def invalidate_cache(self):
-        self.lookup.cache_clear()
+    def __call__(self, expr):
+        return self.visit(expr)
 
-    @lru_cache
-    def lookup(self, expr):
-        repl = self.visit(expr)
-        # prefer the original rather over an identical copy
-        return expr if expr == repl else repl
-
-    # Don't cache visitor results directly, since
-    # they may be overridden.
-
-    @singledispatchmethod
     def visit(self, expr):
-        msg = f"No method to rewrite object of type {type(expr)}."
-        raise NotImplementedError(msg)
+        if isinstance(expr, ir.Expression):
+            for subexpr in expr.subexprs:
+                self.visit(subexpr)
+        elif not isinstance(expr, ir.ValueRef):
+            msg = f"No method to rewrite object of type {type(expr)}."
+            raise NotImplementedError(msg)
 
-    @visit.register
-    def _(self, expr: ir.Length):
-        value = self.lookup(expr.value)
-        return ir.Length(value)
 
-    @visit.register
-    def _(self, expr: ir.Subscript):
-        value = self.lookup(expr.value)
-        slice_ = self.lookup(expr.slice)
-        return ir.Subscript(value, slice_)
+class ExpressionTransformer:
+    """
+    Base class for an expression visitor that reconstructs an argument expression from sub-expressions.
 
-    @visit.register
-    def _(self, expr: ir.Min):
-        values = tuple(self.lookup(value) for value in expr.values)
-        return ir.Min(values)
+    """
 
-    @visit.register
-    def _(self, expr: ir.Max):
-        values = tuple(self.lookup(value) for value in expr.values)
-        return ir.Max(values)
+    def __call__(self, expr):
+        return self.visit(expr)
 
-    @visit.register
-    def _(self, expr: ir.Slice):
-        start = self.lookup(expr.start)
-        stop = self.lookup(expr.stop)
-        step = self.lookup(expr.step)
-        return ir.Slice(start, stop, step)
-
-    @visit.register
-    def _(self, expr: ir.Tuple):
-        elements = tuple(self.lookup(elem) for elem in expr.elements)
-        return ir.Tuple(elements)
-
-    @visit.register
-    def _(self, expr: ir.Ternary):
-        test = self.lookup(expr.test)
-        if_expr = self.lookup(expr.if_expr)
-        else_expr = self.lookup(expr.else_expr)
-        return ir.Ternary(test, if_expr, else_expr)
-
-    @visit.register
-    def _(self, expr: ir.BinOp):
-        left = self.lookup(expr.left)
-        right = self.lookup(expr.right)
-        return ir.BinOp(left, right, expr.op)
-
-    @visit.register
-    def _(self, expr: ir.CompareOp):
-        left = self.lookup(expr.left)
-        right = self.lookup(expr.right)
-        return ir.CompareOp(left, right, expr.op)
-
-    @visit.register
-    def _(self, expr: ir.Call):
-        args = tuple(self.lookup(arg) for arg in expr.args)
-        kws = tuple((kw, self.lookup(value)) for (kw, value) in expr.keywords)
-        func = self.lookup(expr.func)
-        return ir.Call(func, args, kws)
-
-    @visit.register
-    def _(self, expr: ir.AND):
-        operands = tuple(self.lookup(operand) for operand in expr.operands)
-        return ir.AND(operands)
-
-    @visit.register
-    def _(self, expr: ir.OR):
-        operands = tuple(self.lookup(operand) for operand in expr.operands)
-        return ir.OR(operands)
-
-    @visit.register
-    def _(self, expr: ir.XOR):
-        operands = tuple(self.lookup(operand) for operand in expr.operands)
-        return ir.XOR(operands)
-
-    @visit.register
-    def _(self, expr: ir.TRUTH):
-        operand = self.lookup(expr.operand)
-        return ir.XOR(operand)
-
-    @visit.register
-    def _(self, expr: ir.NOT):
-        operand = self.lookup(expr.operand)
-        return ir.XOR(operand)
-
-    @visit.register
-    def _(self, expr: ir.AffineSeq):
-        start = self.lookup(expr.start)
-        stop = self.lookup(expr.stop)
-        step = self.lookup(expr.step)
-        return ir.AffineSeq(start, stop, step)
-
-    @visit.register
-    def _(self, expr: ir.UnaryOp):
-        operand = self.lookup(expr.operand)
-        return ir.UnaryOp(operand, expr.op)
-
-    @visit.register
-    def _(self, expr: ir.Zip):
-        elems = tuple(self.lookup(elem) for elem in expr.elements)
-        return ir.Zip(elems)
-
-    @visit.register
-    def _(self, expr: ir.Enumerate):
-        iterable = self.lookup(expr.iterable)
-        start = self.lookup(expr.start)
-        return ir.Enumerate(iterable, start)
-
-    @visit.register
-    def _(self, expr: ir.Reversed):
-        iterable = self.lookup(expr.iterable)
-        return ir.Reversed(iterable)
-
-    @visit.register
-    def _(self, expr: ir.IntConst):
-        return expr
-
-    @visit.register
-    def _(self, expr: ir.FloatConst):
-        return expr
-
-    @visit.register
-    def _(self, expr: ir.BoolConst):
-        return expr
-
-    @visit.register
-    def _(self, expr: ir.NameRef):
-        return expr
+    def visit(self, expr: ir.ValueRef):
+        if isinstance(expr, ir.Expression):
+            cls = type(expr)
+            args = (self.visit(subexpr) for subexpr in expr.subexprs)
+            repl = cls(*args)
+            return repl
+        elif isinstance(expr, ir.ValueRef):
+            return expr
+        else:
+            msg = f"No method to rewrite object of type {type(expr)}."
+            raise NotImplementedError(msg)
 
 
 class StmtVisitor:
@@ -193,6 +81,10 @@ class StmtVisitor:
         self.visit(node.body)
 
     @visit.register
+    def _(self, node: ir.StmtBase):
+        pass
+
+    @visit.register
     def _(self, node: ir.IfElse):
         self.visit(node.if_branch)
         self.visit(node.else_branch)
@@ -204,26 +96,6 @@ class StmtVisitor:
     @visit.register
     def _(self, node: ir.WhileLoop):
         self.visit(node.body)
-
-    @visit.register
-    def _(self, node: ir.Assign):
-        pass
-
-    @visit.register
-    def _(self, node: ir.SingleExpr):
-        pass
-
-    @visit.register
-    def _(self, node: ir.Continue):
-        pass
-
-    @visit.register
-    def _(self, node: ir.Break):
-        pass
-
-    @visit.register
-    def _(self, node: ir.Return):
-        pass
 
 
 class StmtTransformer:
@@ -252,6 +124,10 @@ class StmtTransformer:
         return node
 
     @visit.register
+    def _(self, node: ir.StmtBase):
+        return node
+
+    @visit.register
     def _(self, node: ir.IfElse):
         if_branch = self.visit(node.if_branch)
         else_branch = self.visit(node.else_branch)
@@ -271,24 +147,4 @@ class StmtTransformer:
         body = self.visit(node.body)
         if body is not node.body:
             node = ir.WhileLoop(node.test, body, node.pos)
-        return node
-
-    @visit.register
-    def _(self, node: ir.Assign):
-        return node
-
-    @visit.register
-    def _(self, node: ir.SingleExpr):
-        return node
-
-    @visit.register
-    def _(self, node: ir.Continue):
-        return node
-
-    @visit.register
-    def _(self, node: ir.Break):
-        return node
-
-    @visit.register
-    def _(self, node: ir.Return):
         return node
