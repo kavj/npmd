@@ -291,7 +291,25 @@ class pretty_formatter:
         return expr
 
 
-class pretty_printer(StmtVisitor):
+class CodeGenBase:
+
+    def __init__(self, ctx, dest):
+        self.printer = CodeEmitter(ctx, dest)
+        self.format = pretty_formatter()
+
+    @contextmanager
+    def indented(self):
+        with self.printer.indented():
+            yield
+
+    @contextmanager
+    def closing_brace(self):
+        with self.printer.indented():
+            yield
+        self.printer.print_line("}")
+
+
+class CCodeGen(CCodeGenBase, StmtVisitor):
 
     # This is meant to be controlled by a codegen driver,
     # which manages opening/closing of a real or virtual destination file.
@@ -446,3 +464,63 @@ class pretty_printer(StmtVisitor):
         expr = self.format(node.expr)
         line = f"{expr};"
         self.printer.print_line(line)
+
+
+
+# need a header file generator..
+
+class BoilerplateWriter(CCodeGenBase):
+
+    # This is meant to be controlled by a codegen driver,
+    # which manages opening/closing of a real or virtual destination file.
+
+    def __init__(self, ctx, dest):
+        super().__init__(ctx, dest)
+
+    def print_sys_header_text(name):
+        s = f"#include<{name}>"
+        self.print_line(s)
+
+    def print_user_header_text(name):
+        s = f"#include \"{name}\""
+        self.print_line(s)
+
+    def gen_source_top(sys_headers=(), user_headers=()):
+        self.print_line("#define PY_SSIZE_T_CLEAN")
+        self.print_sys_header_text("Python.h")
+        for h in sys_headers:
+            self.print_sys_header_text(h)
+        for h in user_headers:
+            self.print_user_header_text(h)
+
+    def gen_module_init(modname):
+        if modname == "mod":
+            raise CompilerError("mod is treated as a reserved name.")
+        self.print_line(f"PyMODINIT_FUNC PyInit_{modname}(void){")
+        with self.closing_brace():
+            self.print_line(f"PyObject* mod = PyModule_Create(&{modname});")
+            printline("if(mod == NULL){")
+            with self.closing_brace():
+                printline("return NULL;")
+
+    def gen_method_table(modname, funcs):
+        # no keyword support..
+        self.print_line(f"static PyMethodDef {modname}Methods[] = {"
+        with self.indented():
+            for name, doc in funcs:
+                if doc is None:
+                    self.print_line(f"{{name}, {modname}_{name}, METH_VARARGS, NULL}")
+                else:
+                    self.print_line(f"{{name}, {modname}_{name}, METH_VARARGS, {doc}}")
+        self.print_line("};")
+        # sentinel ending entry
+        self.print_line("{NULL, NULL, 0, NULL}")
+
+    def gen_module_def(modname):
+        self.print_line(f"static PyModuleDef {modname} = {")
+        with self.indented():
+            self.print_line("PyModuleDef_HEAD_INIT,")
+            self.print_line(f"{modname},")
+            self.print_line("NULL,")
+            self.print_line("-1")
+            self.print_line(f"{modname}Methods")
