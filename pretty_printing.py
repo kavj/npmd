@@ -26,7 +26,7 @@ scalar_pretty_types = {tr.Int32: "numpy.int32",
                        tr.Float64: "numpy.float64",
                        tr.Predicate32: "32_bit_mask",
                        tr.Predicate64: "64_bit_mask",
-                       tr.BoolType: "bool"}
+                       tr.BoolType: "numpy.bool_"}
 
 
 def get_pretty_scalar_type(t):

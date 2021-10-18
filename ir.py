@@ -9,13 +9,30 @@ from dataclasses import dataclass
 from enum import Enum, auto, unique
 from functools import cached_property
 
-binaryops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
-inplace_ops = frozenset({"+=", "-=", "*=", "/=", "//=", "%=", "**=", "<<=", ">>=", "|=", "^=", "&=", "@="})
-unaryops = frozenset({"-", "~", "not"})
-boolops = frozenset({"and", "or", "xor"})
-compareops = frozenset({"==", "!=", "<", "<=", ">", ">=", "is", "isnot", "in", "notin"})
+import ir
+from errors import CompilerError
 
-oop_to_inplace = {
+# Note: operations are split this way to avoid incorrectly accepting bad inplace to out of place conversions.
+binary_ops = frozenset({"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&", "@"})
+bool_ops = frozenset({"and", "or", "xor"})
+compare_ops = frozenset({"==", "!=", "<", "<=", ">", ">=", "is", "isnot"})
+in_place_ops = frozenset({"+=", "-=", "*=", "/=", "//=", "%=", "**=", "<<=", ">>=", "|=", "^=", "&=", "@="})
+unary_ops = frozenset({"-", "~"})
+
+# sub-taxonomies
+add_ops = frozenset({"+", "+="})
+bit_shift_ops = frozenset({"<<", ">>", "<<=", ">>="})
+divide_ops = frozenset({"/", "//", "/=", "//="})
+multiply_ops = frozenset({"*", "*="})
+modulo_ops = frozenset({"%", "%="})
+subtract_ops = frozenset({"-", "-="})
+floor_divide_ops = frozenset({"//", "//="})
+shift_left_ops = frozenset({"<<", "<<="})
+shift_right_ops = frozenset({">>", ">>="})
+true_divide_ops = frozenset({"/", "/="})
+
+# conversions
+out_of_place_to_in_place = {
     "+": "+=",
     "-": "-=",
     "*": "*=",
@@ -31,7 +48,7 @@ oop_to_inplace = {
     "@": "@=",
 }
 
-inplace_to_oop = {
+in_place_to_out_of_place = {
     "+=": "+",
     "-=": "-",
     "*=": "*",
@@ -89,6 +106,7 @@ class VarDecl(StmtBase):
     """
     name: NameRef
     type: typing.Any
+    initial_value: typing.Optional[ValueRef]
     pos: Position
 
 
@@ -164,6 +182,10 @@ class StringConst(Constant):
 
     def __post_init__(self):
         assert isinstance(self.value, str)
+        if any(ord(v) > 127 for v in self.value):
+            msg = f"Only strings that can be converted to ascii text are supported. This is mainly intended" \
+                  f"to facilitate simple printing support at some point."
+            raise CompilerError(msg)
 
 
 # commonly used
@@ -191,6 +213,7 @@ class ArrayType(ValueRef):
 
     def __post_init__(self):
         assert isinstance(self.ndims, int)
+        assert self.ndims > 0
         assert isinstance(self.dtype, Hashable)
 
 
@@ -249,6 +272,43 @@ class ViewRef:
     @cached_property
     def name(self):
         return self.base.name
+
+
+@dataclass(frozen=True)
+class SlidingWindowViewRef:
+    """
+    This partially implements numpy's sliding window view.
+    It has to be part of the IR to avoid inference here.
+
+    This may be added to ir once it's stable...
+
+
+    Consider the following
+
+    Here we can't packetize edges, as this may not have uniform width.
+    If n > len(a) - width + 1, then some iterations are truncated.
+
+    def example(a, width, n, output):
+       for i in range(n):
+           output[i] = f(a[i:i+width])
+
+    Here it's actually decidable that we have uniform iteration width,
+    because len must be non-negative and width < 1 is treated as an error
+    to simplify runtime logic. Note that the iteration range would be wrong
+    even for zero.
+
+    def example2(a, width, output):
+       for i in range(len(a)-width+1):
+           output[i] = f(a[i:i+width])
+
+    """
+
+    base: typing.Union[ArrayRef, ViewRef]
+    width: ValueRef
+    stride: ValueRef
+
+    def __post_init__(self):
+        assert isinstance(self.base, (ArrayRef, ViewRef))
 
 
 @dataclass(frozen=True)
@@ -386,6 +446,11 @@ class OFCheckedSub(Expression):
     left: ValueRef
     right: ValueRef
 
+    @property
+    def subexprs(self):
+        yield self.left
+        yield self.right
+
 
 @dataclass(frozen=True)
 class BinOp(Expression):
@@ -394,7 +459,7 @@ class BinOp(Expression):
     op: str
 
     def __post_init__(self):
-        assert (self.op in binaryops or self.op in inplace_ops)
+        assert (self.op in binary_ops or self.op in in_place_ops)
         assert isinstance(self.right, ValueRef)
         if self.in_place:
             # ensure things like -a += b are treated as compiler errors.
@@ -411,7 +476,7 @@ class BinOp(Expression):
 
     @cached_property
     def in_place(self):
-        return self.op in inplace_ops
+        return self.op in in_place_ops
 
 
 # Compare ops are once again their own class,
@@ -425,7 +490,7 @@ class CompareOp(Expression):
     op: str
 
     def __post_init__(self):
-        assert self.op in compareops
+        assert self.op in compare_ops
         assert isinstance(self.left, ValueRef)
         assert isinstance(self.right, ValueRef)
 
@@ -659,7 +724,7 @@ class UnaryOp(Expression):
     op: str
 
     def __post_init__(self):
-        assert self.op in unaryops
+        assert self.op in unary_ops
         assert isinstance(self.operand, ValueRef)
 
     @property

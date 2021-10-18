@@ -265,7 +265,6 @@ class numbering_visitor(StmtVisitor):
         pass
 
 
-
 def number_local_values(node: list, inputs, numbered, labeler):
     """
     node: statement list

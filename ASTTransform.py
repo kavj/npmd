@@ -1,5 +1,4 @@
 import ast
-import operator
 import sys
 import typing
 import symtable
@@ -12,57 +11,56 @@ from pathlib import Path
 import ir
 from canonicalize import replace_call
 from errors import CompilerError
-from lowering import const_folding
 from symbol_table import st_from_pyst
 from utils import unpack_assignment, unpack_iterated, wrap_input
 
 
-binaryops = {ast.Add: "+",
-             ast.Sub: "-",
-             ast.Mult: "*",
-             ast.Div: "/",
-             ast.FloorDiv: "//",
-             ast.Mod: "%",
-             ast.Pow: "**",
-             ast.LShift: "<<",
-             ast.RShift: ">>",
-             ast.BitOr: "|",
-             ast.BitXor: "^",
-             ast.BitAnd: "&",
-             ast.MatMult: "@"}
+binary_ops = {ast.Add: "+",
+              ast.Sub: "-",
+              ast.Mult: "*",
+              ast.Div: "/",
+              ast.FloorDiv: "//",
+              ast.Mod: "%",
+              ast.Pow: "**",
+              ast.LShift: "<<",
+              ast.RShift: ">>",
+              ast.BitOr: "|",
+              ast.BitXor: "^",
+              ast.BitAnd: "&",
+              ast.MatMult: "@"}
 
-binary_inplace_ops = {ast.Add: "+=",
-                      ast.Sub: "-=",
-                      ast.Mult: "*=",
-                      ast.Div: "/=",
-                      ast.FloorDiv: "//=",
-                      ast.Mod: "%=",
-                      ast.Pow: "**=",
-                      ast.LShift: "<<=",
-                      ast.RShift: ">>=",
-                      ast.BitOr: "|=",
-                      ast.BitXor: "^=",
-                      ast.BitAnd: "&=",
-                      ast.MatMult: "@="}
+binary_in_place_ops = {ast.Add: "+=",
+                       ast.Sub: "-=",
+                       ast.Mult: "*=",
+                       ast.Div: "/=",
+                       ast.FloorDiv: "//=",
+                       ast.Mod: "%=",
+                       ast.Pow: "**=",
+                       ast.LShift: "<<=",
+                       ast.RShift: ">>=",
+                       ast.BitOr: "|=",
+                       ast.BitXor: "^=",
+                       ast.BitAnd: "&=",
+                       ast.MatMult: "@="}
 
-unaryops = {ast.UAdd: "+",
-            ast.USub: "-",
-            ast.Invert: "~",
-            ast.Not: "not"}
+unary_ops = {ast.UAdd: "+",
+             ast.USub: "-",
+             ast.Invert: "~",
+             ast.Not: "not"}
 
-boolops = {ast.And: "and",
-           ast.Or: "or"}
+bool_ops = {ast.And: "and",
+            ast.Or: "or"}
 
-compareops = {ast.Eq: "==",
-              ast.NotEq: "!=",
-              ast.Lt: "<",
-              ast.LtE: "<=",
-              ast.Gt: ">",
-              ast.GtE: ">=",
-              ast.Is: "is",
-              ast.IsNot: "isnot",
-              ast.In: "in",
-              ast.NotIn: "notin"}
+compare_ops = {ast.Eq: "==",
+               ast.NotEq: "!=",
+               ast.Lt: "<",
+               ast.LtE: "<=",
+               ast.Gt: ">",
+               ast.GtE: ">=",
+               ast.Is: "is",
+               ast.IsNot: "isnot",
+               ast.In: "in",
+               ast.NotIn: "notin"}
 
 supported_builtins = {"iter", "range", "enumerate", "zip", "all", "any", "max", "min", "abs", "pow",
                       "round", "reversed"}
@@ -153,7 +151,6 @@ class TreeBuilder(ast.NodeVisitor):
         self.enclosing_loop = None
         self.symbols = None
         self.renaming = None
-        self.fold_if_constant = const_folding()
 
     @contextmanager
     def function_context(self, entry, symbols):
@@ -212,14 +209,7 @@ class TreeBuilder(ast.NodeVisitor):
             msg = "Ellipses are not supported."
             raise TypeError(msg)
         elif isinstance(node.value, str):
-            # Check unicode code points fall within ascii range. This is mainly supported
-            # for the possibility of enabling simple printing.
-            if any(ord(v) > 127 for v in node.value):
-                msg = f"Only strings that can be converted to ascii text are supported. This is mainly intended" \
-                      f"to facilitate simple printing support at some point."
-                raise CompilerError(msg)
-            # special case, by default strings are wrapped as names
-            # rather than constants.
+            # This will check that text is convertible to ascii.
             output = ir.StringConst(node.value)
         else:
             output = wrap_input(node.value)
@@ -245,7 +235,7 @@ class TreeBuilder(ast.NodeVisitor):
         self.body.append(ir.SingleExpr(expr, pos))
 
     def visit_UnaryOp(self, node: ast.UnaryOp) -> ir.ValueRef:
-        op = unaryops.get(type(node.op))
+        op = unary_ops.get(type(node.op))
         operand = self.visit(node.operand)
         if op == "+":  # This is a weird noop that can be ignored.
             expr = operand
@@ -256,15 +246,13 @@ class TreeBuilder(ast.NodeVisitor):
         return expr
 
     def visit_BinOp(self, node: ast.BinOp) -> ir.BinOp:
-        op = binaryops.get(type(node.op))
+        op = binary_ops.get(type(node.op))
         left = self.visit(node.left)
-        left = self.fold_if_constant(left)
         right = self.visit(node.right)
-        right = self.fold_if_constant(right)
         return ir.BinOp(left, right, op)
 
     def visit_BoolOp(self, node: ast.BoolOp) -> typing.Union[ir.BoolConst, ir.AND, ir.OR]:
-        op = boolops[node.op]
+        op = bool_ops[node.op]
         operands = []
         for value in node.values:
             value = self.visit(value)
@@ -279,9 +267,8 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_Compare(self, node: ast.Compare) -> typing.Union[ir.BinOp, ir.AND, ir.BoolConst]:
         left = self.visit(node.left)
         right = self.visit(node.comparators[0])
-        op = compareops[type(node.ops[0])]
+        op = compare_ops[type(node.ops[0])]
         initial_compare = ir.CompareOp(left, right, op)
-        initial_compare = self.fold_if_constant(initial_compare)
         if len(node.ops) == 1:
             return initial_compare
         compares = [initial_compare]
@@ -289,9 +276,8 @@ class TreeBuilder(ast.NodeVisitor):
             left = right
             right = self.visit(comparator)
             # bad operators will fail at AST construction
-            op = compareops[type(ast_op)]
+            op = compare_ops[type(ast_op)]
             cmp = ir.CompareOp(left, right, op)
-            cmp = self.fold_if_constant(cmp)
             compares.append(cmp)
         return ir.AND(tuple(compares))
 
@@ -344,7 +330,7 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_AugAssign(self, node: ast.AugAssign):
         target = self.visit(node.target)
         operand = self.visit(node.value)
-        op = binary_inplace_ops.get(type(node.op))
+        op = binary_in_place_ops.get(type(node.op))
         pos = extract_positional_info(node)
         assign = ir.Assign(target, ir.BinOp(target, operand, op), pos)
         self.body.append(assign)
@@ -497,7 +483,7 @@ def map_functions_by_name(node: ast.Module):
     return by_name
 
 
-def parse_file(file_name, type_map):
+def parse_file(file_name):
     """
     Module level point of entry for IR construction.
 
@@ -507,8 +493,6 @@ def parse_file(file_name, type_map):
     file_name:
         File path we used to extract source. This is used for error reporting.
 
-    type_map:
-        Map of function parameters and local variables to numpy or python numeric types.
    
     """
 

@@ -4,10 +4,13 @@ from contextlib import contextmanager
 from functools import singledispatchmethod
 
 import ir
+
+import type_resolution as tr
+
 from errors import CompilerError
-from pretty_printing import pretty_formatter, binop_ordering
+from pretty_printing import binop_ordering
 from type_inference import ExprTypeInfer
-from visitor import StmtVisitor, ExpressionVisitor
+from visitor import StmtVisitor
 
 """
 
@@ -19,63 +22,276 @@ At this point, statements are serialized to the level expected by C code.
 
 """
 
-
-class CTypeResolver:
-
-    # Take type from context, map to C data type.
-    # must handle simd types
-
-    def __init__(self, ctx):
-        self.ctx = ctx
+std_include_headers = ["Python.h", "numpy/arrayobject.h", "stdint.h", "stdbool.h", "math.h"]
 
 
-class CodeEmitter:
+# This assumes that C99 floats are 32 bits and C doubles are 64 bits.
+# Numpy seems to depend on this anyway and probably won't compile on
+# platforms where this does not hold.
 
-    indent_type = "    "
+
+# Todo: need to write codegen for module setup and method declaration in addition to header imports
+
+
+scalar_type_map = {tr.Int32: "int32_t",
+                   tr.Int64: "int64_t",
+                   tr.Float32: "float",
+                   tr.Float64: "double",
+                   tr.Predicate32: "bool",
+                   tr.Predicate64: "bool",
+                   tr.BoolType: "bool"}
+
+
+def parenthesized(expr):
+    # This is its own thing to avoid too much inline text formatting
+    # and allow for a more detailed implementation if redundancy
+    # issues ever arise.
+    return f"({expr})"
+
+
+class CodeWriter:
 
     def __init__(self, context, file, indent="    ", max_line_width=70):
         self.ctx = context
         self.file = file
-        self.indent = ""
         self.single_indent = indent
         self.max_line_width = max_line_width
+        self.line_formatter = textwrap.TextWrapper(tabsize=4, break_long_words=False, break_on_hyphens=False)
         self.tree = None
         self.dest = None
 
     def __call__(self, tree, dest):
         # Todo: work these into context manager
+        assert self.indent_len == 0
         self.tree = tree
         self.dest = dest
+        assert self.indent_len == 0
+
+    @property
+    def indent(self):
+        return self.line_formatter.initial_indent
+
+    @indent.setter
+    def indent(self, indent_):
+        self.line_formatter.initial_indent = indent_
+        self.line_formatter.subsequent_indent = indent_
+
+    @property
+    def indent_len(self):
+        return len(self.line_formatter.initial_indent)
 
     @contextmanager
     def indented(self):
-        indent_len = len(self.indent)
-        char_count = len(self.single_indent)
-        self.indent = f"{self.indent}{self.single_indent}"
+        base_indent = self.indent
+        scoped_indent = f"{base_indent}{self.single_indent}"
+        self.indent = scoped_indent
         yield
-        self.indent = self.indent[:-char_count]
-        if indent_len != len(self.indent):
-            raise RuntimeError
+        assert self.indent == scoped_indent
+        self.indent = base_indent
 
     def print_line(self, line):
-        line = textwrap.wrap(line, width=self.max_line_width)
-        print(line, file=self.dest)
+        lines = self.line_formatter.wrap(line)
+        for line in lines:
+            print(line, file=self.dest)
 
 
-class ExpressionResolver(ExpressionVisitor):
-    # resolve expression, given operands
-    # this is needed as simd types don't reliably
-    # work with arithmetic operators, across all compilers.
+def else_is_elif(stmt: ir.IfElse):
+    if len(stmt.else_branch) == 1:
+        if isinstance(stmt.else_branch[0], ir.IfElse):
+            return True
+    return False
 
-    # This also needs to deal with adding parentheses
-    # maybe refactor from pretty_printing or import from it.
+
+def format_header(prefix, cond):
+    if cond is None:
+        return f"{prefix}{'{'}"
+    else:
+        return f"{prefix} ({cond}){'{'}"
+
+
+# Todo: need utilities to check for cases where output type does not match input operand types
+#       C99 has totally different type promotion rules, so it's better to break expressions
+#       and add indicators to determine exact cast types.
+
+# Todo: we need lowering for overflow checked arithmetic. It might be better to provide most of this
+#       via a header.
+
+
+class pretty_formatter:
+    """
+    Pretty printer for C99. This does not support tuples or variable length min/max.
+
+    """
+
+    def __call__(self, node):
+        expr = self.visit(node)
+        return expr
 
     @singledispatchmethod
-    def visit(self, expr):
+    def visit(self, node):
+        msg = f"No method to convert node: {node} to C99 code."
+        raise NotImplementedError(msg)
+
+    @visit.register
+    def _(self, node: ir.Length):
+        # len should be replaced by a variable name or expression
+        # since we have static types and merely look up a stored value
         raise NotImplementedError
 
+    # min and max are propagated here as an unambiguous hint to use simd
+    # min/max if either operand is a simd type. It's expected multiple argument
+    # form is converted to 2 arg form, since we already have to handle breaking of
+    # long vectors here.
+    @visit.register
+    def _(self, node: ir.Max):
+        assert len(node.values) == 2
 
-class CCodeGen(StmtVisitor):
+    @visit.register
+    def _(self, node: ir.Min):
+        assert len(node.values) == 2
+
+    @visit.register
+    def _(self, node: ir.Ternary):
+        test = self.visit(node.test)
+        if isinstance(node.test, ir.Ternary):
+            test = parenthesized(test)
+        if_expr = self.visit(node.if_expr)
+        if isinstance(node.if_expr, (ir.Ternary, ir.Tuple)):
+            if_expr = parenthesized(if_expr)
+        else_expr = self.visit(node.else_expr)
+        if isinstance(node.else_expr, (ir.Ternary, ir.Tuple)):
+            else_expr = parenthesized(else_expr)
+        expr = f"{if_expr} if {test} else {else_expr}"
+        return expr
+
+    @visit.register
+    def _(self, node: ir.BoolConst):
+        return str(node.value)
+
+    @visit.register
+    def _(self, node: ir.IntConst):
+        return str(node.value)
+
+    @visit.register
+    def _(self, node: ir.FloatConst):
+        return str(node.value)
+
+    @visit.register
+    def _(self, node: ir.StringConst):
+        return f"\"{node.value}\""
+
+    @visit.register
+    def _(self, node: ir.BinOp):
+        left = self.visit(node.left)
+        right = self.visit(node.right)
+        op = node.op
+        # Todo: We probably need to split inplace ops to a different path given the number of
+        #  edge cases that arise when converting to C99 and including simd types.
+        #  should we allow sleef for simd pow?
+        #  pow is promoted to a call here either way, so it's already protected by parentheses.
+        if op in ("**", "**="):
+            return f"pow({left}, {right})"
+        elif not node.in_place:
+            op_ordering = binop_ordering[op]
+            if isinstance(node.left, ir.BinOp):
+                if op_ordering < binop_ordering[node.left.op]:
+                    left = parenthesized(left)
+            elif isinstance(node.left, (ir.BoolOp, ir.CompareOp, ir.Ternary)):
+                left = parenthesized(left)
+            if isinstance(node.right, ir.BinOp):
+                if op_ordering < binop_ordering[right.op]:
+                    left = parenthesized(right)
+            elif isinstance(node.right, (ir.BoolOp, ir.CompareOp, ir.Ternary)):
+                right = parenthesized(right)
+        expr = f"{left} {op} {right}"
+        return expr
+
+    @visit.register
+    def _(self, node: ir.CompareOp):
+        left = self.visit(node.left)
+        right = self.visit(node.right)
+        if isinstance(node.left, (ir.BoolOp, ir.CompareOp, ir.Ternary, ir.Tuple)):
+            left = parenthesized(left)
+        if isinstance(node.right, (ir.BoolOp, ir.CompareOp, ir.Ternary, ir.Tuple)):
+            right = parenthesized(right)
+        expr = f"{left} {node.op} {right}"
+        return expr
+
+    @visit.register
+    def _(self, node: ir.AND):
+        operands = []
+        for operand in node.operands:
+            formatted = self.visit(operand)
+            if isinstance(operand, (ir.AND, ir.OR, ir.Ternary)):
+                formatted = parenthesized(formatted)
+            operands.append(formatted)
+        expr = " && ".join(operand for operand in operands)
+        return expr
+
+    @visit.register
+    def _(self, node: ir.OR):
+        operands = []
+        for operand in node.operands:
+            formatted = self.visit(operand)
+            if isinstance(operand, ir.Ternary):
+                formatted = parenthesized(formatted)
+            operands.append(formatted)
+        expr = " || ".join(operand for operand in operands)
+        return expr
+
+    @visit.register
+    def _(self, node: ir.NOT):
+        formatted = self.visit(node.operand)
+        if isinstance(node.operand, (ir.AND, ir.OR, ir.Ternary)):
+            formatted = parenthesized(formatted)
+        expr = f"!{formatted}"
+        return expr
+
+    @visit.register
+    def _(self, node: ir.TRUTH):
+        formatted = self.visit(node.operand)
+        if node.constant:
+            if not isinstance(node, ir.BoolConst):
+                # We don't distinguish between bools and predicates here in
+                # truth testing, since Python doesn't have any notion of
+                # predicate types.
+                formatted = f"(bool){formatted}"
+        return formatted
+
+    @visit.register
+    def _(self, node: ir.NameRef):
+        expr = node.name
+        return expr
+
+    @visit.register
+    def _(self, node: ir.Call):
+        func_name = self.visit(node.func)
+        args = ", ".join(self.visit(arg) for arg in node.args)
+        func = f"{func_name}({args})"
+        return func
+
+    @visit.register
+    def _(self, node: ir.Subscript):
+        s = f"{self.visit(node.value)}[{self.visit(node.slice)}]"
+        return s
+
+    @visit.register
+    def _(self, node: ir.UnaryOp):
+        op = node.op
+        operand = self.visit(node.operand)
+        if isinstance(node.operand, ir.BinOp) and not node.operand.in_place:
+            if node.operand.op != "**":
+                operand = parenthesized(operand)
+        elif isinstance(node.operand, (ir.UnaryOp, ir.BoolOp, ir.Ternary)):
+            # if we have an unfolded double unary expression such as --,
+            # '--expr' would be correct but it's visually jarring. Adding
+            # unnecessary parentheses makes it '-(-expr)'.
+            operand = parenthesized(operand)
+        expr = f"{op}({operand})"
+        return expr
+
+
+class pretty_printer(StmtVisitor):
 
     # This is meant to be controlled by a codegen driver,
     # which manages opening/closing of a real or virtual destination file.
@@ -84,7 +300,7 @@ class CCodeGen(StmtVisitor):
         self.ctx = ctx
         self.infer_expr_type = ExprTypeInfer(self.ctx.types)
         self.format = pretty_formatter()
-        self.printer = CodeEmitter(ctx, dest)
+        self.printer = CodeWriter(ctx, dest)
 
     @contextmanager
     def function_context(self):
@@ -93,25 +309,35 @@ class CCodeGen(StmtVisitor):
         yield
 
     def __call__(self, func: ir.Function):
-        self.declared = set()
+        self._declared = set()
         self.visit(func)
 
-    def retrieve_type(self, ref):
+    def declared(self, ref: ir.NameRef):
+        assert isinstance(ref, (ir.NameRef, ir.Subscript))
+        return ref in self._declared
+
+    def check_type(self, ref):
         return self.ctx.retrieve_type(ref)
 
-    def print_line(self, stmt):
-        self.printer.print_line(stmt)
-
-    def else_is_elif(self, stmt: ir.IfElse):
-        if len(stmt.else_branch) == 1:
-            if isinstance(stmt.else_branch[0], ir.IfElse):
-                return True
-        return False
+    def format_lvalue_ref(self, expr):
+        if isinstance(expr, ir.NameRef):
+            formatted = self.format(expr)
+            if not self.declared(expr):
+                type_ = self.check_type(expr)
+                # subject to change
+                formatted = f"{type_} {formatted}"
+            return formatted
 
     @contextmanager
-    def indented(self):
+    def scoped(self, prefix, cond):
+        if cond is None:
+            line = f"{prefix}{'{'}"
+        else:
+            line = f"{prefix} ({cond}){'{'}"
+        self.printer.print_line(line)
         with self.printer.indented():
             yield
+        self.printer.print_line("}")
 
     @singledispatchmethod
     def visit(self, node):
@@ -120,49 +346,51 @@ class CCodeGen(StmtVisitor):
     @visit.register
     def _(self, node: ir.Assign):
         # check types
-        rhs_type = self.retrieve_type(node.value)
-        lhs_type = self.retrieve_type(node.target)
+        rhs_type = self.check_type(node.value)
+        lhs_type = self.check_type(node.target)
         if lhs_type != rhs_type:
-            raise CompilerError
+            msg = f"Cannot cast type {rhs_type} to type {lhs_type} on assignment: line {node.pos.line_begin}."
+            raise CompilerError(msg)
 
         target = self.format(node.target)
         value = self.format(node.value)
-        if node.target in self.declared:
-            stmt = f"{target} = {value};"
-        else:
-            # Todo: declaration needs to obtain a
-            #     corresponding destination language type, in this case C.
-            raise NotImplementedError
-        self.print_line(stmt)
+
+        # Todo: need to determine how much of the numpy api should be directly exposed.
+        #    At present, I am guessing anything that doesn't require the gil may be exposed,
+        #    unless the use of restrict or __restrict__ becomes necessary
+        #    (supported on all compilers that compile CPython).
+        if isinstance(node.target, ir.NameRef) and node.target not in self.declared:
+            if node.in_place:
+                msg = f"Inplace assignment cannot be performed against unbound variables, line: {node.pos.line_begin}."
+                raise CompilerError(msg)
+            # For now, assume C99 back end,
+            # compliant with PEP 7
+            type_ = self.ctx.get_type(target)
+            ctype_ = scalar_type_map.get(type_)
+            target = f"{ctype_} {target}"
+        stmt = f"{target} = {value};"
+        self.printer.print_line(stmt)
 
     def visit_elif(self, node: ir.IfElse):
         test = self.visit(node.test)
-        branch_head = f"else if({test}){'{'}"
-        self.print_line(branch_head)
-        with self.indented():
+        with self.scoped("else if", test):
             self.visit(node.if_branch)
-        self.print_line("}")
-        self.visit_else_branch(node.else_branch)
-
-    def visit_else_branch(self, stmts: list):
-        num_stmts = len(stmts)
-        if num_stmts == 1 and isinstance(stmts[0], ir.IfElse):
-            self.visit_elif(stmts[0])
-        elif num_stmts > 0:
-            self.print_line("else{")
-            with self.indented():
-                self.visit(stmts)
-            self.print_line("}")
+        if else_is_elif(node):
+            self.visit_elif(node.else_branch[0])
+        elif node.else_branch:
+            with self.scoped("else", None):
+                self.visit(node.else_branch)
 
     @visit.register
     def _(self, node: ir.IfElse):
         test = self.visit(node.test)
-        branch_head = f"if({test}){'{'}"
-        self.print_line(branch_head)
-        with self.indented():
+        with self.scoped("if", test):
             self.visit(node.if_branch)
-        self.print_line("}")
-        self.visit_else_branch(node.else_branch)
+        if else_is_elif(node):
+            self.visit_elif(node)
+        elif node.else_branch:
+            with self.scoped("else", None):
+                self.visit(node.else_branch)
 
     @visit.register
     def _(self, node: ir.ForLoop):
@@ -171,13 +399,9 @@ class CCodeGen(StmtVisitor):
         assert isinstance(node.target, ir.NameRef)
         assert isinstance(node.iterable, (ir.AffineSeq, ir.Reversed))
         # check for unit step
-        if node.target in self.declared:
-            pass
-        else:
-            pass
+        target = self.format_lvalue_ref(node.target)
         # check whether we can use ++ op
         # insufficient support for reversed() thus far.
-        target = self.format(node.target)
         if node.iterable.step == ir.One:
             step_expr = f"++{target}"
         else:
@@ -185,8 +409,40 @@ class CCodeGen(StmtVisitor):
             step_expr = f"{target} += {increm_by}"
         start = self.format(node.iterable.start)
         stop = self.format(node.iterable.stop)
-        stmt = f"for({target} = {start}; {target} < {stop}; {step_expr}){'{'}"
-        self.print_line(stmt)
-        with self.indented():
+        # implements range semantics with forward step, with the caveat
+        # that any escaping value of target must be copied out in the loop body
+        cond = f"{target} = {start}; {target} < {stop}; {step_expr}"
+        with self.scoped("for", cond):
             self.visit(node.body)
-        self.print_line("}")
+
+    @visit.register
+    def _(self, node: ir.WhileLoop):
+        cond = self.format(node.test)
+        with self.scoped("while", cond):
+            self.visit(node.body)
+
+    @visit.register
+    def _(self, node: ir.Break):
+        self.printer.print_line("break;")
+
+    @visit.register
+    def _(self, node: ir.Continue):
+        self.printer.print_line("continue;")
+
+    @visit.register
+    def _(self, node: ir.Assign):
+        target = self.format(node.target)
+        value = self.format(node.value)
+        if node.in_place:
+            assert isinstance(node.value, ir.BinOp)
+            op = node.value.op
+        else:
+            op = "="
+        line = f"{target} {op} {value};"
+        self.printer.print_line(line)
+
+    @visit.register
+    def _(self, node: ir.SingleExpr):
+        expr = self.format(node.expr)
+        line = f"{expr};"
+        self.printer.print_line(line)
