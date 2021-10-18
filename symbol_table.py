@@ -120,17 +120,14 @@ class symbol_table:
 
     def make_unique_name(self, prefix):
         prefix = extract_name(prefix)
-        if self.declares(prefix):
-            gen = self._get_num_generator(prefix)
+        name = wrap_input(prefix)
+        gen = self._get_num_generator(prefix)
+        while self.declares(name):
             name = wrap_input(f"{prefix}_{next(gen)}")
-            while name in self.symbols:
-                name = wrap_input(f"{prefix}_{next(gen)}")
-        else:
-            # First use, no need to rename
-            name = wrap_input(prefix)
         return name
 
-    def bind_type_to_name(self, name, type_):
+
+    def declare_type(self, name, type_):
         """
         Register a type for an untyped or undeclared symbol.
         """
@@ -168,7 +165,7 @@ class symbol_table:
         name = self.make_unique_name(name)
         sym = symbol(name, is_source_name=False, is_arg=False, is_assigned=True)
         self.symbols[name] = sym
-        self.bind_type_to_name(name, type_)
+        self.declare_type(name, type_)
         # The input name may require mangling for uniqueness.
         # Return the name as it is registered.
         return name
