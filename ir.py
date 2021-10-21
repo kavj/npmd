@@ -248,6 +248,12 @@ class ArrayRef(ValueRef):
         return len(self.dims)
 
 
+@dataclass
+class ShapeRef(Expression):
+    base: ValueRef
+    dim: IntConst
+
+
 @dataclass(frozen=True)
 class ViewRef:
     base: typing.Union[ArrayRef, ViewRef]
@@ -719,6 +725,16 @@ class Reversed(Expression):
 
 
 @dataclass(frozen=True)
+class Select(Expression):
+    """
+    This is equivalent to a ternary op with the added condition that we use a sized predicate.
+    """
+    on_true: ValueRef
+    on_false: ValueRef
+    pred: ValueRef
+
+
+@dataclass(frozen=True)
 class UnaryOp(Expression):
     operand: ValueRef
     op: str
@@ -824,6 +840,15 @@ class ForLoop(StmtBase):
         assert isinstance(self.iterable, ValueRef)
 
 
+@dataclass(frozen=True)
+class ParallelLoop(StmtBase):
+   loop: ForLoop
+
+   def __post_init__(self):
+       if not isinstance(loop, ForLoop):
+           raise CompilerError("Can only parallelize for loops.")
+
+
 @dataclass
 class IfElse(StmtBase):
     test: ValueRef
@@ -869,3 +894,11 @@ class WhileLoop(StmtBase):
 
     def __post_init__(self):
         assert isinstance(self.test, ValueRef)
+
+
+@dataclass
+class raise_if(StmtBase):
+    expr: ValueRef
+    err_type: type
+    msg: str
+    cond: bool

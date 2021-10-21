@@ -9,6 +9,24 @@ from visitor import StmtVisitor
 Very conservative varying checks. These determine uniformity at a variable name level, ignoring local dataflow
 information. 
 
+This should run after renaming. This way variables are only marked varying if they vary across some control flow point.
+
+This needs a rewrite in general.
+
+Implementation requires that we have a bijective map
+
+variable name: expressions bound to it
+expression: variable names that bind to it
+
+
+Algorithm is one of the type, repeat until unchanged.
+
+initialize worklist with varying arguments.
+
+while worklist not empty:
+    - For each expression in the worklist, add any variable it binds to.
+    - For each varying variable in the worklist, add any expressions that use it.
+
 """
 
 

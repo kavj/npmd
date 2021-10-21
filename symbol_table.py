@@ -69,10 +69,10 @@ class symbol:
 class symbol_table:
     scalar_ir_types = frozenset({tr.Int32, tr.Int64, tr.Float32, tr.Float64, tr.Predicate32, tr.Predicate64})
 
-    def __init__(self, scope_name, default_int_is_64=True):
+    def __init__(self, scope_name, default_int):
         self.symbols = {}   # name -> typed symbol entry
         self.types = {}
-        self.default_int = tr.Int64 if default_int_is_64 else tr.Int32
+        self.default_int = default_int
         self.scope_name = wrap_input(scope_name)  # wrap everything to avoid false comparing raw strings to namerefs
         self.prefixes = {}  # prefix for adding enumerated variable names
 
@@ -162,6 +162,7 @@ class symbol_table:
         """
         This is used to add a unique typed temporary variable name.
         """
+
         name = self.make_unique_name(name)
         sym = symbol(name, is_source_name=False, is_arg=False, is_assigned=True)
         self.symbols[name] = sym
@@ -169,6 +170,38 @@ class symbol_table:
         # The input name may require mangling for uniqueness.
         # Return the name as it is registered.
         return name
+
+
+class module_table:
+    def __init__(self, name, default_int_is_64=True):
+        self.default_int = tr.Int64 if default_int_is_64 else tr.Int32
+        self.funcs = {}
+        self.func_imports = {}
+        self.mod_imports = {}
+
+    # Todo: Name import must verify that it only imports a method defined in some other module
+
+    def register_name_import(importref):
+        if not isinstance(importref, ir.NameImport):
+            raise TypeError(f"{name} is not a name import")
+        name = importref.name
+        if name in self.func_imports or name in self.mod_imports:
+            raise CompilerError(f"Duplicate import for name {name}.")
+        self.func_imports[name] = importref
+
+    def register_module_import(importref):
+        if not isinstance(importref, ir.ModImport):
+            raise TypeError(f"{importref} is not a module import")
+        name = importref.as_name
+        if name in self.func_imports or name in self.mod_imports:
+            raise CompilerError(f"Duplicate import for name {name}.")
+
+    def get_func_table(name):
+        table = self.funcs.get(table)
+        if table is None:
+            table = symbol_table(name, self.default_int)
+            self.funcs[name] = table
+        return table
 
 
 def st_from_pyst(func_table, file_name):
@@ -189,7 +222,7 @@ def st_from_pyst(func_table, file_name):
     elif func_table.get_type() != "function":
         raise TypeError(f"{func_name} in file {file_name} refers to a class rather than a function. This is "
                         f"unsupported.")
-    internal_table = symbol_table(func_name)
+    internal_table = symbol_table(func_name, tr.Int64)
 
     # register types
     for name in func_table.get_locals():

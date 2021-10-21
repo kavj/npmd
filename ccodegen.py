@@ -466,7 +466,6 @@ class CCodeGen(CCodeGenBase, StmtVisitor):
         self.printer.print_line(line)
 
 
-
 # need a header file generator..
 
 class BoilerplateWriter(CCodeGenBase):
