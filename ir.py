@@ -249,9 +249,14 @@ class ArrayRef(ValueRef):
 
 
 @dataclass
-class ShapeRef(Expression):
+class SingleDimRef(Expression):
     base: ValueRef
     dim: IntConst
+
+
+@dataclass
+class ShapeRef(Expression):
+    base: ValueRef
 
 
 @dataclass(frozen=True)

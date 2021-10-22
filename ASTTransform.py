@@ -194,14 +194,16 @@ class TreeBuilder(ast.NodeVisitor):
             return False
         return sym.is_source_name
 
+    def visit_With(self, node: ast.With):
+        pass
+
     def visit_Attribute(self, node: ast.Attribute) -> ir.NameRef:
         value = self.visit(node.value)
-        if isinstance(value, ir.NameRef):
-            name = f"{value.name}.{node.attr}"
-            value = ir.NameRef(name)
+        if isinstance(value, ir.NameRef) and value.id == "shape":
+            value = ir.ShapeRef(node.base)
         else:
-            msg = f"Attributes are only supported when attached to names, like 'module.function', received {node}."
-            raise NotImplementedError(msg)
+            msg = f"The only currently supported attribute is shape for arrays."
+            raise CompilerError(msg)
         return value
 
     def visit_Constant(self, node: ast.Constant) -> ir.Constant:
