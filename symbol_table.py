@@ -45,8 +45,7 @@ class symbol:
     """
 
     def __init__(self, name, is_source_name, is_arg, is_assigned):
-        assert isinstance(name, ir.NameRef)
-        self.name = name
+        self.name = extract_name(name)
         self.is_source_name = is_source_name
         self.is_arg = is_arg
         self.is_assigned = is_assigned
@@ -107,10 +106,10 @@ class func_symbol_table:
         return gen
 
     def make_unique_name(self, prefix):
-        prefix = extract_name(prefix)
-        gen = self._get_num_generator(prefix)
+        prefix_ = name = extract_name(prefix)
+        gen = self._get_num_generator(prefix_)
         while self.declares(name):
-            name = wrap_input(f"{prefix}_{next(gen)}")
+            name = wrap_input(f"{prefix_}_{next(gen)}")
         return name
 
     def register_src_name(self, name, is_arg, is_assigned):
@@ -122,7 +121,7 @@ class func_symbol_table:
         if self.declares(name):
             msg = f"Internal Error: Source name {name} is already registered."
             raise KeyError(msg)
-        name = wrap_input(name)
+        name_ = extract_name(name)
         if name == self.scope_name:
             msg = f"Variable name: {name.name} shadows function name."
             raise CompilerError(msg)
@@ -176,8 +175,8 @@ class module_symbol_table:
             raise CompilerError(msg)
 
     def get_func_table(name):
-        name = extract_name(name)
-        return self.funcs.get(name)
+        name_ = extract_name(name)
+        return self.funcs.get(name_)
 
 
 def st_from_pyst(func_table, file_name):
