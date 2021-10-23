@@ -32,6 +32,11 @@ def extract_name(node):
 
 
 @extract_name.register
+def _(node: str):
+    return node
+
+
+@extract_name.register
 def _(node: ir.NameRef):
     return node.name
 

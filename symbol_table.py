@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import itertools
 
-
 import ir
 import type_resolution as tr
 
@@ -66,22 +65,22 @@ class symbol:
         return hash(self.name)
 
 
-class symbol_table:
+class func_symbol_table:
     scalar_ir_types = frozenset({tr.Int32, tr.Int64, tr.Float32, tr.Float64, tr.Predicate32, tr.Predicate64})
 
     def __init__(self, scope_name, default_int):
-        self.symbols = {}   # name -> typed symbol entry
+        self.symbols = {}  # name -> typed symbol entry
         self.types = {}
         self.default_int = default_int
-        self.scope_name = wrap_input(scope_name)  # wrap everything to avoid false comparing raw strings to namerefs
+        self.scope_name = extract_name(scope_name)
         self.prefixes = {}  # prefix for adding enumerated variable names
 
     def declares(self, name):
-        name = wrap_input(name)
+        name = extract_name(name)
         return name in self.symbols
 
     def lookup(self, name):
-        name = wrap_input(name)
+        name = extract_name(name)
         sym = self.symbols.get(name)
         return sym
 
@@ -91,10 +90,14 @@ class symbol_table:
             return False
         return sym.is_source_name
 
+    def check_type(self, name):
+        name = extract_name(name)
+        return self.types.get(name)
+
     def get_arguments(self):
         return {s for s in self.symbols if s.is_arg}
 
-    def _get_num_generator(self, prefix):
+    def _get_num_generator(self, prefix: str):
         # splitting by prefix helps avoids appending
         # large numbers in most cases
         gen = self.prefixes.get(prefix)
@@ -103,43 +106,12 @@ class symbol_table:
             self.prefixes[prefix] = gen
         return gen
 
-    def is_array(self, name):
-        type_ = self.check_type(name)
-        return isinstance(type_, ir.ArrayType)
-
-    def check_type(self, name):
-        """
-        shortcut to get type info only
-        """
-        name = extract_name(name)
-        return self.types.get(name)
-
-    def is_typed(self, name):
-        name = wrap_input(name)
-        return name in self.types
-
     def make_unique_name(self, prefix):
         prefix = extract_name(prefix)
-        name = wrap_input(prefix)
         gen = self._get_num_generator(prefix)
         while self.declares(name):
             name = wrap_input(f"{prefix}_{next(gen)}")
         return name
-
-
-    def declare_type(self, name, type_):
-        """
-        Register a type for an untyped or undeclared symbol.
-        """
-
-        assert type_ is not None
-        existing_type = self.check_type(name)
-        if existing_type is not None:
-            if existing_type != type_:
-                msg = f"Conflicting types {existing_type} and {type_} for variable name {name}."
-                raise CompilerError(msg)
-        else:
-            self.types[name] = type_
 
     def register_src_name(self, name, is_arg, is_assigned):
         """
@@ -172,8 +144,9 @@ class symbol_table:
         return name
 
 
-class module_table:
+class module_symbol_table:
     def __init__(self, name, default_int_is_64=True):
+        self.name = name
         self.default_int = tr.Int64 if default_int_is_64 else tr.Int32
         self.funcs = {}
         self.func_imports = {}
@@ -183,25 +156,28 @@ class module_table:
 
     def register_name_import(importref):
         if not isinstance(importref, ir.NameImport):
-            raise TypeError(f"{name} is not a name import")
+            raise TypeError(f"{importref} is not a name import")
         name = importref.name
         if name in self.func_imports or name in self.mod_imports:
-            raise CompilerError(f"Duplicate import for name {name}.")
-        self.func_imports[name] = importref
+            raise CompilerError(f"Duplicate im")
 
     def register_module_import(importref):
-        if not isinstance(importref, ir.ModImport):
-            raise TypeError(f"{importref} is not a module import")
+        # if not isinstance(importref, ir.ModImpport for name {name}.")
+        # self.func_imports[name] = importrefort):
+        #    raise TypeError(f"{importref} is not a module import")
         name = importref.as_name
         if name in self.func_imports or name in self.mod_imports:
             raise CompilerError(f"Duplicate import for name {name}.")
 
+    def register_func(self, func: func_symbol_table):
+        name = func.scope_name
+        if name in self.funcs:
+            msg = f"Function {name} shadows an existing symbol in module {self.name}"
+            raise CompilerError(msg)
+
     def get_func_table(name):
-        table = self.funcs.get(table)
-        if table is None:
-            table = symbol_table(name, self.default_int)
-            self.funcs[name] = table
-        return table
+        name = extract_name(name)
+        return self.funcs.get(name)
 
 
 def st_from_pyst(func_table, file_name):
@@ -222,7 +198,7 @@ def st_from_pyst(func_table, file_name):
     elif func_table.get_type() != "function":
         raise TypeError(f"{func_name} in file {file_name} refers to a class rather than a function. This is "
                         f"unsupported.")
-    internal_table = symbol_table(func_name, tr.Int64)
+    internal_table = func_symbol_table(func_name, tr.Int64)
 
     # register types
     for name in func_table.get_locals():
