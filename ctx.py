@@ -14,10 +14,13 @@ class compiler_context:
         self.symbols = {}
 
     @contextmanager
-    def function_scope(self, entry_point: ir.Function):
+    def function_scope(self, entry_point):
         assert self.current_function is None
         # Check that current module declares this function
-        self.current_function = entry_point
+        func = self.current_module.lookup_func(entry_point)
+        if func is None:
+            raise CompilerError(f"No entry for function {entry_point} in module {self.current_module.name}")
+        self.current_function = func
         yield
         self.current_function = None
 

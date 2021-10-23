@@ -174,8 +174,11 @@ class module_symbol_table:
             msg = f"Function {name} shadows an existing symbol in module {self.name}"
             raise CompilerError(msg)
 
-    def get_func_table(name):
-        name_ = extract_name(name)
+    def lookup_func(func):
+        if isinstance(func, ir.Function):
+            name_ = extract_name(func.name)
+        else:
+            name_ = extract_name(func)
         return self.funcs.get(name_)
 
 
