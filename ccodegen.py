@@ -495,7 +495,7 @@ class BoilerplateWriter(CCodeGenBase):
     def gen_module_init(modname):
         if modname == "mod":
             raise CompilerError("mod is treated as a reserved name.")
-        self.print_line(f"PyMODINIT_FUNC PyInit_{modname}(void){")
+        self.print_line(f"PyMODINIT_FUNC PyInit_{modname}(void){'{'}")
         with self.closing_brace():
             self.print_line(f"PyObject* mod = PyModule_Create(&{modname});")
             printline("if(mod == NULL){")
@@ -504,19 +504,19 @@ class BoilerplateWriter(CCodeGenBase):
 
     def gen_method_table(modname, funcs):
         # no keyword support..
-        self.print_line(f"static PyMethodDef {modname}Methods[] = {"
+        self.print_line(f"static PyMethodDef {modname}Methods[] = {'{'}")
         with self.indented():
             for name, doc in funcs:
                 if doc is None:
-                    self.print_line(f"{{name}, {modname}_{name}, METH_VARARGS, NULL}")
+                    self.print_line(f"{name}, {modname}_{name}, METH_VARARGS, NULL{'{'}")
                 else:
-                    self.print_line(f"{{name}, {modname}_{name}, METH_VARARGS, {doc}}")
+                    self.print_line(f"{name}, {modname}_{name}, METH_VARARGS, {doc}{'{'}")
         self.print_line("};")
         # sentinel ending entry
         self.print_line("{NULL, NULL, 0, NULL}")
 
     def gen_module_def(modname):
-        self.print_line(f"static PyModuleDef {modname} = {")
+        self.print_line(f"static PyModuleDef {modname} = {'{'}")
         with self.indented():
             self.print_line("PyModuleDef_HEAD_INIT,")
             self.print_line(f"{modname},")

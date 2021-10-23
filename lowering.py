@@ -1,5 +1,3 @@
-import math
-import numbers
 import operator
 import typing
 from collections import defaultdict, deque
@@ -7,8 +5,8 @@ from functools import singledispatch, singledispatchmethod
 
 import ir
 from errors import CompilerError
-from utils import is_addition, is_division, is_multiplication, is_subtraction, wrap_constant, signed_eger_range, \
-    unpack_iterated
+from utils import is_addition, is_division, is_multiplication, is_pow, is_subtraction, is_truth_test, wrap_constant, \
+    unpack_iterated, equals_unary_negate
 from visitor import ExpressionVisitor
 
 unaryops = {"+": operator.pos,
@@ -233,7 +231,6 @@ class const_folding(ExpressionVisitor):
             # if propagated
             if operand.op == expr.op:
                 expr = operand.operand
-            return result
         return expr
 
     @visit.register
@@ -386,6 +383,8 @@ class arithmetic_folding(ExpressionVisitor):
             elif right == ir.Zero:
                 return left
             elif equals_unary_negate(right):
+                # Todo: this is not entirely correct... as it may not be a unary node
+                # need something like extract unary operand..
                 return ir.BinOp(left, right.operand, "+=" if node.in_place else "+")
             elif equals_unary_negate(left):
                 assert not node.in_place
@@ -454,7 +453,7 @@ class arithmetic_folding(ExpressionVisitor):
 
     @visit.register
     def _(self, node: ir.NOT):
-        if not applies_truth_test(node.operand):
+        if not is_truth_test(node.operand):
             return node
         if isinstance(node.operand, ir.BinOp):
             op = node.operand.op
@@ -474,7 +473,7 @@ class arithmetic_folding(ExpressionVisitor):
         elif isinstance(node, ir.NOT):
             # remove double negation
             operand = node.operand.operand
-            if not applies_truth_test(operand):
+            if not is_truth_test(operand):
                 # If the unwrapped type doesn't already export a truth test
                 # we need to indicate this explicitly.
                 operand = ir.TRUTH(operand)
@@ -486,14 +485,14 @@ class arithmetic_folding(ExpressionVisitor):
         # This will leave truth casts on constant integers
         # and floats, since the only gain there is a loss
         # of clarity.
-        if applies_truth_test(node.operand):
+        if is_truth_test(node.operand):
             node = node.operand
         return node
 
     @visit.register
     def _(node: ir.Ternary):
         if node.if_expr == node.else_expr:
-            return if_expr
+            return node.if_expr
         elif node.test.constant:
             return node.if_expr if operator.truth(node.test) else node.else_expr
         test = node.test
@@ -577,6 +576,13 @@ def simplify_spans(spans, non_negative_terms):
                 start = simplify_commutative_min_max(start)
             repl.append((start, stop))
     return repl
+
+
+def get_bounded_terms():
+    """
+    stub for a function to retrieve terms that are either bounded or errors.
+    """
+    pass
 
 
 def is_non_negative(expr, non_negative_terms):

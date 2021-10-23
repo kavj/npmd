@@ -346,7 +346,26 @@ def predicate_branch(branch, local_if, local_else, combine_writes=False):
     return ()
 
 
+def delay_assigns(names):
+    """
+    For each specified name, move all clobbering to the end of the block by making earlier
+    assigns rely on single-use local variable names.
+    """
+    pass
+
+
+def gather_read_written(block):
+    """
+    Record targets and values that are bound for a single block.
+    """
+    pass
+
+
 def if_conversion(node: ir.IfElse, local_name_gen):
+    """
+
+
+    """
 
     if any(is_control_flow(stmt) for stmt in itertools.chain(node.if_branch, node.else_branch)):
         raise ValueError
