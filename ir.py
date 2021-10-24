@@ -396,9 +396,14 @@ class Module:
     This aggregates imports and Function graphs
 
     """
-
+    name: str
     functions: typing.List[Function]
     imports: typing.List[typing.Any]
+
+    def lookup(self, func_name):
+        for func in self.functions:
+            if func.name == func_name:
+                return func
 
 
 @dataclass(frozen=True)

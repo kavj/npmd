@@ -79,15 +79,13 @@ def resolve_types(types):
 
 class CompilerDriver:
 
-    # these need to accept type info
-    pretty_print = pretty_printer()
-
     def __init__(self):
         ctx_ = CompilerContext()
         self.build_module = ModuleBuilder(ctx_)
         self.normalize_paths = NormalizePaths()
         self.reaching_check = ReachingCheck()
-        self.pretty_print = pretty_printer()
+        self.pretty_print = pretty_printer(ctx_)
+        self.ctx = ctx_
 
     def run_pipeline(self, file_name, type_map):
         with error_context():
@@ -103,6 +101,17 @@ class CompilerDriver:
                 # symbols[func.name].types = func_types
                 funcs[index] = func
         return module
+
+    def pretty_print_tree(self, module, func_name=None):
+        with self.ctx.module_scope(module.name):
+            if func_name is not None:
+                with self.ctx.function_scope(func_name):
+                    func = module.lookup(func_name)
+                    self.pretty_print(func, self.ctx.current_function)
+            else:
+                for func in module.functions:
+                    with self.ctx.function_scope(func.name):
+                        self.pretty_print(func, self.ctx.current_function)
 
 
 def name_and_source_from_path(file_path):

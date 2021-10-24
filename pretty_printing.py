@@ -313,7 +313,8 @@ class pretty_printer:
 
     """
 
-    def __init__(self, single_indent="    ", print_annotations=True):
+    def __init__(self, ctx, single_indent="    ", print_annotations=True):
+        self.ctx = ctx
         self.indent = ""
         self._increment = len(single_indent)
         self._single_indent = single_indent
@@ -365,8 +366,9 @@ class pretty_printer:
                 self.visit(node.else_branch)
 
     @singledispatchmethod
-    def visit(self):
-        raise NotImplementedError
+    def visit(self, node):
+        msg = f"No method to pretty print node {node}."
+        raise NotImplementedError(msg)
 
     @visit.register
     def _(self, node: ir.ModImport):

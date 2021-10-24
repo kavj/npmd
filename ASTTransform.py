@@ -510,4 +510,4 @@ class ModuleBuilder:
                 with self.ctx.function_scope(func_name):
                     func_ir = self.build_ir(ast_entry_point)
                     funcs.append(func_ir)
-        return ir.Module(funcs, import_map)
+        return ir.Module(module_name, funcs, import_map)

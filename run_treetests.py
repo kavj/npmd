@@ -48,7 +48,6 @@ uws_types = {"test_forifcont.py": {"something": {"x": array_n,
 
 Type_Info = {}
 
-pretty_print = pretty_printer()
 
 for i, t in enumerate(tests):
     print(t)
@@ -65,8 +64,6 @@ for i, t in enumerate(tests):
     #    raise RuntimeError(msg)
     driver_ = driver.CompilerDriver()
     module = driver_.run_pipeline(filepath, types)
-
-    # for func in module.functions:
-    #    t = symbols.get(func.name)
-    #    pretty_print(func, t)
-    # print('\n\n\n')
+    for func in module.functions:
+        driver_.pretty_print_tree(module, func.name)
+    print('\n\n\n')
