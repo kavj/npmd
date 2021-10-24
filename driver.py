@@ -4,16 +4,21 @@ import typing
 
 import numpy as np
 
-import ir
-import type_resolution as tr
-from ASTTransform import parse_file
-from canonicalize import NormalizePaths
-from reaching_check import ReachingCheck
 from dataclasses import dataclass
+from pathlib import Path
+
+import ir
+
+import type_resolution as tr
+
+from ASTTransform import ModuleBuilder
+from canonicalize import NormalizePaths
+from ctx import CompilerContext
 from errors import error_context, CompilerError
-from utils import wrap_input
 from pretty_printing import pretty_printer
+from reaching_check import ReachingCheck
 from type_inference import TypeInfer
+from utils import wrap_input
 
 
 version = sys.version_info
@@ -72,22 +77,21 @@ def resolve_types(types):
     return internal_types
 
 
-class CompilerContext:
+class CompilerDriver:
 
     # these need to accept type info
-    stages = [NormalizePaths, ReachingCheck]
     pretty_print = pretty_printer()
 
     def __init__(self):
-        self.stages = []
+        ctx_ = CompilerContext()
+        self.build_module = ModuleBuilder(ctx_)
         self.normalize_paths = NormalizePaths()
         self.reaching_check = ReachingCheck()
         self.pretty_print = pretty_printer()
 
     def run_pipeline(self, file_name, type_map):
         with error_context():
-            module, symbols = parse_file(file_name)
-
+            module = self.build_module(file_name)
             funcs = module.functions
             print(f"file name: {file_name}\n")
             for index, func in enumerate(funcs):
@@ -96,9 +100,9 @@ class CompilerContext:
                 infer_types = TypeInfer(func_types)
                 self.reaching_check(func)
                 infer_types(func)
-                symbols[func.name].types = func_types
+                # symbols[func.name].types = func_types
                 funcs[index] = func
-        return module, symbols
+        return module
 
 
 def name_and_source_from_path(file_path):
@@ -114,6 +118,7 @@ def compile_module(file_name, type_map, verbose=False):
         if file_name:
             print(f"Compiling: {file_name}")
     cc = CompilerContext()
+
     return cc.run_pipeline(file_name, type_map)
 
     # cc.run_pipeline(file_name, type_map)

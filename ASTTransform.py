@@ -9,9 +9,10 @@ from itertools import islice
 from pathlib import Path
 
 import ir
+
 from canonicalize import replace_call
 from errors import CompilerError
-from symbol_table import st_from_pyst
+from symbol_table import build_module_symbol_table
 from utils import unpack_assignment, unpack_iterated, wrap_input
 
 
@@ -145,29 +146,29 @@ class ImportHandler(ast.NodeVisitor):
 
 class TreeBuilder(ast.NodeVisitor):
 
-    def __init__(self):
+    def __init__(self, ctx):
+        self.ctx = ctx
         self.body = None
         self.entry = None
         self.enclosing_loop = None
-        self.symbols = None
-        self.renaming = None
+
+    @property
+    def symbols(self):
+        return self.ctx.current_function
 
     @contextmanager
-    def function_context(self, entry, symbols):
+    def function_context(self, entry):
         self.enclosing_loop = None
         self.entry = entry
-        self.symbols = symbols
-        self.renaming = {}
         self.body = []
         yield
         assert self.enclosing_loop is None
         self.entry = None
-        self.symbols = None
-        self.renaming = None
         self.body = None
 
-    def __call__(self, entry: ast.FunctionDef, symbols):
-        with self.function_context(entry, symbols):
+    def __call__(self, entry: ast.FunctionDef):
+        # name =
+        with self.function_context(entry):
             func = self.visit(entry)
         return func
 
@@ -189,7 +190,8 @@ class TreeBuilder(ast.NodeVisitor):
         self.body = stashed
 
     def is_local_variable_name(self, name: ir.NameRef):
-        sym = self.symbols.lookup(name)
+        func = self.ctx.current_function.lookup
+        sym = func(name)
         if sym is None:
             return False
         return sym.is_source_name
@@ -485,39 +487,27 @@ def map_functions_by_name(node: ast.Module):
     return by_name
 
 
-def parse_file(file_name):
-    """
-    Module level point of entry for IR construction.
+class ModuleBuilder:
+    def __init__(self, ctx):
+        self.ctx = ctx
+        self.build_ir = TreeBuilder(ctx)
 
-    Parameters
-    ----------
-
-    file_name:
-        File path we used to extract source. This is used for error reporting.
-
-   
-    """
-
-    path = Path(file_name)
-    if not path.is_file():
-        msg = f"Cannot resolve path to source {path.absolute()}"
-        raise CompilerError(msg)
-
-    with open(path) as src_stream:
-        src_text = src_stream.read()
+    def __call__(self, file_path):
+        path = Path(file_path)
+        module_name = path.name
+        with open(path) as src_stream:
+            src_text = src_stream.read()
+        module_symbols = build_module_symbol_table(src_text, module_name)
         syntax_tree = ast.parse(src_text, filename=path.name)
         syntax_tree = ast.fix_missing_locations(syntax_tree)
         import_map = ImportHandler().visit(syntax_tree)
+        # Todo: register imports once interface stabilizes
         funcs_by_name = map_functions_by_name(syntax_tree)
         funcs = []
-        module_symtable = symtable.symtable(src_text, file_name, "exec")
-        build_func_ir = TreeBuilder()
-        symbol_tables = {}
-        for func_name, ast_entry_point in funcs_by_name.items():
-            table = module_symtable.lookup(func_name).get_namespace()
-            symbols = st_from_pyst(table, file_name)
-            symbol_tables[func_name] = symbols
-            func_ir = build_func_ir(ast_entry_point, symbols)
-            funcs.append(func_ir)
-
-    return ir.Module(funcs, import_map), symbol_tables
+        self.ctx.register_module(module_symbols)
+        with self.ctx.module_scope(module_name):
+            for func_name, ast_entry_point in funcs_by_name.items():
+                with self.ctx.function_scope(func_name):
+                    func_ir = self.build_ir(ast_entry_point)
+                    funcs.append(func_ir)
+        return ir.Module(funcs, import_map)

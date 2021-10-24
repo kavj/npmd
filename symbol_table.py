@@ -1,6 +1,7 @@
-from __future__ import annotations
-
 import itertools
+
+from contextlib import contextmanager
+from symtable import symtable, Function, Symbol
 
 import ir
 import type_resolution as tr
@@ -67,11 +68,25 @@ class symbol:
 class func_symbol_table:
     scalar_ir_types = frozenset({tr.Int32, tr.Int64, tr.Float32, tr.Float64, tr.Predicate32, tr.Predicate64})
 
-    def __init__(self, scope_name, default_int):
+    def __init__(self, func: Function, default_int):
         self.symbols = {}  # name -> typed symbol entry
         self.types = {}
         self.default_int = default_int
-        self.scope_name = extract_name(scope_name)
+        name = func.get_name()
+        self.func_name = name
+        if func.is_nested():
+            raise ValueError(f"{name} in file {file_name} appears as a nested scope, which is unsupported.")
+        elif func.has_children():
+            raise ValueError(f"{name} in file {file_name} contains nested scopes, which are unsupported.")
+        elif func.get_type() != "function":
+            raise TypeError(f"{name} in file {file_name} refers to a class rather than a function. This is "
+                            f"unsupported.")
+        for s in func.get_symbols():
+            if s.is_imported():
+                msg = f"No current support for function scope imports."
+                raise CompilerError(msg)
+            sym = symbol(name=s.get_name(), is_source_name=True, is_arg=s.is_parameter(), is_assigned=s.is_assigned())
+            self.symbols[sym.name] = sym
         self.prefixes = {}  # prefix for adding enumerated variable names
 
     def declares(self, name):
@@ -112,7 +127,7 @@ class func_symbol_table:
             name = wrap_input(f"{prefix_}_{next(gen)}")
         return name
 
-    def register_src_name(self, name, is_arg, is_assigned):
+    def _register_src_name(self, name, is_arg, is_assigned):
         """
         Register a source name using the corresponding symbol from the Python symbol table.
 
@@ -153,6 +168,13 @@ class module_symbol_table:
 
     # Todo: Name import must verify that it only imports a method defined in some other module
 
+    def lookup_func(self, name):
+        value = self.funcs.get(name)
+        if value is None:
+            msg = f"No function {name} is known for module {self.name}."
+            raise CompilerError(msg)
+        return value
+
     def register_name_import(importref):
         if not isinstance(importref, ir.NameImport):
             raise TypeError(f"{importref} is not a name import")
@@ -169,48 +191,27 @@ class module_symbol_table:
             raise CompilerError(f"Duplicate import for name {name}.")
 
     def register_func(self, func: func_symbol_table):
-        name = func.scope_name
+        name = func.func_name
         if name in self.funcs:
             msg = f"Function {name} shadows an existing symbol in module {self.name}"
             raise CompilerError(msg)
-
-    def lookup_func(func):
-        if isinstance(func, ir.Function):
-            name_ = extract_name(func.name)
-        else:
-            name_ = extract_name(func)
-        return self.funcs.get(name_)
+        self.funcs[name] = func
 
 
-def st_from_pyst(func_table, file_name):
-    """
-    Build an internally used symbol table from a Python function symtable and type information.
-    Note: read func_table as py_symbol_table, noting that calling it py_anything would be a Python language violation.
-
-    func_table: Function symbol table symtable.symtable
-    type_map: dict[name: interface_type]
-    file_name: source file name
-
-    """
-    func_name = func_table.get_name()
-    if func_table.is_nested():
-        raise ValueError(f"{func_name} in file {file_name} appears as a nested scope, which is unsupported.")
-    elif func_table.has_children():
-        raise ValueError(f"{func_name} in file {file_name} contains nested scopes, which are unsupported.")
-    elif func_table.get_type() != "function":
-        raise TypeError(f"{func_name} in file {file_name} refers to a class rather than a function. This is "
-                        f"unsupported.")
-    internal_table = func_symbol_table(func_name, tr.Int64)
-
-    # register types
-    for name in func_table.get_locals():
-        sym = func_table.lookup(name)
-        if sym.is_imported():
-            msg = f"Imports at function scope are not currently supported. Import alias: {name}"
-            raise CompilerError(msg)
-        is_arg = sym.is_parameter()
-        is_assigned = sym.is_assigned()
-        type_ = None
-        internal_table.register_src_name(name, is_arg, is_assigned)
-
-    return internal_table
+def build_module_symbol_table(src, name):
+    module = module_symbol_table(name)
+    top = symtable(src, name, "exec")
+    # use default int == 64 for now. This could be made platform specific
+    # and overridable here
+    for func in top.get_children():
+        name = func.get_name()
+        if func.is_nested():
+            raise ValueError(f"{name} in file {file_name} appears as a nested scope, which is unsupported.")
+        elif func.has_children():
+            raise ValueError(f"{name} in file {file_name} contains nested scopes, which are unsupported.")
+        elif func.get_type() != "function":
+            raise TypeError(f"{name} in file {file_name} refers to a class rather than a function. This is "
+                            f"unsupported.")
+        func_table = func_symbol_table(func, tr.Int64)
+        module.register_func(func_table)
+    return module

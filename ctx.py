@@ -1,23 +1,29 @@
-import ir
-
-from symbol_table import symbol_table
-from utils import extract_name
+import ast
 
 from contextlib import contextmanager
 from functools import singledispatchmethod
+from pathlib import Path
+from typing import Optional
 
-class compiler_context:
+import ir
+
+from errors import CompilerError
+from symbol_table import func_symbol_table, module_symbol_table
+from utils import extract_name
+
+
+class CompilerContext:
 
     def __init__(self):
         self.current_module = None
         self.current_function = None
-        self.symbols = {}
+        self._modules = {}
 
     @contextmanager
-    def function_scope(self, entry_point):
+    def function_scope(self, name):
         assert self.current_function is None
         # Check that current module declares this function
-        func = self.current_module.lookup_func(entry_point)
+        func = self.current_module.lookup_func(name)
         if func is None:
             raise CompilerError(f"No entry for function {entry_point} in module {self.current_module.name}")
         self.current_function = func
@@ -25,12 +31,29 @@ class compiler_context:
         self.current_function = None
 
     @contextmanager
-    def module_scope(self, entry_point: ir.Module):
+    def module_scope(self, name: ir.Module):
         assert self.current_module is None
         # create a module entry if we don't have one
-        self.current_module = entry_point
+        module = self._modules.get(name)
+        if module is None:
+            msg = f"No lookup for module {name}."
+            raise RuntimeError(msg)
+        self.current_module = module
         yield
         self.current_module = None
+
+    def register_module(self, symbol_table: module_symbol_table):
+        name = symbol_table.name
+        if name in self._modules:
+            msg = f"Module name {name} shadows an existing module. This is unsupported."
+            raise CompilerError(msg)
+        self._modules[name] = symbol_table
+
+    def register_func(self, symbol_table: func_symbol_table):
+        if self.current_module is None:
+            msg = f"No module loaded to register function {symbol_table.name}."
+            raise RuntimeError(msg)
+        self.current_module.register_func(symbol_table)
 
     def check_type(self, name):
         name = extract_name(name)
