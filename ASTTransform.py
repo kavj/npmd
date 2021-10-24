@@ -504,7 +504,7 @@ class ModuleBuilder:
         # Todo: register imports once interface stabilizes
         funcs_by_name = map_functions_by_name(syntax_tree)
         funcs = []
-        self.ctx.register_module(module_symbols)
+        self.ctx.register_module_scope(module_symbols)
         with self.ctx.module_scope(module_name):
             for func_name, ast_entry_point in funcs_by_name.items():
                 with self.ctx.function_scope(func_name):

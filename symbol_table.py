@@ -45,8 +45,8 @@ class symbol:
     These are meant to be interned by the symbol table and not created arbitrarily.
     """
 
-    def __init__(self, name, is_source_name, is_arg, is_assigned):
-        self.name = extract_name(name)
+    def __init__(self, name: str, is_source_name, is_arg, is_assigned):
+        self.name = name
         self.is_source_name = is_source_name
         self.is_arg = is_arg
         self.is_assigned = is_assigned
@@ -90,11 +90,9 @@ class func_symbol_table:
         self.prefixes = {}  # prefix for adding enumerated variable names
 
     def declares(self, name):
-        name = extract_name(name)
         return name in self.symbols
 
     def lookup(self, name):
-        name = extract_name(name)
         sym = self.symbols.get(name)
         return sym
 
@@ -105,7 +103,6 @@ class func_symbol_table:
         return sym.is_source_name
 
     def check_type(self, name):
-        name = extract_name(name)
         return self.types.get(name)
 
     def get_arguments(self):
@@ -120,35 +117,21 @@ class func_symbol_table:
             self.prefixes[prefix] = gen
         return gen
 
-    def make_unique_name(self, prefix):
-        prefix_ = name = extract_name(prefix)
-        gen = self._get_num_generator(prefix_)
-        while self.declares(name):
-            name = wrap_input(f"{prefix_}_{next(gen)}")
-        return name
-
-    def _register_src_name(self, name, is_arg, is_assigned):
-        """
-        Register a source name using the corresponding symbol from the Python symbol table.
-
-        """
-
-        if self.declares(name):
-            msg = f"Internal Error: Source name {name} is already registered."
-            raise KeyError(msg)
-        name_ = extract_name(name)
-        if name == self.scope_name:
-            msg = f"Variable name: {name.name} shadows function name."
-            raise CompilerError(msg)
-        is_source_name = True
-        sym = symbol(name, is_source_name, is_arg, is_assigned)
-        self.symbols[name] = sym
-
-    def register_impl_name(self, name, type_):
+    def make_unique_name_like(self, name, type_ = None):
         """
         This is used to add a unique typed temporary variable name.
         """
 
+        name = extract_name(name)
+        if type_ is None:
+            # If we're value numbering a name, this grabs type info from the base name.
+            type_ = self.check_type(name)
+            if type_ is None:
+                msg = f"Failed to retrieve a type for name {name}."
+                raise CompilerError(msg)
+        gen = self._get_num_generator(prefix_)
+        while self.declares(name):
+            name = wrap_input(f"{prefix_}_{next(gen)}")
         name = self.make_unique_name(name)
         sym = symbol(name, is_source_name=False, is_arg=False, is_assigned=True)
         self.symbols[name] = sym

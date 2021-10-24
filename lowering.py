@@ -644,6 +644,10 @@ def split_intervals_by_step(intervals):
     return by_step
 
 
+class NonNegativeIteratorTests(StmtVisitor):
+    pass
+
+
 def make_loop_interval(iterables, non_negative_terms):
     """
 
@@ -672,6 +676,8 @@ def make_loop_interval(iterables, non_negative_terms):
     for iterable in iterables:
         interval_params = interval_from_iterable(iterable)
         intervals.update(interval_params)
+
+
 
     by_step = split_intervals_by_step(intervals)
 

@@ -453,22 +453,6 @@ Targetable = typing.TypeVar('Targetable', NameRef, Subscript, Tuple)
 
 
 @dataclass(frozen=True)
-class OFCheckedSub(Expression):
-    """
-    sentinel class for subtraction with overflow check.
-    This should lower to compiler specific extensions, since
-    there's a greater risk of ad hoc checks being optimized away.
-    """
-    left: ValueRef
-    right: ValueRef
-
-    @property
-    def subexprs(self):
-        yield self.left
-        yield self.right
-
-
-@dataclass(frozen=True)
 class BinOp(Expression):
     left: ValueRef
     right: ValueRef

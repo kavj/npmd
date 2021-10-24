@@ -42,18 +42,12 @@ class CompilerContext:
         yield
         self.current_module = None
 
-    def register_module(self, symbol_table: module_symbol_table):
+    def register_module_scope(self, symbol_table: module_symbol_table):
         name = symbol_table.name
         if name in self._modules:
             msg = f"Module name {name} shadows an existing module. This is unsupported."
             raise CompilerError(msg)
         self._modules[name] = symbol_table
-
-    def register_func(self, symbol_table: func_symbol_table):
-        if self.current_module is None:
-            msg = f"No module loaded to register function {symbol_table.name}."
-            raise RuntimeError(msg)
-        self.current_module.register_func(symbol_table)
 
     def check_type(self, name):
         name = extract_name(name)
@@ -68,6 +62,12 @@ class CompilerContext:
                 raise CompilerError(msg)
         else:
             self.current_function.types[name] = type_
+
+    def register_unique_name(self, prefix):
+        table = self.current_function
+        prefix_ = extract_name(prefix)
+        name = table.make_unique_name(prefix_)
+        return name
 
     def is_array(self, name):
         type_ = self.check_type(name)

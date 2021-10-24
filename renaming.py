@@ -120,25 +120,59 @@ class Renamer(StmtTransformer):
     """
 
     def __init__(self, ctx):
+        self.ctx = ctx
+
+    def __call__(self, entry_point, gen_kill_info):
+        self.gen_kill = gen_kill_info
+        self.current = {}
+        self.visit(entry_point)
+
+    @singledispatchmethod
+    def visit(self, node):
+        super().visit(node)
+
+    @visit.register
+    def _(self, node: list):
+        repl = []
+        for stmt in node:
+            if isinstance(stmt, (ir.ForLoop, ir.WhileLoop, ir.IfElse)):
+                self.
+
+    @visit.register
+    def _(self, node: ir.Assign):
+        if isisinstance(node.target, ir.NameRef):
+            if node.target in self.gen_kill.uevs:
 
 
 
-class LVN(StmtTransformer):
+
+
+
+
+class Renamer(StmtTransformer):
     """
     Local value numbering, with some utility for if branch conversion
     """
 
-    def __init__(self, syms, types):
-        self.syms = syms
-        self.types = types
-        self.collect_targets = TargetCollector()
-        self.labeler = None
+    def __init__(self, ctx, gen_kill):
+        self.ctx = ctx
+        self.name_to_value = {}
+        self.value_to_name = {}
+        self.gen_kill = gen_kill
 
     def __call__(self, node):
         if not isinstance(node, (ir.Function, ir.ForLoop, ir.WhileLoop)):
             raise TypeError(f"Not a valid entry point: {node}")
-        with self.vn_barrier(node.body, node.pos):
-            self.visit(node.body)
+        self.name_to_value = {}
+        self.value_to_name = {}
+        self.visit(node.body)
+        self.current_value = None
+
+    def must_rename(self, value):
+        # Todo: stub
+        # renaming is only needed if an initial value is upward exposed, or there are multiple assignments to a name
+        # in a block or it's required due to an outer branch.
+        return True
 
     def copy_out(self, append_to, pos):
         assert self.labeler is not None
@@ -154,6 +188,25 @@ class LVN(StmtTransformer):
         yield
         self.copy_out(append_to, pos)
         self.labeler = stashed
+
+    def update_value_mapping(self, target, value):
+        if isinstance(target, ir.NameRef):
+            if isinstance(value, ir.NameRef):
+                # check if this is remapped
+                rhs = self.name_to_value.get(value, value)
+                self.name_to_value[target] = rhs
+            elif isinstance(value, ir.Expression):
+                # if this isn't a name or constant
+                # check if this is labeled already
+                rhs = self.value_to_name.get(value)
+                if rhs is None:
+                    if self.should_rename(target):
+                        renamed = self.ctx.make_unique_name_like(target)
+                        self.name_to_value[target] = renamed
+                        self.value_to_name[value] = renamed
+                    else:
+                        self.name_to_value[target] = value
+
 
     @contextmanager
     def vn_barrier(self, append_to, pos):
@@ -179,13 +232,17 @@ class LVN(StmtTransformer):
     def _(self, node: list):
         repl = []
         for stmt in node:
-            stmt = self.visit(stmt)
             if isinstance(stmt, (ir.ForLoop, ir.WhileLoop)):
-                with self.vn_barrier(repl, stmt.pos):
-                    self.visit(stmt.body)
+                self.copy_out(repl, stmt.pos)
             elif isinstance(stmt, ir.IfElse):
+                # we need to share value numbering across the entry blocks of each
+                # branch, so that if a local value is generated in each branch prior to any
+                # point of sub-branching, it takes the same name. This helps avoid creating
+                # redundancy if the branch is later if converted.
 
-                self.clobber_vns(repl, stmt.pos)
+                pass
+            stmt = self.visit(stmt)
+            repl.append(stmt)
         return repl
 
     @visit.register
