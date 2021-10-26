@@ -560,217 +560,106 @@ def _(iterable: ir.Subscript):
     return start, stop, step
 
 
-def simplify_spans(spans, non_negative_terms):
-    by_stop = defaultdict(set)
 
-    for start, stop in spans:
-        by_stop[stop].add(start)
+class LoopIntervalBuilder:
+    """
 
-    repl = []
-    seen = set()
+        Make loop interval of the form (start, stop, step).
 
-    for _, stop in spans:
-        if stop not in seen:
-            starts = by_stop[stop]
-            seen.add(stop)
-            if len(starts) == 1:
-                start, = starts
+        This tries to find a safe method of calculation.
+
+        This assumes (with runtime verification if necessary)
+        that 'stop - start' will not overflow.
+
+        References:
+            LIVINSKII et. al, Random Testing for C and C++ Compilers with YARPGen
+            Dietz et. al, Understanding Integer Overflow in C/C++
+            Bachmann et. al, Chains of Recurrences - a method to expedite the evaluation of closed-form functions
+            https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html
+            https://developercommunity.visualstudio.com/t/please-implement-integer-overflow-detection/409051
+            https://numpy.org/doc/stable/user/building.html
+
+        """
+
+    def __init__(self, ctx):
+        self.ctx = ctx
+
+
+    def make_single_index_loop(self, header: ir.ForLoop):
+        # Assume each target appears exactly once, since we can always transform
+        # to this case.
+
+        # Find the (start, step) pair for each iterable.
+
+        by_start_step = defaultdict(set)
+        by_iterable = {}
+        for _, iterable in unpack_iterated(header):
+            start, stop, step = interval_from_iterable(iterable)
+            key = (start, step)
+            by_start_step[key].add(stop)
+            by_iterable[iterable] = key
+
+        by_start_step_opt = {}
+        loop_params = {}
+
+        # make index variables
+
+        for key, stop in by_start_step.items():
+            stop = ir.Min(stop)
+            stop = simplify_commutative_min_max(stop)
+            index_var = ctx.register_unique_name(prefix="i")
+            loop_params[key] = stop, iv
+
+        # Getting well defined explicit iteration counts has a lot of edge cases, including
+        # division by zero and possible arithmetic overflow, where checks for arithmetic overflow
+        # are compiler specific. In addition, there's the cost of potentially computing division for low trip counts
+        # on multiple step sizes. It's easier just to take the naive approach and put all additional tests at the beginning
+        # of the loop body.
+
+        lp = iter(loop_params.items())
+        loop_index_params = next(lp)
+
+        initializers = []
+
+        # anything other than the primary loop index is tested at the end of the loop body
+        # This doesn't preserve initial testing order.
+
+        epilogue = []
+        pos = header.pos
+
+        for (start, step), (stop, iv) in lp:
+            var_init = ir.Assign(iv, start, pos)
+            initializers.append(var_init)
+            induction_step = ir.BinOp(iv, step, "+")
+            induction_assign = ir.Assign(iv, induction_step, pos)
+            epilogue.append(induction_assign)
+            cond_break = ir.break_if_matches(expr=stop, cond=True)
+            epilogue.append(cond_break)
+
+        # now set up the initial assignments
+
+        prologue = []
+
+        for target, iterable in unpack_iterated(header):
+            key = by_iterable[iterable]
+            _, iv = loop_params[key]
+            if isinstance(iterable, ir.AffineSeq):
+                value = iv
             else:
-                start = ir.Max(tuple(starts))
-                start = simplify_commutative_min_max(start)
-            repl.append((start, stop))
-    return repl
+                value = ir.Subscript(iterable, iv)
+            assign = ir.Assign(target, value)
 
+        prologue.append(assign)
 
-def get_bounded_terms():
-    """
-    stub for a function to retrieve terms that are either bounded or errors.
-    """
-    pass
+        prologue.extend(header.body)
+        prologue.extend(epilogue)
 
+        # make simplified loop header
+        (start, step), (stop, target) = loop_index_params
 
-def is_non_negative(expr, non_negative_terms):
-    """
-    check for non-negative expressions, strictly intended for finite arithmetic.
+        iterable = ir.AffineSeq(star, stop, step)
 
-    """
-    if expr.constant:
-        return operator.ge(expr.value, 0)
-    elif expr in non_negative_terms:
-        return True
-    elif isinstance(expr, ir.Max):
-        return any(is_non_negative(subexpr, non_negative_terms) for subexpr in expr.subexprs)
-    return False
+        repl_header = ir.ForLoop(target, iterable, loop_body, pos)
 
+        return repl_header
 
-def find_safe_interval_width(a: ir.ValueRef, b: ir.ValueRef, non_negative_terms) -> typing.Union[bool, ir.ValueRef]:
-    """
-
-    for a half-open interval [a, b)
-    check if either "a" is non-negative or "b - a" is computable at compile time.
-    If "b - a" overflows available fixed precision, it must be handled elsewhere.
-
-    References:
-        LIVINSKII et. al, Random Testing for C and C++ Compilers with YARPGen
-        Dietz et. al, Understanding Integer Overflow in C/C++
-
-        Bachmann et. al, Chains of Recurrences - a method to expedite the evaluation of closed-form functions
-        https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html
-        https://developercommunity.visualstudio.com/t/please-implement-integer-overflow-detection/409051
-        https://numpy.org/doc/stable/user/building.html
-
-    """
-
-    if a.constant:
-        if b.constant:
-            return wrap_constant(operator.sub(b.value, a.value))
-        elif is_non_negative(b, non_negative_terms):
-            return ir.BinOp(b, a, "-")
-        else:
-            return ir.BinOp(ir.Max(b, ir.Zero), a, "-")
-    elif is_non_negative(a, non_negative_terms):
-        # symbolic but strictly non-negative
-        if is_non_negative(b, non_negative_terms):
-            return ir.BinOp(b, a, "-")
-        else:
-            return ir.BinOp(ir.Max(b, ir.Zero), a, "-")
-    return ir.OFCheckedSub(b, a)
-
-
-def split_intervals_by_step(intervals):
-    by_step = defaultdict(set)
-    for start, stop, step in intervals:
-        by_step[step].add((start, stop))
-    return by_step
-
-
-class NonNegativeIteratorTests(StmtVisitor):
-    pass
-
-
-def make_loop_interval(iterables, non_negative_terms):
-    """
-
-    Make loop interval of the form (start, stop, step).
-
-    This tries to find a safe method of calculation.
-
-    This assumes (with runtime verification if necessary)
-    that 'stop - start' will not overflow.
-
-    References:
-        LIVINSKII et. al, Random Testing for C and C++ Compilers with YARPGen
-        Dietz et. al, Understanding Integer Overflow in C/C++
-        Bachmann et. al, Chains of Recurrences - a method to expedite the evaluation of closed-form functions
-        https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html
-        https://developercommunity.visualstudio.com/t/please-implement-integer-overflow-detection/409051
-        https://numpy.org/doc/stable/user/building.html
-
-    """
-
-    # Todo: This should be a loop transform pass, since it needs to inject error handling for complicated parameters
-    #       and eventually handle reversal.
-
-    intervals = set()
-
-    for iterable in iterables:
-        interval_params = interval_from_iterable(iterable)
-        intervals.update(interval_params)
-
-
-
-    by_step = split_intervals_by_step(intervals)
-
-    opt_by_step = {}
-
-    for step, spans in by_step.items():
-        opt_by_step[step] = simplify_spans(spans, non_negative_terms)
-
-    if len(opt_by_step) == 1:
-        step, spans = opt_by_step.popitem()
-        if len(spans) == 1:
-            span, = spans
-            start, stop = span
-            return ir.AffineSeq(start, stop, step)
-        else:
-            # produces an interval (0, diff, step)
-            terms = []
-            for start, stop in spans:
-                diff = find_safe_interval_width(start, stop, non_negative_terms)
-                terms.append(diff)
-            count = ir.Min(tuple(terms))
-            interval = ir.AffineSeq(ir.Zero, count, ir.One)
-            return interval
-    else:
-        # compute explicit interval counts
-        counts = []
-        seen = set()
-        for step, spans in opt_by_step.items():
-            diffs = []
-            diff = None
-            for start, stop in spans:
-                diff = find_safe_interval_width(start, stop, non_negative_terms)
-                diffs.append(diff)
-            if len(diffs) > 1:
-                diff = ir.Min(tuple(diffs))
-            base_count = ir.BinOp(diff, step, "//")
-            test = ir.BinOp(diff, step, "%")
-            fringe = ir.Ternary(test, ir.One, ir.Zero)
-            count = ir.BinOp(base_count, fringe, "+")
-            counts.append(count)
-
-        assert(len(counts) > 0)
-        count = ir.Min(tuple(counts)) if len(counts) != 1 else counts.pop()
-        interval = ir.AffineSeq(ir.Zero, count, ir.One)
-        return interval
-
-
-def make_loop_assigns(node: ir.ForLoop, interval, loop_index):
-    index_start, index_stop, index_step = interval
-    pos = node.pos
-    assigns = []
-    simplify_arithmetic = arithmetic_folding()
-
-    # verify that we have matching step
-    for target, iterable in unpack_iterated(node.target, node.iterable):
-        iter_start, iter_stop, iter_step = interval_from_iterable(iterable)
-        # check that interval assumptions hold
-        if iter_step != index_step:
-            msg = f"Internal Error: Non-conforming loop step."
-            raise ValueError(msg)
-        elif iter_start != index_start and index_start != ir.Zero:
-            msg = f"Internal Error: Non-conforming loop start."
-            raise ValueError(msg)
-        access_func = ir.BinOp(loop_index, iter_start, "+")
-        access_func = simplify_arithmetic(access_func)
-        if isinstance(iterable, ir.AffineSeq):
-            value = access_func
-        elif isinstance(iterable, ir.Subscript):
-            if isinstance(iterable.slice, ir.Slice):
-                # if we reach this point, the step used by the loop
-                # index should match iterable.slice.step
-                assert iterable.slice.step == index_step
-                value = ir.Subscript(iterable.target, access_index)
-            else:
-                # scalar subscript means we're iterating over the second dim
-                # rather than the leading one
-                indices = (iterable.slice, access_index)
-                value = ir.Subscript(iterable.target, ir.Tuple(indices))
-        elif isinstance(iterable, ir.NameRef):
-            value = ir.Subscript(iterable, access_index)
-        else:
-            msg = f"Internal Error: Cannot make access function for type {type(iterable)}."
-            raise TypeError(msg)
-        assign = ir.Assign(target, value, pos)
-        assigns.append(assign)
-    return assigns
-
-
-def make_single_index_loop(node: ir.ForLoop, non_negative_scalars, loop_index):
-    # ignore enumerate indices
-    iterables = {iterable for (_, iterable) in unpack_iterated(node.target, node.iterable, False)}
-    interval = make_loop_interval(iterables, non_negative_scalars)
-    assigns = make_loop_assigns(node, interval, loop_index)
-    assigns.extend(node.body)
-    repl = ir.ForLoop(loop_index, interval, assigns, node.pos)
-    return repl

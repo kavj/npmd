@@ -42,7 +42,7 @@ class LivenessDetail(StmtVisitor):
 
     @contextmanager
     def liveness_context(self, entry_point):
-        self.li = liveness_info(uev=set(), read=set(), writes=Counter())
+        self.li = liveness_info(uev=set(), read=set(), writes=set())
         yield
         assert self.entry_point is entry_point
         self.li = None
@@ -114,42 +114,6 @@ class LivenessDetail(StmtVisitor):
 
 
 class Renamer(StmtTransformer):
-
-    """
-    Local renaming
-    """
-
-    def __init__(self, ctx):
-        self.ctx = ctx
-
-    def __call__(self, entry_point, gen_kill_info):
-        self.gen_kill = gen_kill_info
-        self.current = {}
-        self.visit(entry_point)
-
-    @singledispatchmethod
-    def visit(self, node):
-        super().visit(node)
-
-    @visit.register
-    def _(self, node: list):
-        repl = []
-        for stmt in node:
-            if isinstance(stmt, (ir.ForLoop, ir.WhileLoop, ir.IfElse)):
-                self.
-
-    @visit.register
-    def _(self, node: ir.Assign):
-        if isisinstance(node.target, ir.NameRef):
-            if node.target in self.gen_kill.uevs:
-
-
-
-
-
-
-
-class Renamer(StmtTransformer):
     """
     Local value numbering, with some utility for if branch conversion
     """
@@ -168,7 +132,7 @@ class Renamer(StmtTransformer):
         self.visit(node.body)
         self.current_value = None
 
-    def must_rename(self, value):
+    def must_rename(self, target):
         # Todo: stub
         # renaming is only needed if an initial value is upward exposed, or there are multiple assignments to a name
         # in a block or it's required due to an outer branch.
@@ -200,29 +164,12 @@ class Renamer(StmtTransformer):
                 # check if this is labeled already
                 rhs = self.value_to_name.get(value)
                 if rhs is None:
-                    if self.should_rename(target):
+                    if self.must_rename(target):
                         renamed = self.ctx.make_unique_name_like(target)
                         self.name_to_value[target] = renamed
                         self.value_to_name[value] = renamed
                     else:
                         self.name_to_value[target] = value
-
-
-    @contextmanager
-    def vn_barrier(self, append_to, pos):
-        """
-        Clobbering boundary for value numbering
-        """
-        have_existing = self.labeler is not None
-        if have_existing:
-            self.copy_out(append_to, pos)
-        self.labeler = Labeler(self.syms, self.types)
-        yield
-        self.copy_out(append_to, pos)
-        if have_existing:
-            self.labeler = Labeler(self.syms, self.types)
-        else:
-            self.labeler = None
 
     @singledispatchmethod
     def visit(self, node):
@@ -292,3 +239,4 @@ class Renamer(StmtTransformer):
     @visit.register
     def _(self, node: ir.WhileLoop):
         self.visit(node.body)
+

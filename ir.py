@@ -891,7 +891,13 @@ class WhileLoop(StmtBase):
 
 
 @dataclass
-class raise_if(StmtBase):
+class break_if_matches(StmtBase):
+    expr: Expression
+    cond: bool
+
+
+@dataclass
+class raise_if_matches(StmtBase):
     expr: ValueRef
     err_type: type
     msg: str
