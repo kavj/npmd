@@ -624,18 +624,9 @@ class LoopIntervalBuilder:
         # anything other than the primary loop index is tested at the end of the loop body
         # This doesn't preserve initial testing order.
 
-        epilogue = []
+        # epilogue = []
+        repl_body = []
         pos = header.pos
-
-        for (start, step), (stop, iv) in lp:
-            var_init = ir.Assign(iv, start, pos)
-            initializers.append(var_init)
-            induction_step = ir.BinOp(iv, step, "+")
-            induction_assign = ir.Assign(iv, induction_step, pos)
-            epilogue.append(induction_assign)
-            cond_break = ir.break_if_matches(expr=stop, cond=True)
-            epilogue.append(cond_break)
-
         # now set up the initial assignments
 
         prologue = []
@@ -648,18 +639,22 @@ class LoopIntervalBuilder:
             else:
                 value = ir.Subscript(iterable, iv)
             assign = ir.Assign(target, value)
+            repl_body.append(assign)
 
-        prologue.append(assign)
+        repl_body.extend(header.body)
 
-        prologue.extend(header.body)
-        prologue.extend(epilogue)
+        for (start, step), (stop, iv) in lp:
+            var_init = ir.Assign(iv, start, pos)
+            initializers.append(var_init)
+            induction_step = ir.BinOp(iv, step, "+")
+            induction_assign = ir.Assign(iv, induction_step, pos)
+            repl_body.append(induction_assign)
+            cond_break = ir.break_if_matches(expr=stop, cond=True)
+            repl_body.append(cond_break)
 
         # make simplified loop header
         (start, step), (stop, target) = loop_index_params
 
         iterable = ir.AffineSeq(star, stop, step)
-
-        repl_header = ir.ForLoop(target, iterable, loop_body, pos)
-
+        repl_header = ir.ForLoop(target, iterable, repl_body, pos)
         return repl_header
-
