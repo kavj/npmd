@@ -629,8 +629,6 @@ class LoopIntervalBuilder:
         pos = header.pos
         # now set up the initial assignments
 
-        prologue = []
-
         for target, iterable in unpack_iterated(header):
             key = by_iterable[iterable]
             _, iv = loop_params[key]
