@@ -313,16 +313,17 @@ class pretty_printer:
 
     """
 
-    def __init__(self, single_indent="    ", print_annotations=True, types=None):
+    def __init__(self, single_indent="    ", print_annotations=True):
         self.indent = ""
         self._increment = len(single_indent)
         self._single_indent = single_indent
         self.print_annotations = print_annotations
         self.format = pretty_formatter()
+        self.symbols = None
 
     def __call__(self, tree, symbols):
         assert self.indent == ""
-        with self.symbols_loaded(symbols):
+        with(self.symbols_loaded(symbols)):
             self.visit(tree)
 
     @contextmanager

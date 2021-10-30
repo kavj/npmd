@@ -58,11 +58,5 @@ for i, t in enumerate(tests):
     print(src)
     print("\n\nOUTPUT\n\n")
     types = uws_types.get(t, {})
-
-    # if types is None:
-    #    msg = f"Unable to load types for test file {t}."
-    #    raise RuntimeError(msg)
-    module = driver.compile_module(filepath, types)
-    for func in module.functions:
-        pass
+    module = driver.compile_module(filepath, types, print_result=True)
     print('\n\n\n')

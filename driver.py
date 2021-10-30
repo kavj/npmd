@@ -127,20 +127,22 @@ def build_function_pipeline():
     return pipeline
 
 
-def compile_module(file_path, types, verbose=False, print_result=False):
+def compile_module(file_path, types, verbose=False, print_result=True):
     pipeline = build_function_pipeline()
     if verbose:
         if file_path:
             print(f"Compiling: {file_name}:")
     mod_ir, symbols = build_module_ir_and_symbols(file_path, types)
     funcs = []
+    norm_paths = NormalizePaths()
+    # rc = ReachingCheck()
     for func in mod_ir.functions:
-        for stage in pipeline:
-            func = stage(func)
+        func = norm_paths(func)
         funcs.append(func)
-    if print_result:
-        from pretty_printing import pretty_print
-        pp = pretty_print()
-        pp(mod_ir)
+        if print_result:
+            from pretty_printing import pretty_printer
+            pp = pretty_printer()
+            s = symbols.get(func.name)
+            pp(func, s)
     return mod_ir
 

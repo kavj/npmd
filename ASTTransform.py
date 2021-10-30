@@ -477,7 +477,7 @@ def populate_func_symbols(func_table, types, ignore_unbound=False):
     # since we have basic type info here, later phases should be validating the argument
     # and type signatures used when calling imported functions
     func_name = func_table.get_name()
-    symbols = set()
+    symbols = {}
     for s in func_table.get_symbols():
         name = s.get_name()
         if s.is_imported():
@@ -496,8 +496,10 @@ def populate_func_symbols(func_table, types, ignore_unbound=False):
                       f"This is automatically treated as an error."
                 raise CompilerError(msg)
             type_ = types.get(name)
+            if func_name == "examp":
+                pass
             sym = symbol(name, type_, is_arg, is_source_name=True)
-            symbols.add(sym)
+            symbols[name] = sym
     return symbol_table(func_name, symbols)
 
 
