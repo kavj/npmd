@@ -496,8 +496,6 @@ def populate_func_symbols(func_table, types, ignore_unbound=False):
                       f"This is automatically treated as an error."
                 raise CompilerError(msg)
             type_ = types.get(name)
-            if func_name == "examp":
-                pass
             sym = symbol(name, type_, is_arg, is_source_name=True)
             symbols[name] = sym
     return symbol_table(func_name, symbols)

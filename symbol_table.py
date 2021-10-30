@@ -88,8 +88,6 @@ class symbol_table:
         return sym.is_source_name
 
     def check_type(self, name):
-        if name == ir.NameRef("a"):
-            print("somethin")
         name = extract_name(name)
         return self.symbols[name].type_
 
