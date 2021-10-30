@@ -218,14 +218,24 @@ class ArrayType(ValueRef):
 
 
 @dataclass(frozen=True)
-class ArrayInitSpec(ValueRef):
-    dims: typing.Tuple[typing.Union[NameRef, IntConst], ...]
+class ArrayInit(ValueRef):
+    ndims: int
     dtype: typing.Hashable
+    dims: typing.Tuple[typing.Union[NameRef, IntConst], ...]
     fill_value: typing.Optional[typing.Union[IntConst, FloatConst, BoolConst]]
 
     def __post_init__(self):
-        assert isinstance(self.dims, tuple)
+        assert isinstance(self.ndims, numbers.Integral)
+        assert self.dims is None or isinstance(self.dims, tuple)
         assert isinstance(self.dtype, Hashable)
+
+
+@dataclass(frozen=True)
+class ArrayArg(ValueRef):
+    ndims: int
+    dtype: typing.Hashable
+    dims: typing.Optional[typing.Tuple[typing.Tuple[int, int],...]]
+    evol: typing.Optional[str]
 
 
 @dataclass(frozen=True)

@@ -1,3 +1,4 @@
+import numbers
 import os
 import sys
 import typing
@@ -27,16 +28,6 @@ if sys.version_info.minor < 8:
     raise RuntimeError(f"Python 3.8 or above is required.")
 
 
-@dataclass(frozen=True)
-class ArrayArg(ir.ValueRef):
-    """
-    Array argument. This ensures reaching definitions of array
-    parameters are unambiguous.
-    """
-    spec: ir.ArrayInitSpec
-    stride: typing.Optional[typing.Union[ir.NameRef, ir.IntConst]]
-
-
 def get_scalar_type(input_type):
     if input_type == np.float32:
         return tr.Float32
@@ -53,16 +44,35 @@ def get_scalar_type(input_type):
         raise ValueError(msg)
 
 
-def make_array_arg_type(dims, dtype, stride=None):
+def make_array_arg_type(ndims, dtype, dims=(), evol=None):
     """
     Parameterized array type suitable for use as an argument.
+    evol can be None, sliding window, and iterated (just advance iterator by one each time),
+    with any subscript applied to a sliding window being folded into the variable's evolution.
+
+    dims should be a dense map, tuple of key, value pairs
+
     """
     dtype = get_scalar_type(dtype)
-    dims = tuple(wrap_input(d) for d in dims)
-    if stride is not None:
-        stride = wrap_input(stride)
-    spec = ir.ArrayInitSpec(dims, dtype, fill_value=None)
-    return ArrayArg(spec, stride)
+    if dims is not None:
+        # should be a tuple of pairs
+        assert isinstance(dims, typing.Hashable)
+        seen = set()
+        for index, value in dims:
+            if index in seen:
+                msg = f"index {index} is duplicated."
+                raise CompilerError(msg)
+            if not isinstance(index, numbers.Integral):
+                msg = f"dims can only be used to specify fixed dimensions, received: {dim}."
+                raise CompilerError(msg)
+            elif 0 > dim:
+                msg = f"Negative dim {dim} specified"
+                raise CompilerError(msg)
+            elif dim >= ndims:
+                msg = f"dim {dim} specified for array with {ndims} dimensions."
+                raise CompilerError(msg)
+        dims = tuple(d for d in dims)
+    return ir.ArrayArg(ndims, dtype, dims, evol)
 
 
 def resolve_types(types):
@@ -145,4 +155,3 @@ def compile_module(file_path, types, verbose=False, print_result=True):
             s = symbols.get(func.name)
             pp(func, s)
     return mod_ir
-

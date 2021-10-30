@@ -11,7 +11,7 @@ tests = ("test_forifcont.py", "test_nested.py", "test_cascade_if.py", "test_dead
          "test_nested_if.py", "test_nested_if_non_const.py")
 
 
-array_n = driver.make_array_arg_type(dims=("n",), dtype=np.float64, stride=None)
+array_n = driver.make_array_arg_type(ndims=1, dtype=np.float64)
 
 # Todo: This needs a formal test suite rather than examples.
 #       For now, make a second tuple to inject type info and extend
