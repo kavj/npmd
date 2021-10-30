@@ -54,24 +54,24 @@ def make_array_arg_type(ndims, dtype, dims=(), evol=None):
 
     """
     dtype = get_scalar_type(dtype)
-    if dims is not None:
-        # should be a tuple of pairs
-        assert isinstance(dims, typing.Hashable)
-        seen = set()
-        for index, value in dims:
-            if index in seen:
-                msg = f"index {index} is duplicated."
-                raise CompilerError(msg)
-            if not isinstance(index, numbers.Integral):
-                msg = f"dims can only be used to specify fixed dimensions, received: {dim}."
-                raise CompilerError(msg)
-            elif 0 > dim:
-                msg = f"Negative dim {dim} specified"
-                raise CompilerError(msg)
-            elif dim >= ndims:
-                msg = f"dim {dim} specified for array with {ndims} dimensions."
-                raise CompilerError(msg)
-        dims = tuple(d for d in dims)
+    # should be a tuple of pairs
+    assert isinstance(dims, typing.Hashable)
+    seen = set()
+    for index, value in dims:
+        if index in seen:
+            msg = f"index {index} is duplicated."
+            raise CompilerError(msg)
+        seen.add(index)
+        if not isinstance(index, numbers.Integral):
+            msg = f"dims can only be used to specify fixed dimensions, received: {dim}."
+            raise CompilerError(msg)
+        elif 0 > dim:
+            msg = f"Negative dim {dim} specified"
+            raise CompilerError(msg)
+        elif dim >= ndims:
+            msg = f"dim {dim} specified for array with {ndims} dimensions."
+            raise CompilerError(msg)
+    dims = tuple(d for d in dims)
     return ir.ArrayArg(ndims, dtype, dims, evol)
 
 
