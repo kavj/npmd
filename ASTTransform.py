@@ -1,4 +1,5 @@
 import ast
+import itertools
 import sys
 import typing
 import symtable
@@ -12,7 +13,7 @@ import ir
 
 from canonicalize import replace_call
 from errors import CompilerError
-from symbol_table import build_module_symbol_table
+from symbol_table import symbol, symbol_table
 from utils import unpack_assignment, unpack_iterated, wrap_input
 
 
@@ -92,24 +93,25 @@ class ImportHandler(ast.NodeVisitor):
     """
 
     def __init__(self):
-        self.import_map = None
-        self.bound_names = None
+        self.imports = None
+        self.func_names = None
 
     @contextmanager
     def make_context(self):
-        self.bound_names = set()
-        self.import_map = {}
+        self.imports = {}
+        self.func_names = []
         yield
-        self.bound_names = None
-        self.import_map = None
+        self.imports = None
+        self.func_names = []
+
+    def __call__(self, node):
+        with self.make_context():
+            self.visit(node)
+            return self.imports, self.func_names
 
     def visit_Module(self, node):
-        with self.make_context():
-            for n in node.body:
-                if isinstance(n, (ast.Import, ast.ImportFrom)):
-                    self.visit(n)
-            import_map = self.import_map
-        return import_map
+        for n in node.body:
+            self.visit(n)
 
     def generic_visit(self, node):
         # ignore anything that isn't an import
@@ -118,69 +120,46 @@ class ImportHandler(ast.NodeVisitor):
     def visit_Import(self, node):
         # import modules only
         pos = extract_positional_info(node)
+        member = None
         for name in node.names:
-            module_name = ir.NameRef(name.name)
-            module_alias = ir.NameRef(name.asname) if hasattr(name, "asname") else module_name
-            if module_alias in self.bound_names:
-                msg = f"Module alias {module_alias.name} to module {module_name.name}" \
-                      f" shadows a previously bound name."
+            module_name = name.name
+            module_alias = name.asname if hasattr(name, "asname") else None
+            mod_import = ir.ImportRef(module_name, member, module_alias, pos)
+            if mod_import.name in self.imports:
+                msg = f"{mod_import.name} shadows a previously bound name."
                 raise CompilerError(msg)
-            mod_import = ir.ModImport(module_name, module_alias, pos)
-            self.import_map[module_alias] = mod_import
-            self.bound_names.add(module_alias)
+            self.imports[mod_import.name] = mod_import
 
     def visit_ImportFrom(self, node):
-        module_name = ir.NameRef(node.module)
+        module_name = node.module
         pos = extract_positional_info(node)
         for name in node.names:
             # assume alias node
-            imported_name = ir.NameRef(name.name)
-            import_alias = ir.NameRef(name.asname) if hasattr(name, "asname") else imported_name
-            if import_alias in self.bound_names:
+            import_name = name.name
+            import_alias = name.asname if hasattr(name, "asname") else None
+            name_import = ir.ImportRef(module_name, import_name, import_alias, pos)
+            if name_import.name in self.imports:
                 msg = "Name {import_alias} overwrites an existing assignment."
                 raise CompilerError(msg)
-            import_ref = ir.NameImport(module_name, imported_name, import_alias, pos)
-            self.import_map[import_alias] = import_ref
-            self.bound_names.add(import_alias)
+            self.imports[name_import.name] = name_import
 
 
 class TreeBuilder(ast.NodeVisitor):
 
-    def __init__(self, ctx):
-        self.ctx = ctx
+    def __init__(self):
+        self.symbols = None
         self.body = None
         self.entry = None
         self.enclosing_loop = None
 
-    @property
-    def symbols(self):
-        return self.ctx.current_function
-
     @contextmanager
-    def function_context(self, entry):
-        self.enclosing_loop = None
-        self.entry = entry
-        self.body = []
+    def function_context(self, symbols):
+        if self.symbols is not None:
+            msg = f"Unexpected nested function context: {symbols.namespace}"
+            raise RuntimeError(msg)
+        self.symbols = symbols
         yield
-        assert self.enclosing_loop is None
-        self.entry = None
-        self.body = None
-
-    def __call__(self, entry: ast.FunctionDef):
-        # name =
-        with self.function_context(entry):
-            func = self.visit(entry)
-        return func
-
-    @contextmanager
-    def loop_region(self, header):
-        stashed = self.body
-        enclosing = self.enclosing_loop
-        self.body = []
-        self.enclosing_loop = header
-        yield
-        self.enclosing_loop = enclosing
-        self.body = stashed
+        self.symbols = None
 
     @contextmanager
     def flow_region(self):
@@ -189,12 +168,19 @@ class TreeBuilder(ast.NodeVisitor):
         yield
         self.body = stashed
 
-    def is_local_variable_name(self, name: ir.NameRef):
-        func = self.ctx.current_function.lookup
-        sym = func(name)
-        if sym is None:
-            return False
-        return sym.is_source_name
+    @contextmanager
+    def loop_region(self, header):
+        stashed = self.body
+        outer = self.enclosing_loop
+        self.enclosing_loop = header
+        with self.flow_region():
+            yield
+            self.enclosing_loop = outer
+
+    def __call__(self, entry: ast.FunctionDef, symbols: symbol_table):
+        with self.function_context(symbols):
+            func = self.visit(entry)
+        return func
 
     def visit_With(self, node: ast.With):
         pass
@@ -296,12 +282,8 @@ class TreeBuilder(ast.NodeVisitor):
 
         call_ = ir.Call(func_name, args, keywords)
         # Todo: need a way to identify array creation
-        if not self.is_local_variable_name(func_name):
-            # Most of the time this kind of conflict is an error. For example
-            # we don't support overwriting zip, enumerate, etc. since we don't
-            # really support customized iterator protocols anyway.
-            call_ = replace_call(call_)
-        return call_
+        repl = replace_call(call_)
+        return repl
 
     def visit_IfExp(self, node: ast.IfExp) -> ir.ValueRef:
         test = self.visit(node.test)
@@ -458,14 +440,13 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_FunctionDef(self, node: ast.FunctionDef):
         # can't check just self.blocks, since we automatically 
         # instantiate entry and exit
-        if node is not self.entry:
-            raise CompilerError(f"Nested scopes are unsupported. line: {node.lineno}")
         name = node.name
         # Todo: warn about unsupported argument features
         params = [ir.NameRef(arg.arg) for arg in node.args.args]
-        for stmt in node.body:
-            self.visit(stmt)
-        func = ir.Function(name, params, self.body)
+        with self.flow_region():
+            for stmt in node.body:
+                self.visit(stmt)
+            func = ir.Function(name, params, self.body)
         return func
 
     def visit_Return(self, node: ast.Return):
@@ -487,27 +468,91 @@ def map_functions_by_name(node: ast.Module):
     return by_name
 
 
-class ModuleBuilder:
-    def __init__(self, ctx):
-        self.ctx = ctx
-        self.build_ir = TreeBuilder(ctx)
+def populate_func_symbols(func_table, types, ignore_unbound=False):
+    """
+    Turns python symbol table into a typed internal representation.
 
-    def __call__(self, file_path):
-        path = Path(file_path)
-        module_name = path.name
-        with open(path) as src_stream:
-            src_text = src_stream.read()
-        module_symbols = build_module_symbol_table(src_text, module_name)
-        syntax_tree = ast.parse(src_text, filename=path.name)
-        syntax_tree = ast.fix_missing_locations(syntax_tree)
-        import_map = ImportHandler().visit(syntax_tree)
-        # Todo: register imports once interface stabilizes
-        funcs_by_name = map_functions_by_name(syntax_tree)
-        funcs = []
-        self.ctx.register_module_scope(module_symbols)
-        with self.ctx.module_scope(module_name):
-            for func_name, ast_entry_point in funcs_by_name.items():
-                with self.ctx.function_scope(func_name):
-                    func_ir = self.build_ir(ast_entry_point)
-                    funcs.append(func_ir)
-        return ir.Module(module_name, funcs, import_map)
+    """
+    # Todo: This needs a better way to deal with imports where they are used.
+    # since we have basic type info here, later phases should be validating the argument
+    # and type signatures used when calling imported functions
+    func_name = func_table.get_name()
+    symbols = set()
+    for s in func_table.get_symbols():
+        name = s.get_name()
+        if s.is_imported():
+            msg = "Locally importing names within a function is not currently supported: " \
+                  f"Function: {func_name} , imports: {name}"
+            raise CompilerError(msg)
+        is_arg = s.is_parameter()
+        is_assigned = s.is_assigned()
+        is_local = s.is_local()
+        if is_assigned and not is_local:
+            msg = f"Assigning to global and non-local variables is unsupported: {name} in function {func_name}"
+            raise CompilerError(msg)
+        elif is_local:
+            if not (ignore_unbound or is_assigned):
+                msg = f"Local variable {name} in function {func_name} is unassigned. " \
+                      f"This is automatically treated as an error."
+                raise CompilerError(msg)
+            type_ = types.get(name)
+            sym = symbol(name, type_, is_arg, is_source_name=True)
+            symbols.add(sym)
+    return symbol_table(func_name, symbols)
+
+
+def populate_symbol_tables(module_name, src, types):
+
+    table = symtable.symtable(code=src, filename=module_name, compile_type="exec")
+
+    func_names = set()
+    imports = set()
+    func_tables = {}
+
+    # check imports
+    for sym in table.get_symbols():
+        name = sym.get_name()
+        if sym in imports:
+            msg = f"symbol {name} shadows an existing entry."
+            raise CompilerError(msg)
+        elif sym.is_imported():
+            imports.add(name)
+
+    for func_table in table.get_children():
+        t = func_table.get_type()
+        name = func_table.get_name()
+        if t == "class":
+            msg = f"classes are unsupported: {name}"
+            raise CompilerError(msg)
+        elif name in imports:
+            msg = f"Namespace {name} shadows an existing entry."
+            raise CompilerError(msg)
+        elif func_table.has_children():
+            msg = f"Function {name} contains nested namespaces, which are unsupported."
+            raise CompilerError(msg)
+        func_names.add(name)
+        func_types = types.get(name)
+        # declare a header file to avoid worrying about declaration order
+        func_tables[name] = populate_func_symbols(func_table, func_types, ignore_unbound=True)
+    return func_tables
+
+
+def build_module_ir_and_symbols(src_path, types):
+    path = Path(src_path)
+    module_name = path.name
+    with open(path) as src_stream:
+        src_text = src_stream.read()
+    func_symbol_tables = populate_symbol_tables(module_name, src_text, types)
+    mod_ast = ast.parse(src_text, filename=path.name)
+    mod_ast = ast.fix_missing_locations(mod_ast)
+    import_handler = ImportHandler()
+    import_map = import_handler(mod_ast)
+    funcs_by_name = map_functions_by_name(mod_ast)
+    build_ir = TreeBuilder()
+    funcs = []
+    # Todo: register imports once interface stabilizes
+    for func_name, ast_entry_point in funcs_by_name.items():
+        symbol_handler = func_symbol_tables.get(func_name)
+        func_ir = build_ir(ast_entry_point, symbol_handler)
+        funcs.append(func_ir)
+    return ir.Module(module_name, funcs, import_map), func_symbol_tables

@@ -11,9 +11,8 @@ import ir
 
 import type_resolution as tr
 
-from ASTTransform import ModuleBuilder
+from ASTTransform import build_module_ir_and_symbols
 from canonicalize import NormalizePaths
-from ctx import CompilerContext
 from errors import error_context, CompilerError
 from pretty_printing import pretty_printer
 from reaching_check import ReachingCheck
@@ -79,9 +78,8 @@ def resolve_types(types):
 
 class CompilerDriver:
 
-    def __init__(self):
-        ctx_ = CompilerContext()
-        self.build_module = ModuleBuilder(ctx_)
+    def __init__(self, types):
+        self.build_module = ModuleBuilder()
         self.normalize_paths = NormalizePaths()
         self.reaching_check = ReachingCheck()
         self.pretty_print = pretty_printer(ctx_)
@@ -121,18 +119,28 @@ def name_and_source_from_path(file_path):
     return file_name, src
 
 
-def compile_module(file_name, type_map, verbose=False):
+# stub for now, since we may need to remake typed passes later
+# per function or incorporate context management
+def build_function_pipeline():
+    pipeline = [NormalizePaths(),
+                ReachingCheck()]
+    return pipeline
 
+
+def compile_module(file_path, types, verbose=False, print_result=False):
+    pipeline = build_function_pipeline()
     if verbose:
-        if file_name:
-            print(f"Compiling: {file_name}")
-    cc = CompilerContext()
+        if file_path:
+            print(f"Compiling: {file_name}:")
+    mod_ir, symbols = build_module_ir_and_symbols(file_path, types)
+    funcs = []
+    for func in mod_ir.functions:
+        for stage in pipeline:
+            func = stage(func)
+        funcs.append(func)
+    if print_result:
+        from pretty_printing import pretty_print
+        pp = pretty_print()
+        pp(mod_ir)
+    return mod_ir
 
-    return cc.run_pipeline(file_name, type_map)
-
-    # cc.run_pipeline(file_name, type_map)
-    # for func in tree.functions:
-    #    syms = symbols[func.name]
-    #    for stage in cc.pipeline:
-    #        func = stage(func, syms)
-    #    functions.append(func)

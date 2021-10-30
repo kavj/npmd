@@ -62,8 +62,7 @@ for i, t in enumerate(tests):
     # if types is None:
     #    msg = f"Unable to load types for test file {t}."
     #    raise RuntimeError(msg)
-    driver_ = driver.CompilerDriver()
-    module = driver_.run_pipeline(filepath, types)
+    module = driver.compile_module(filepath, types)
     for func in module.functions:
-        driver_.pretty_print_tree(module, func.name)
+        pass
     print('\n\n\n')

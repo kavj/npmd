@@ -854,6 +854,27 @@ class IfElse(StmtBase):
         assert isinstance(self.test, ValueRef)
 
 
+@dataclass(frozen=True)
+class ImportRef:
+    module: str
+    member: typing.Optional[str]
+    alias: typing.Optional[str]
+    pos: Position
+
+    @property
+    def name(self):
+        if self.alias is not None:
+            return self.alias
+        elif self.member is not None:
+            return self.member
+        else:
+            return self.module
+
+    @property
+    def is_module_import(self):
+        return self.member is None
+
+
 @dataclass
 class ModImport(StmtBase):
     module: NameRef
