@@ -10,6 +10,7 @@ from pathlib import Path
 
 import ir
 
+import type_interface as ti
 import type_resolution as tr
 
 from ASTTransform import build_module_ir_and_symbols
@@ -26,53 +27,6 @@ version = sys.version_info
 # amount of this code, so error messages ignore it.
 if sys.version_info.minor < 8:
     raise RuntimeError(f"Python 3.8 or above is required.")
-
-
-def get_scalar_type(input_type):
-    if input_type == np.float32:
-        return tr.Float32
-    elif input_type == np.float64:
-        return tr.Float64
-    elif input_type == np.int32:
-        return tr.Int32
-    elif input_type == np.int64:
-        return tr.Int64
-    elif input_type == bool:
-        return tr.BoolType
-    else:
-        msg = f"Supported types are {np.float32}, {np.float64}, {np.int32}, {np.int64}, {bool}, received {input_type}."
-        raise ValueError(msg)
-
-
-def make_array_arg_type(ndims, dtype, dims=(), evol=None):
-    """
-    Parameterized array type suitable for use as an argument.
-    evol can be None, sliding window, and iterated (just advance iterator by one each time),
-    with any subscript applied to a sliding window being folded into the variable's evolution.
-
-    dims should be a dense map, tuple of key, value pairs
-
-    """
-    dtype = get_scalar_type(dtype)
-    # should be a tuple of pairs
-    assert isinstance(dims, typing.Hashable)
-    seen = set()
-    for index, value in dims:
-        if index in seen:
-            msg = f"index {index} is duplicated."
-            raise CompilerError(msg)
-        seen.add(index)
-        if not isinstance(index, numbers.Integral):
-            msg = f"dims can only be used to specify fixed dimensions, received: {dim}."
-            raise CompilerError(msg)
-        elif 0 > dim:
-            msg = f"Negative dim {dim} specified"
-            raise CompilerError(msg)
-        elif dim >= ndims:
-            msg = f"dim {dim} specified for array with {ndims} dimensions."
-            raise CompilerError(msg)
-    dims = tuple(d for d in dims)
-    return ir.ArrayArg(ndims, dtype, dims, evol)
 
 
 def resolve_types(types):
