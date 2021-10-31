@@ -5,6 +5,7 @@ import driver
 
 import type_interface as ti
 
+from errors import CompilerError
 from pretty_printing import pretty_printer
 
 tests = ("test_forifcont.py", "test_nested.py", "test_cascade_if.py", "test_dead.py", "test_dead2.py",
@@ -28,28 +29,27 @@ bool_t = ti.scalar_type_from_spec(bits=8, is_integral=True, is_boolean=True)
 # Todo: should rewrite variable names so that they pair one to one with types
 
 
-uws_types = {"test_forifcont.py": {"something": {"x": array_1d,
-                                                 "y": array_1d,
-                                                 "z": array_1d}
-                                   },
+uws_types = {"test_forifcont.py": {"something":
+                                      {"i": int_32, "u": float_64, "v": float_64, "x": array_1d,
+                                       "y": array_1d, "z": array_1d}},
              "test_nested.py":
                  {"test_n":
-                      {"n": int_32, "m": int_32, "p": int_32}},
+                      {"i": int_32, "j": int_32, "k": int_32, "n": int_32, "m": int_32, "p": int_32}},
              "test_cascade_if.py":
                  {"examp":
                      {"a": int_64, "b": float_64, "c": float_64}},
              "test_dead.py":
                  {"blah":
-                     {"a": array_1d, "b": array_1d}},
+                     {"a": array_1d, "b": array_1d, "i": float_64, "j": float_64}},
              "test_dead2.py":
                  {"blah":
-                     {"a": array_1d, "b": array_1d}},
+                     {"a": array_1d, "b": array_1d, "u": float_64, "v": float_64, "c": array_1d}},
              "test_while.py":
                  {"f":
-                     {"x": int_32}},
+                     {"x": int_32, "i": int_32}},
              "test_cascade_assign.py":
                  {"ca":
-                     {"d": int_32}},
+                     {"a": int_32, "b":  int_32, "c":  int_32, "d": int_32, "e": int_32, "f":  int_32}},
              "test_for.py":
                  {"for_func":
                      {"i": int_64, "u": float_64, "v": float_64, "x": array_1d,
@@ -94,7 +94,7 @@ uws_types = {"test_forifcont.py": {"something": {"x": array_1d,
                        "i": int_32, "k": float_64, "u": float_64, "v": float_64}},
              "test_nested_if.py":
                  {"nested":
-                      {"a": int_64, "b": int_64, "c": int_64, "d": array_1d}},
+                      {"a": int_64, "b": int_64, "c": int_64, "d": array_1d, "v": float_64}},
              "test_nested_if_non_const.py":
                  {"nested":
                       {"a": float_64, "b": float_64, "c": float_64, "d": array_1d, "v": float_64}}
@@ -110,5 +110,9 @@ for i, t in enumerate(tests):
     print(src)
     print("\n\nOUTPUT\n\n")
     types = uws_types.get(t, {})
-    module = driver.compile_module(filepath, types, print_result=True)
+    try:
+        module = driver.compile_module(filepath, types, print_result=True)
+    except CompilerError as e:
+        msg = f"Error in module: {filepath}"
+        raise Exception(msg) from e
     print('\n\n\n')

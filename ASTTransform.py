@@ -478,6 +478,7 @@ def populate_func_symbols(func_table, types, ignore_unbound=False):
     # and type signatures used when calling imported functions
     func_name = func_table.get_name()
     symbols = {}
+    missing = []
     for s in func_table.get_symbols():
         name = s.get_name()
         if s.is_imported():
@@ -495,11 +496,14 @@ def populate_func_symbols(func_table, types, ignore_unbound=False):
                 msg = f"Local variable {name} in function {func_name} is unassigned. " \
                       f"This is automatically treated as an error."
                 raise CompilerError(msg)
-            if not isinstance(types, dict):
-                print("something up")
             type_ = types.get(name)
+            if type_ is None:
+                missing.append(name)
             sym = symbol(name, type_, is_arg, is_source_name=True)
             symbols[name] = sym
+    if missing:
+        msg = f"No type provided for local variable(s) {', '.join(m for m in missing)} in function {func_name}."
+        raise CompilerError(msg)
     return symbol_table(func_name, symbols)
 
 
