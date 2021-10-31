@@ -81,11 +81,11 @@ class ExpressionVisitor:
         return ir.Tuple(elements)
 
     @visit.register
-    def _(self, expr: ir.Ternary):
-        test = self.lookup(expr.test)
-        if_expr = self.lookup(expr.if_expr)
-        else_expr = self.lookup(expr.else_expr)
-        return ir.Ternary(test, if_expr, else_expr)
+    def _(self, expr: ir.Select):
+        predicate = self.lookup(expr.predicate)
+        on_true = self.lookup(expr.on_true)
+        on_false = self.lookup(expr.on_false)
+        return ir.Select(on_true, on_false, predicate)
 
     @visit.register
     def _(self, expr: ir.BinOp):

@@ -234,13 +234,13 @@ class const_folding(ExpressionVisitor):
         return expr
 
     @visit.register
-    def _(self, expr: ir.Ternary):
+    def _(self, expr: ir.Select):
         test = self.lookup(expr.test)
-        if_expr = self.lookup(expr.if_expr)
-        else_expr = self.lookup(expr.else_expr)
+        on_true = self.lookup(expr.on_true)
+        on_false = self.lookup(expr.on_false)
         if test.constant:
-            return if_expr if operator.truth(test) else else_expr
-        return ir.Ternary(test, if_expr, else_expr)
+            return on_true if operator.truth(test) else on_false
+        return ir.Select(test, on_true, on_false)
 
     @visit.register
     def _(self, expr: ir.AND):
@@ -490,20 +490,20 @@ class arithmetic_folding(ExpressionVisitor):
         return node
 
     @visit.register
-    def _(node: ir.Ternary):
-        if node.if_expr == node.else_expr:
-            return node.if_expr
+    def _(node: ir.Select):
+        if node.on_true == node.on_false:
+            return node.on_true
         elif node.test.constant:
-            return node.if_expr if operator.truth(node.test) else node.else_expr
+            return node.on_true if operator.truth(node.test) else node.on_false
         test = node.test
         if isinstance(test, ir.BinOp):
-            if_expr = node.if_expr
-            else_expr = node.else_expr
+            on_true = node.on_true
+            on_false = node.on_false
             test = node.test
             if test.op in ("<", "<="):
-                if if_expr == test.left and else_expr == test.right:
-                    return ir.Min((if_expr, else_expr))
-                elif else_expr == test.right and if_expr == test.left:
+                if on_true == test.left and on_false == test.right:
+                    return ir.Min((on_true, on_false))
+                elif on_false == test.right and on_true == test.left:
                     # This is almost negated. The issue is if in the destination assembly:
                     #
                     #     min(a,b) is implemented as a if a <= b else b
@@ -513,14 +513,14 @@ class arithmetic_folding(ExpressionVisitor):
                     #  This does not follow Python's min/max conventions, which are too error prone.
                     #  Those can arbitrarily propagate or suppress nans as a side effect of
                     #  determining type from the leading operand.
-                    return ir.Max((else_expr, if_expr))
+                    return ir.Max((on_false, on_true))
 
             elif test.op in (">", ">="):
-                if if_expr == test.left and else_expr == test.right:
-                    return ir.Max((if_expr, else_expr))
-                elif if_expr == test.right and else_expr == test.left:
+                if on_true == test.left and on_false == test.right:
+                    return ir.Max((on_true, on_false))
+                elif on_true == test.right and on_false == test.left:
                     # right if left < right else left
-                    return ir.Min((else_expr, if_expr))
+                    return ir.Min((on_false, on_true))
         return node
 
 

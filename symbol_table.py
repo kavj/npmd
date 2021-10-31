@@ -74,6 +74,24 @@ class symbol_table:
         self.namespace = namespace
         self.symbols = symbols
 
+    @property
+    def from_source(self):
+        for s in self.symbols:
+            if s.is_source_name:
+                yield s
+
+    @property
+    def source_locals(self):
+        for s in self.symbols:
+            if s.is_source_name and not s.is_arg:
+                yield s
+
+    @property
+    def arguments(self):
+        for s in self.symbols:
+            if s.is_arg:
+                yield s
+
     def declares(self, name):
         return name in self.symbols
 

@@ -192,6 +192,9 @@ class StringConst(Constant):
 
 Zero = IntConst(0)
 One = IntConst(1)
+Neg_One = IntConst(-1)
+TRUE = BoolConst(True)
+FALSE = BoolConst(False)
 
 
 # Top Level
@@ -669,26 +672,26 @@ class AffineSeq(Expression):
 
 
 @dataclass(frozen=True)
-class Ternary(Expression):
+class Select(Expression):
     """
     A Python if expression.
-    
+
     """
 
-    test: ValueRef
-    if_expr: ValueRef
-    else_expr: ValueRef
+    predicate: ValueRef
+    on_true: ValueRef
+    on_false: ValueRef
 
     def __post_init__(self):
-        assert isinstance(self.test, ValueRef)
-        assert isinstance(self.if_expr, ValueRef)
-        assert isinstance(self.else_expr, ValueRef)
+        assert isinstance(self.predicate, ValueRef)
+        assert isinstance(self.on_true, ValueRef)
+        assert isinstance(self.on_false, ValueRef)
 
     @property
     def subexprs(self):
-        yield self.if_expr
-        yield self.test
-        yield self.else_expr
+        yield self.on_true
+        yield self.predicate
+        yield self.on_false
 
 
 @dataclass(frozen=True)
@@ -706,16 +709,6 @@ class Reversed(Expression):
     @property
     def subexprs(self):
         yield self.iterable
-
-
-@dataclass(frozen=True)
-class Select(Expression):
-    """
-    This is equivalent to a ternary op with the added condition that we use a sized predicate.
-    """
-    on_true: ValueRef
-    on_false: ValueRef
-    pred: ValueRef
 
 
 @dataclass(frozen=True)

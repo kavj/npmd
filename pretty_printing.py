@@ -87,17 +87,17 @@ class pretty_formatter:
         return f"min({args})"
 
     @visit.register
-    def _(self, node: ir.Ternary):
-        test = self.visit(node.test)
-        if isinstance(node.test, (ir.Ternary, ir.Tuple)):
-            test = parenthesized(test)
-        if_expr = self.visit(node.if_expr)
-        if isinstance(node.if_expr, (ir.Ternary, ir.Tuple)):
-            if_expr = parenthesized(if_expr)
-        else_expr = self.visit(node.else_expr)
-        if isinstance(node.else_expr, (ir.Ternary, ir.Tuple)):
-            else_expr = parenthesized(else_expr)
-        expr = f"{if_expr} if {test} else {else_expr}"
+    def _(self, node: ir.Select):
+        predicate = self.visit(node.predicate)
+        if isinstance(node.predicate, (ir.Select, ir.Tuple)):
+            predicate = parenthesized(predicate)
+        on_true = self.visit(node.on_true)
+        if isinstance(node.on_true, (ir.Select, ir.Tuple)):
+            on_true = parenthesized(on_true)
+        on_false = self.visit(node.on_false)
+        if isinstance(node.on_false, (ir.Select, ir.Tuple)):
+            on_false = parenthesized(on_false)
+        expr = f"{on_true} if {predicate} else {on_false}"
         return expr
 
     @visit.register
@@ -129,7 +129,7 @@ class pretty_formatter:
             elif isinstance(node.left, ir.UnaryOp):
                 if op == "**":
                     left = parenthesized(left)
-            elif isinstance(node.left, (ir.BoolOp, ir.CompareOp, ir.Ternary, ir.Tuple)):
+            elif isinstance(node.left, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple)):
                 left = parenthesized(left)
             if isinstance(node.right, ir.BinOp):
                 if op_ordering < binop_ordering[right.op]:
@@ -137,7 +137,7 @@ class pretty_formatter:
             elif isinstance(node.right, ir.UnaryOp):
                 if op == "**":
                     left = parenthesized(left)
-            elif isinstance(node.right, (ir.BoolOp, ir.CompareOp, ir.Ternary, ir.Tuple)):
+            elif isinstance(node.right, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple)):
                 right = parenthesized(right)
         expr = f"{left} {op} {right}"
         return expr
@@ -146,9 +146,9 @@ class pretty_formatter:
     def _(self, node: ir.CompareOp):
         left = self.visit(node.left)
         right = self.visit(node.right)
-        if isinstance(node.left, (ir.BoolOp, ir.CompareOp, ir.Ternary, ir.Tuple)):
+        if isinstance(node.left, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple)):
             left = parenthesized(left)
-        if isinstance(node.right, (ir.BoolOp, ir.CompareOp, ir.Ternary, ir.Tuple)):
+        if isinstance(node.right, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple)):
             right = parenthesized(right)
         expr = f"{left} {node.op} {right}"
         return expr
@@ -190,7 +190,7 @@ class pretty_formatter:
                 # single expression
                 assert isinstance(group, ir.ValueRef)
                 formatted = self.visit(group)
-                if isinstance(group, (ir.AND, ir.OR, ir.Ternary, ir.Tuple)):
+                if isinstance(group, (ir.AND, ir.OR, ir.Select, ir.Tuple)):
                     formatted = parenthesized(formatted)
                 operands.append(formatted)
             expr = "and ".join(operand for operand in operands)
@@ -202,7 +202,7 @@ class pretty_formatter:
         operands = []
         for operand in node.operands:
             formatted = self.visit(operand)
-            if isinstance(operand, (ir.Ternary, ir.Tuple)):
+            if isinstance(operand, (ir.Select, ir.Tuple)):
                 formatted = parenthesized(formatted)
             operands.append(formatted)
         expr = " or ".join(operand for operand in operands)
@@ -211,7 +211,7 @@ class pretty_formatter:
     @visit.register
     def _(self, node: ir.NOT):
         formatted = self.visit(node.operand)
-        if isinstance(node.operand, (ir.AND, ir.OR, ir.Ternary)):
+        if isinstance(node.operand, (ir.AND, ir.OR, ir.Select)):
             formatted = parenthesized(formatted)
         expr = f"not {formatted}"
         return expr
@@ -276,7 +276,7 @@ class pretty_formatter:
         if isinstance(node.operand, ir.BinOp) and not node.operand.in_place:
             if node.operand.op != "**":
                 operand = parenthesized(operand)
-        elif isinstance(node.operand, (ir.UnaryOp, ir.BoolOp, ir.Ternary)):
+        elif isinstance(node.operand, (ir.UnaryOp, ir.BoolOp, ir.Select)):
             # if we have an unfolded double unary expression such as --,
             # '--expr' would be correct but it's visually jarring. Adding
             # unnecessary parentheses makes it '-(-expr)'.
@@ -350,8 +350,8 @@ class pretty_printer:
     def make_elif(self, node: ir.IfElse):
         assert isinstance(node, ir.IfElse)
         test = self.format(node.test)
-        if_expr = f"elif {test}:"
-        self.print_line(if_expr)
+        on_true = f"elif {test}:"
+        self.print_line(on_true)
         with self.indented():
             if node.if_branch:
                 self.visit(node.if_branch)

@@ -286,10 +286,10 @@ class TreeBuilder(ast.NodeVisitor):
         return repl
 
     def visit_IfExp(self, node: ast.IfExp) -> ir.ValueRef:
-        test = self.visit(node.test)
+        predicate = self.visit(node.test)
         on_true = self.visit(node.body)
         on_false = self.visit(node.orelse)
-        expr = ir.Ternary(test, on_true, on_false)
+        expr = ir.Select(on_true, on_false, predicate)
         return expr
 
     def visit_Subscript(self, node: ast.Subscript) -> ir.Subscript:

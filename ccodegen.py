@@ -10,6 +10,7 @@ import type_resolution as tr
 
 from errors import CompilerError
 from pretty_printing import binop_ordering
+from symbol_table import symbol_table
 from type_inference import ExprTypeInfer
 from visitor import StmtVisitor
 
@@ -54,7 +55,7 @@ class CodeBuffer:
 
     def __init__(self, path, indent="    ", max_line_width=70):
         self.ctx = context
-        self.file = file
+        self.path = path
         self.single_indent = indent
         self.max_line_width = max_line_width
         self.line_formatter = textwrap.TextWrapper(tabsize=4, break_long_words=False, break_on_hyphens=False)
@@ -131,16 +132,6 @@ class pretty_formatter:
         raise NotImplementedError(msg)
 
     @visit.register
-    def _(self, node: ir.Length):
-        # len should be replaced by a variable name or expression
-        # since we have static types and merely look up a stored value
-        raise NotImplementedError
-
-    # min and max are propagated here as an unambiguous hint to use simd
-    # min/max if either operand is a simd type. It's expected multiple argument
-    # form is converted to 2 arg form, since we already have to handle breaking of
-    # long vectors here.
-    @visit.register
     def _(self, node: ir.Max):
         assert len(node.values) == 2
 
@@ -149,17 +140,17 @@ class pretty_formatter:
         assert len(node.values) == 2
 
     @visit.register
-    def _(self, node: ir.Ternary):
+    def _(self, node: ir.Select):
         test = self.visit(node.test)
-        if isinstance(node.test, ir.Ternary):
+        if isinstance(node.test, ir.Select):
             test = parenthesized(test)
-        if_expr = self.visit(node.if_expr)
-        if isinstance(node.if_expr, (ir.Ternary, ir.Tuple)):
-            if_expr = parenthesized(if_expr)
-        else_expr = self.visit(node.else_expr)
-        if isinstance(node.else_expr, (ir.Ternary, ir.Tuple)):
-            else_expr = parenthesized(else_expr)
-        expr = f"{if_expr} if {test} else {else_expr}"
+        on_true = self.visit(node.on_true)
+        if isinstance(node.on_true, (ir.Select, ir.Tuple)):
+            on_true = parenthesized(on_true)
+        on_false = self.visit(node.on_false)
+        if isinstance(node.on_false, (ir.Select, ir.Tuple)):
+            on_false = parenthesized(on_false)
+        expr = f"{on_true} if {test} else {on_false}"
         return expr
 
     @visit.register
@@ -194,12 +185,12 @@ class pretty_formatter:
             if isinstance(node.left, ir.BinOp):
                 if op_ordering < binop_ordering[node.left.op]:
                     left = parenthesized(left)
-            elif isinstance(node.left, (ir.BoolOp, ir.CompareOp, ir.Ternary)):
+            elif isinstance(node.left, (ir.BoolOp, ir.CompareOp, ir.Select)):
                 left = parenthesized(left)
             if isinstance(node.right, ir.BinOp):
                 if op_ordering < binop_ordering[right.op]:
                     left = parenthesized(right)
-            elif isinstance(node.right, (ir.BoolOp, ir.CompareOp, ir.Ternary)):
+            elif isinstance(node.right, (ir.BoolOp, ir.CompareOp, ir.Select)):
                 right = parenthesized(right)
         expr = f"{left} {op} {right}"
         return expr
@@ -208,9 +199,9 @@ class pretty_formatter:
     def _(self, node: ir.CompareOp):
         left = self.visit(node.left)
         right = self.visit(node.right)
-        if isinstance(node.left, (ir.BoolOp, ir.CompareOp, ir.Ternary, ir.Tuple)):
+        if isinstance(node.left, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple)):
             left = parenthesized(left)
-        if isinstance(node.right, (ir.BoolOp, ir.CompareOp, ir.Ternary, ir.Tuple)):
+        if isinstance(node.right, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple)):
             right = parenthesized(right)
         expr = f"{left} {node.op} {right}"
         return expr
@@ -220,7 +211,7 @@ class pretty_formatter:
         operands = []
         for operand in node.operands:
             formatted = self.visit(operand)
-            if isinstance(operand, (ir.AND, ir.OR, ir.Ternary)):
+            if isinstance(operand, (ir.AND, ir.OR, ir.Select)):
                 formatted = parenthesized(formatted)
             operands.append(formatted)
         expr = " && ".join(operand for operand in operands)
@@ -231,7 +222,7 @@ class pretty_formatter:
         operands = []
         for operand in node.operands:
             formatted = self.visit(operand)
-            if isinstance(operand, ir.Ternary):
+            if isinstance(operand, ir.Select):
                 formatted = parenthesized(formatted)
             operands.append(formatted)
         expr = " || ".join(operand for operand in operands)
@@ -240,7 +231,7 @@ class pretty_formatter:
     @visit.register
     def _(self, node: ir.NOT):
         formatted = self.visit(node.operand)
-        if isinstance(node.operand, (ir.AND, ir.OR, ir.Ternary)):
+        if isinstance(node.operand, (ir.AND, ir.OR, ir.Select)):
             formatted = parenthesized(formatted)
         expr = f"!{formatted}"
         return expr
@@ -280,7 +271,7 @@ class pretty_formatter:
         if isinstance(node.operand, ir.BinOp) and not node.operand.in_place:
             if node.operand.op != "**":
                 operand = parenthesized(operand)
-        elif isinstance(node.operand, (ir.UnaryOp, ir.BoolOp, ir.Ternary)):
+        elif isinstance(node.operand, (ir.UnaryOp, ir.BoolOp, ir.Select)):
             # if we have an unfolded double unary expression such as --,
             # '--expr' would be correct but it's visually jarring. Adding
             # unnecessary parentheses makes it '-(-expr)'.
@@ -307,42 +298,45 @@ class CodeGenBase:
         self.printer.print_line("}")
 
 
-class CCodeGen(CCodeGenBase, StmtVisitor):
+def mangle_function_name(func, argtypes):
+    """
+    Produce a C function name based on the argument types, which conforms to
+    internal ABI conventions.
+    """
 
-    # This is meant to be controlled by a codegen driver,
-    # which manages opening/closing of a real or virtual destination file.
+    raise NotImplementedError("in my todo list")
 
-    def __init__(self, ctx, dest):
-        self.ctx = ctx
-        self.infer_expr_type = ExprTypeInfer(self.ctx.types)
+
+def c_decl_from_symbol(sym):
+    t = find_c_type(sym.type_)
+    return f"{t} {sym.name}"
+
+
+def gen_arg_decls(symbols: symbol_table):
+    return ", ".join(c_decl_from_symbol(s) for s in symbols.arguments)
+
+
+def gen_variable_decls(symbols):
+    return ";\n".join(c_decl_from_symbol(s) for s in symbols.source_locals)
+
+
+class CModuleCodeGen(CCodeGenBase, StmtVisitor):
+
+    def __init__(self):
         self.format = pretty_formatter()
-        self.printer = CodeWriter(ctx, dest)
+        self.symbols = None
 
     @contextmanager
-    def function_context(self):
-        # This should load function specific types from module
-        # context and set up variables
+    def function_context(self, symbols):
+        assert self.symbols is None
+        self.symbols = symbols
         yield
+        self.symbols = None
 
-    def __call__(self, func: ir.Function):
-        self._declared = set()
-        self.visit(func)
-
-    def declared(self, ref: ir.NameRef):
-        assert isinstance(ref, (ir.NameRef, ir.Subscript))
-        return ref in self._declared
-
-    def check_type(self, ref):
-        return self.ctx.retrieve_type(ref)
-
-    def format_lvalue_ref(self, expr):
-        if isinstance(expr, ir.NameRef):
-            formatted = self.format(expr)
-            if not self.declared(expr):
-                type_ = self.check_type(expr)
-                # subject to change
-                formatted = f"{type_} {formatted}"
-            return formatted
+    def __call__(self, func: ir.Function, symbols: symbol_table):
+        assert symbols.namespace == func.name
+        with self.function_context(symbol_table):
+            self.visit(func)
 
     @contextmanager
     def scoped(self, prefix, cond):
@@ -351,9 +345,8 @@ class CCodeGen(CCodeGenBase, StmtVisitor):
         else:
             line = f"{prefix} ({cond}){'{'}"
         self.printer.print_line(line)
-        with self.printer.indented():
+        with self.printer.closing_brace():
             yield
-        self.printer.print_line("}")
 
     @singledispatchmethod
     def visit(self, node):
