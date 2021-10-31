@@ -495,6 +495,8 @@ def populate_func_symbols(func_table, types, ignore_unbound=False):
                 msg = f"Local variable {name} in function {func_name} is unassigned. " \
                       f"This is automatically treated as an error."
                 raise CompilerError(msg)
+            if not isinstance(types, dict):
+                print("something up")
             type_ = types.get(name)
             sym = symbol(name, type_, is_arg, is_source_name=True)
             symbols[name] = sym
