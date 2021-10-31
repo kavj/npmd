@@ -68,9 +68,13 @@ class pretty_formatter:
         raise NotImplementedError(msg)
 
     @visit.register
-    def _(self, node: ir.Length):
-        expr = self.visit(node.value)
-        return f"len({expr})"
+    def _(self, node: ir.SingleDimRef):
+        expr = self.visit(node.expr)
+        if node.dim == ir.Zero:
+            return f"len({expr})"
+        else:
+            dim = self.visit(node.dim)
+            return f"{expr}.shape[{dim}]"
 
     @visit.register
     def _(self, node: ir.Max):

@@ -1,3 +1,4 @@
+import pathlib
 import textwrap
 
 from contextlib import contextmanager
@@ -49,23 +50,15 @@ def parenthesized(expr):
     return f"({expr})"
 
 
-class CodeWriter:
+class CodeBuffer:
 
-    def __init__(self, context, file, indent="    ", max_line_width=70):
+    def __init__(self, path, indent="    ", max_line_width=70):
         self.ctx = context
         self.file = file
         self.single_indent = indent
         self.max_line_width = max_line_width
         self.line_formatter = textwrap.TextWrapper(tabsize=4, break_long_words=False, break_on_hyphens=False)
-        self.tree = None
-        self.dest = None
-
-    def __call__(self, tree, dest):
-        # Todo: work these into context manager
-        assert self.indent_len == 0
-        self.tree = tree
-        self.dest = dest
-        assert self.indent_len == 0
+        self.line_buffer = []
 
     @property
     def indent(self):
@@ -91,8 +84,13 @@ class CodeWriter:
 
     def print_line(self, line):
         lines = self.line_formatter.wrap(line)
-        for line in lines:
-            print(line, file=self.dest)
+        self.line_buffer.extend(lines)
+
+    def write_to(self, path):
+        if self.line_buffer:
+            output_gen = "\n".join(line for line in self.line_buffer)
+            pathlib.Path(path).write_text(output_gen)
+            self.line_buffer.clear()
 
 
 def else_is_elif(stmt: ir.IfElse):

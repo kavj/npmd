@@ -263,17 +263,18 @@ class SingleDimRef(Expression):
     base: ValueRef
     dim: IntConst
 
+    def __post_init__(self):
+        assert isinstance(self.dim, IntConst)
 
-@dataclass
-class ShapeRef(Expression):
-    base: ValueRef
 
+# Todo: changes here should be bested as the component yielded by loop unpacking.
 
 @dataclass(frozen=True)
-class ViewRef:
+class IteratedViewRef:
+    expr: ValueRef
     base: typing.Union[ArrayRef, ViewRef]
-    slice: typing.Optional[typing.Union[IntConst, Slice, NameRef, BinOp, UnaryOp]]
-    transposed: bool
+    iterated: typing.Optional[bool] = True
+    transpose: typing.Optional[bool] = False
 
     def __post_init__(self):
         assert isinstance(self.base, (ArrayRef, ViewRef))
@@ -282,17 +283,6 @@ class ViewRef:
     @cached_property
     def dtype(self):
         return self.base.dtype
-
-    @cached_property
-    def ndims(self):
-        if isinstance(self.slice, Slice):
-            return self.base.ndims
-        else:
-            return self.base.ndims - 1
-
-    @cached_property
-    def name(self):
-        return self.base.name
 
 
 @dataclass(frozen=True)
@@ -324,24 +314,14 @@ class SlidingWindowViewRef:
 
     """
 
-    base: typing.Union[ArrayRef, ViewRef]
+    expr: ValueRef
+    base: ValueRef
     width: ValueRef
     stride: ValueRef
+    iterated: typing.Optional[bool] = True
 
     def __post_init__(self):
-        assert isinstance(self.base, (ArrayRef, ViewRef))
-
-
-@dataclass(frozen=True)
-class Length(Expression):
-    value: ValueRef
-
-    def __post_init__(self):
-        assert isinstance(self.value, ValueRef)
-
-    @property
-    def subexprs(self):
-        yield self.value
+        assert isinstance(self.base, ValueRef)
 
 
 @dataclass(frozen=True)

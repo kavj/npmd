@@ -45,9 +45,12 @@ class ExpressionVisitor:
         raise NotImplementedError(msg)
 
     @visit.register
-    def _(self, expr: ir.Length):
-        value = self.lookup(expr.value)
-        return ir.Length(value)
+    def _(self, expr: ir.SingleDimRef):
+        return self.visit(base)
+
+    @visit.register
+    def _(self, expr: ir.SingleDimRef):
+        return self.visit(expr.base)
 
     @visit.register
     def _(self, expr: ir.Subscript):
