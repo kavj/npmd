@@ -347,7 +347,7 @@ class Min(Expression):
     """
     Min iteration count over a number of counters
     """
-    values: typing.Tuple[ValueRef, ...]
+    values: typing.Union[typing.Tuple[ValueRef, ...], typing.FrozenSet[ValueRef,...]]
 
     def __post_init__(self):
         assert isinstance(self.values, tuple)
@@ -364,7 +364,7 @@ class Max(Expression):
     """
     Max iteration count over a number of counters
     """
-    values: typing.Tuple[ValueRef, ...]
+    values: typing.Union[typing.Tuple[ValueRef, ...], typing.FrozenSet[ValueRef,...]]
 
     def __post_init__(self):
         assert isinstance(self.values, tuple)

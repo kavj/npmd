@@ -560,8 +560,198 @@ def _(iterable: ir.Subscript):
     return start, stop, step
 
 
+def try_compute_simple_loop_interval(header: ir.ForLoop):
 
-class LoopIntervalBuilder:
+    starts = defaultdict(set)
+    stops = defaultdict(set)
+
+    for _, iterable in unpack_iterated(header):
+        start, stop, step = interval_from_iterable(iterable)
+        starts.add(start)
+        stops.add(stop)
+        steps.add(step)
+        if len(steps) > 1:
+            # no foldable option
+            return
+
+    step = steps.pop()
+
+    if len(starts) == 1:
+        if len(stops) == 1:
+            start = starts.pop()
+            stop = stops.pop()
+            # simple interval
+        else:
+            stop  = ir.Min(tuple(stops))
+    elif len(stops) == 1:
+        start = ir.Max(tuple(starts))
+        stop = stops.pop()
+    else:
+        # no foldable option
+        return
+    return start, stop, step
+
+
+def make_count_expr(diff, step):
+    if step == ir.Zero:
+        msg = "Zero step loop iterator encountered."
+        raise CompilerError(msg)
+    elif step == ir.One:
+        return diff
+    on_false = ir.BinOp(diff, step, "//")
+    modulo = ir.BinOp(diff, step, "%")
+    on_true = ir.BinOp(on_false, ir.One, "+")
+    return ir.Select(predicate=modulo, on_true=on_true, on_false=on_false)
+
+
+def reduce_per_step_diff_sets(by_step):
+    reduced = defaultdict(set)
+    # we need sets rather than tuples here to avoid
+    for step, diffs in by_step.items():
+        diffs = frozenset(diffs)
+        reduced[diffs].add(step)
+    remerged = {}
+    for diffs, steps in reduced.items():
+        max_step = ir.Max(frozenset(steps))
+        if max_step in remerged:
+            raise CompilerError("collision... finish this part")
+        remerged[max_step] = diffs
+    if len(remerged) < len(by_step):
+        return remerged
+    return by_step
+
+
+def make_explicit_count(header: ir.ForLoop):
+    # This does not use safe subtraction
+    simplify_diff = arithmetic_folding()
+    by_step = defaultdict(set)
+    diffs = set() # diffs are cacheable
+    for _, iterable in unpack_iterated(header):
+        start, stop, step = interval_from_iterable(iterable)
+        d = ir.BinOp(stop, start, "-")
+        # remove trivial arithmetic
+        d = simplify_diff(d)
+        diffs.add(d)
+        by_step[step].add(d)
+
+    # Since division is expensive, compute exact step count
+    # only on the minimum difference per step.
+
+    # Find commmon components
+    all_diff_sets = tuple(frozenset(v) for v in by_step.values())
+    common = set.intersection(*all_diff_sets)
+
+    # factor out shared component
+    if len(common) > 0:
+        for diffs in by_step.values():
+            diffs.difference_update(shared)
+        # If the common component equals the diff set
+        # for any sets, then we can consider only the max
+        # step for these
+        step_reduc = set()
+        for step, diffs in by_step.values():
+            if not diffs:
+                step_reduc.add(step)
+        for step in step_reduc:
+            by_step.pop(step)
+        max_common = ir.Max(tuple(step_reduc))
+        by_step[max_common].update(common)
+
+
+
+
+
+
+
+def make_openmp_compatible_loop(header: ir.ForLoop, symbols):
+    """
+    Make single index loop without break.
+    This is unsafe if it's unsafe to explicitly compute trip count. It probably needs overflow checks.
+
+    """
+
+    by_start_step = defaultdict(set)
+    by_step = defaultdict(set)
+    by_iterable = {}
+    for _, iterable in unpack_iterated(header):
+        start, stop, step = interval_from_iterable(iterable)
+        key = (start, step)
+        by_start_step[key].add(stop)
+        by_step[step].add((start, stop))
+        by_iterable[iterable] = key
+
+    # If this uses a single step, and it either uses a single start
+    # or a single stop, then use a simpler folding method.
+    if len(by_step) == 1:
+        step, pairs = by_step.popitem()
+        starts = set()
+        stops = set()
+        for start, stop in pairs:
+            starts.add(start)
+            stops.add(stop)
+        if len(starts) == 1:
+            pass
+
+    by_start_step_opt = {}
+    loop_params = {}
+
+    # make index variables
+
+    for key, stop in by_start_step.items():
+        stop = ir.Min(stop)
+        stop = simplify_commutative_min_max(stop)
+        index_var = symbols.register_unique_name(prefix="i")
+        loop_params[key] = stop, iv
+
+    # Getting well defined explicit iteration counts has a lot of edge cases, including
+    # division by zero and possible arithmetic overflow, where checks for arithmetic overflow
+    # are compiler specific. In addition, there's the cost of potentially computing division for low trip counts
+    # on multiple step sizes. It's easier just to take the naive approach and put all additional tests at the beginning
+    # of the loop body.
+
+    lp = iter(loop_params.items())
+    loop_index_params = next(lp)
+
+    initializers = []
+
+    # anything other than the primary loop index is tested at the end of the loop body
+    # This doesn't preserve initial testing order.
+
+    # epilogue = []
+    repl_body = []
+    pos = header.pos
+    # now set up the initial assignments
+
+    for target, iterable in unpack_iterated(header):
+        key = by_iterable[iterable]
+        _, iv = loop_params[key]
+        if isinstance(iterable, ir.AffineSeq):
+            value = iv
+        else:
+            value = ir.Subscript(iterable, iv)
+        assign = ir.Assign(target, value)
+        repl_body.append(assign)
+
+    repl_body.extend(header.body)
+
+    for (start, step), (stop, iv) in lp:
+        var_init = ir.Assign(iv, start, pos)
+        initializers.append(var_init)
+        induction_step = ir.BinOp(iv, step, "+")
+        induction_assign = ir.Assign(iv, induction_step, pos)
+        repl_body.append(induction_assign)
+        cond_break = ir.break_if_matches(expr=stop, cond=True)
+        repl_body.append(cond_break)
+
+    # make simplified loop header
+    (start, step), (stop, target) = loop_index_params
+
+    iterable = ir.AffineSeq(star, stop, step)
+    repl_header = ir.ForLoop(target, iterable, repl_body, pos)
+    return repl_header
+
+
+def make_single_index_loop(self, header: ir.ForLoop, symbols):
     """
 
         Make loop interval of the form (start, stop, step).
@@ -579,80 +769,74 @@ class LoopIntervalBuilder:
             https://developercommunity.visualstudio.com/t/please-implement-integer-overflow-detection/409051
             https://numpy.org/doc/stable/user/building.html
 
-        """
+    """
+    # Assume each target appears exactly once, since we can always transform
+    # to this case.
 
-    def __init__(self, ctx):
-        self.ctx = ctx
+    # Find the (start, step) pair for each iterable.
 
+    by_start_step = defaultdict(set)
+    by_iterable = {}
+    for _, iterable in unpack_iterated(header):
+        start, stop, step = interval_from_iterable(iterable)
+        key = (start, step)
+        by_start_step[key].add(stop)
+        by_iterable[iterable] = key
 
-    def make_single_index_loop(self, header: ir.ForLoop):
-        # Assume each target appears exactly once, since we can always transform
-        # to this case.
+    by_start_step_opt = {}
+    loop_params = {}
 
-        # Find the (start, step) pair for each iterable.
+    # make index variables
 
-        by_start_step = defaultdict(set)
-        by_iterable = {}
-        for _, iterable in unpack_iterated(header):
-            start, stop, step = interval_from_iterable(iterable)
-            key = (start, step)
-            by_start_step[key].add(stop)
-            by_iterable[iterable] = key
+    for key, stop in by_start_step.items():
+        stop = ir.Min(stop)
+        stop = simplify_commutative_min_max(stop)
+        index_var = symbols.register_unique_name(prefix="i")
+        loop_params[key] = stop, iv
 
-        by_start_step_opt = {}
-        loop_params = {}
+    # Getting well defined explicit iteration counts has a lot of edge cases, including
+    # division by zero and possible arithmetic overflow, where checks for arithmetic overflow
+    # are compiler specific. In addition, there's the cost of potentially computing division for low trip counts
+    # on multiple step sizes. It's easier just to take the naive approach and put all additional tests at the beginning
+    # of the loop body.
 
-        # make index variables
+    lp = iter(loop_params.items())
+    loop_index_params = next(lp)
 
-        for key, stop in by_start_step.items():
-            stop = ir.Min(stop)
-            stop = simplify_commutative_min_max(stop)
-            index_var = ctx.register_unique_name(prefix="i")
-            loop_params[key] = stop, iv
+    initializers = []
 
-        # Getting well defined explicit iteration counts has a lot of edge cases, including
-        # division by zero and possible arithmetic overflow, where checks for arithmetic overflow
-        # are compiler specific. In addition, there's the cost of potentially computing division for low trip counts
-        # on multiple step sizes. It's easier just to take the naive approach and put all additional tests at the beginning
-        # of the loop body.
+    # anything other than the primary loop index is tested at the end of the loop body
+    # This doesn't preserve initial testing order.
 
-        lp = iter(loop_params.items())
-        loop_index_params = next(lp)
+    # epilogue = []
+    repl_body = []
+    pos = header.pos
+    # now set up the initial assignments
 
-        initializers = []
+    for target, iterable in unpack_iterated(header):
+        key = by_iterable[iterable]
+        _, iv = loop_params[key]
+        if isinstance(iterable, ir.AffineSeq):
+            value = iv
+        else:
+            value = ir.Subscript(iterable, iv)
+        assign = ir.Assign(target, value)
+        repl_body.append(assign)
 
-        # anything other than the primary loop index is tested at the end of the loop body
-        # This doesn't preserve initial testing order.
+    repl_body.extend(header.body)
 
-        # epilogue = []
-        repl_body = []
-        pos = header.pos
-        # now set up the initial assignments
+    for (start, step), (stop, iv) in lp:
+        var_init = ir.Assign(iv, start, pos)
+        initializers.append(var_init)
+        induction_step = ir.BinOp(iv, step, "+")
+        induction_assign = ir.Assign(iv, induction_step, pos)
+        repl_body.append(induction_assign)
+        cond_break = ir.break_if_matches(expr=stop, cond=True)
+        repl_body.append(cond_break)
 
-        for target, iterable in unpack_iterated(header):
-            key = by_iterable[iterable]
-            _, iv = loop_params[key]
-            if isinstance(iterable, ir.AffineSeq):
-                value = iv
-            else:
-                value = ir.Subscript(iterable, iv)
-            assign = ir.Assign(target, value)
-            repl_body.append(assign)
+    # make simplified loop header
+    (start, step), (stop, target) = loop_index_params
 
-        repl_body.extend(header.body)
-
-        for (start, step), (stop, iv) in lp:
-            var_init = ir.Assign(iv, start, pos)
-            initializers.append(var_init)
-            induction_step = ir.BinOp(iv, step, "+")
-            induction_assign = ir.Assign(iv, induction_step, pos)
-            repl_body.append(induction_assign)
-            cond_break = ir.break_if_matches(expr=stop, cond=True)
-            repl_body.append(cond_break)
-
-        # make simplified loop header
-        (start, step), (stop, target) = loop_index_params
-
-        iterable = ir.AffineSeq(star, stop, step)
-        repl_header = ir.ForLoop(target, iterable, repl_body, pos)
-        return repl_header
+    iterable = ir.AffineSeq(star, stop, step)
+    repl_header = ir.ForLoop(target, iterable, repl_body, pos)
+    return repl_header
