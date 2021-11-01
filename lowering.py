@@ -650,6 +650,8 @@ def make_loop_range(intervals):
         # check if we can fold step calculation
         step = next(iter(by_step))
         if len(unique_starts) == 1:
+            # If everything starts from the same index on a single step
+            # then we can skip explicitly computing iteration count
             start = unique_starts.pop()
             if len(unique_stops) == 1:
                 stop = unique_stops.pop()
@@ -657,9 +659,13 @@ def make_loop_range(intervals):
                 stop = ir.Min(frozenset(unique_stops))
             return (start, stop, step)
         elif len(unique_stops) == 1:
+            # If these start from different locations, we normalize starting bound.
+            # This can skew dependence testing, but we don't rely on it anyway.
+            # See Michael Wolfe, Beyond Induction Variables
             start = ir.Max(unique_starts)
             stop = unique_stops.pop()
-            return (start, stop, step)
+            diff = ir.BinOp(stop, start, "-")
+            return (ir.Zero, diff, step)
     _reduce_per_step_diff_sets(by_step)
     count = _compute_iter_count(by_step)
     return (ir.Zero, count, ir.One)
