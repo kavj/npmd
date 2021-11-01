@@ -155,11 +155,11 @@ def unpack_iterated(target, iterable, include_enumerate_indices=True):
         if isinstance(target, ir.Tuple):
             if len(target.elements) == 2:
                 first_target, sec_target = target.elements
-                yield first_target, iterable.iterable
                 if include_enumerate_indices:
                     # enumerate is special, because it doesn't add
                     # constraints
-                    yield sec_target, ir.AffineSeq(iterable.start, None, ir.One)
+                    yield first_target, ir.AffineSeq(iterable.start, None, ir.One)
+                yield sec_target, iterable.iterable
             else:
                 msg = f"Enumerate must be unpacked to exactly two targets, received {len(target.elements)}."
                 raise CompilerError(msg)

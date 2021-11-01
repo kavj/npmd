@@ -7,7 +7,7 @@ from functools import singledispatch, singledispatchmethod
 import ir
 
 from utils import unpack_iterated
-from visitor import walk, StmtVisitor
+from visitor import walk, StmtVisitor, StmtTransformer
 
 # These yield everything including the original expression
 # This way we can remove a lot of type checks from common paths.

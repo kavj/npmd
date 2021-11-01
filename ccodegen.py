@@ -320,7 +320,7 @@ def gen_variable_decls(symbols):
     return ";\n".join(c_decl_from_symbol(s) for s in symbols.source_locals)
 
 
-class CModuleCodeGen(CCodeGenBase, StmtVisitor):
+class CModuleCodeGen(CodeGenBase, StmtVisitor):
 
     def __init__(self):
         self.format = pretty_formatter()
@@ -459,7 +459,7 @@ class CModuleCodeGen(CCodeGenBase, StmtVisitor):
 
 # need a header file generator..
 
-class BoilerplateWriter(CCodeGenBase):
+class BoilerplateWriter(CodeGenBase):
 
     # This is meant to be controlled by a codegen driver,
     # which manages opening/closing of a real or virtual destination file.
@@ -467,15 +467,15 @@ class BoilerplateWriter(CCodeGenBase):
     def __init__(self, ctx, dest):
         super().__init__(ctx, dest)
 
-    def print_sys_header_text(name):
+    def print_sys_header_text(self, name):
         s = f"#include<{name}>"
         self.print_line(s)
 
-    def print_user_header_text(name):
+    def print_user_header_text(self, name):
         s = f"#include \"{name}\""
         self.print_line(s)
 
-    def gen_source_top(sys_headers=(), user_headers=()):
+    def gen_source_top(self, sys_headers=(), user_headers=()):
         self.print_line("#define PY_SSIZE_T_CLEAN")
         self.print_sys_header_text("Python.h")
         for h in sys_headers:
@@ -483,7 +483,7 @@ class BoilerplateWriter(CCodeGenBase):
         for h in user_headers:
             self.print_user_header_text(h)
 
-    def gen_module_init(modname):
+    def gen_module_init(self, modname):
         if modname == "mod":
             raise CompilerError("mod is treated as a reserved name.")
         self.print_line(f"PyMODINIT_FUNC PyInit_{modname}(void){'{'}")
@@ -493,7 +493,7 @@ class BoilerplateWriter(CCodeGenBase):
             with self.closing_brace():
                 printline("return NULL;")
 
-    def gen_method_table(modname, funcs):
+    def gen_method_table(self, modname, funcs):
         # no keyword support..
         self.print_line(f"static PyMethodDef {modname}Methods[] = {'{'}")
         with self.indented():
@@ -506,7 +506,7 @@ class BoilerplateWriter(CCodeGenBase):
         # sentinel ending entry
         self.print_line("{NULL, NULL, 0, NULL}")
 
-    def gen_module_def(modname):
+    def gen_module_def(self, modname):
         self.print_line(f"static PyModuleDef {modname} = {'{'}")
         with self.indented():
             self.print_line("PyModuleDef_HEAD_INIT,")
