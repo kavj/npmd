@@ -1,6 +1,6 @@
 import operator
 import typing
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from functools import singledispatch, singledispatchmethod
 
 import ir
@@ -560,107 +560,109 @@ def _(iterable: ir.Subscript):
     return start, stop, step
 
 
-def try_compute_simple_loop_interval(header: ir.ForLoop):
-
-    starts = defaultdict(set)
-    stops = defaultdict(set)
-
-    for _, iterable in unpack_iterated(header):
-        start, stop, step = interval_from_iterable(iterable)
-        starts.add(start)
-        stops.add(stop)
-        steps.add(step)
-        if len(steps) > 1:
-            # no foldable option
-            return
-
-    step = steps.pop()
-
-    if len(starts) == 1:
-        if len(stops) == 1:
-            start = starts.pop()
-            stop = stops.pop()
-            # simple interval
-        else:
-            stop  = ir.Min(tuple(stops))
-    elif len(stops) == 1:
-        start = ir.Max(tuple(starts))
-        stop = stops.pop()
-    else:
-        # no foldable option
-        return
-    return start, stop, step
+def _compute_iter_count(by_step):
+    # Todo: may insert an extra round of constant folding here..
+    counts = set()
+    for step, diffs in by_step.items():
+        if step == ir.Zero:
+            msg = "Zero step loop iterator encountered."
+            raise CompilerError(msg)
+        elif step == ir.One:
+            counts.add(diff)
+            continue
+        if len(diffs) > 1:
+            diffs = ir.Min(frozenset(diffs))
+        on_false = ir.BinOp(diffs, step, "//")
+        modulo = ir.BinOp(diffs, step, "%")
+        on_true = ir.BinOp(on_false, ir.One, "+")
+        count = ir.Select(predicate=modulo, on_true=on_true, on_false=on_false)
+        counts.add(count)
+    if len(counts) == 0:
+        raise CompilerError
+    counts = ir.Min(frozenset(counts))
+    return counts
 
 
-def make_count_expr(diff, step):
-    if step == ir.Zero:
-        msg = "Zero step loop iterator encountered."
-        raise CompilerError(msg)
-    elif step == ir.One:
-        return diff
-    on_false = ir.BinOp(diff, step, "//")
-    modulo = ir.BinOp(diff, step, "%")
-    on_true = ir.BinOp(on_false, ir.One, "+")
-    return ir.Select(predicate=modulo, on_true=on_true, on_false=on_false)
-
-
-def reduce_per_step_diff_sets(by_step):
-    reduced = defaultdict(set)
+def _reduce_per_step_diff_sets(by_step):
+    """
+    reduces the number of explicit steps used to determine iteration count in place
+    """
+    by_diffs = defaultdict(set)
     # we need sets rather than tuples here to avoid
+    # order dependency
     for step, diffs in by_step.items():
         diffs = frozenset(diffs)
-        reduced[diffs].add(step)
-    remerged = {}
-    for diffs, steps in reduced.items():
-        max_step = ir.Max(frozenset(steps))
-        if max_step in remerged:
-            raise CompilerError("collision... finish this part")
-        remerged[max_step] = diffs
-    if len(remerged) < len(by_step):
-        return remerged
-    return by_step
+        by_diffs[diffs].add(step)
+    for diffs, steps in by_diffs.items():
+        if len(steps) > 1:
+            # remove initial step
+            for s in steps:
+                by_step.pop(s)
+            # check if reduced key exists
+            fsteps = frozenset(steps)
+            max_step = ir.Max(fsteps)
+            # apply this as an update in case max_step is already
+            # recognized as a known step size
+            by_step[max_step].update(diffs)
 
 
-def make_explicit_count(header: ir.ForLoop):
+def _find_range_intersection(by_step):
+    if len(by_step) == 0:
+        return set()
+    diff_sets = iter(by_step.value())
+    initial = next(diff_sets)
+    for d in diff_sets:
+        initial.intersection_update(d)
+    return initial
+
+
+def _hoist_diff_intersection(by_step):
+    hoisted = _find_range_intersection(by_step)
+    # assume we have already merged strict subsets
+    # so that no more than one element is a strict subset
+    # of all others.
+    if hoisted:
+        for step, diffs in by_step.items():
+            if hoisted != diffs:
+                diffs.difference_update(common_diffs)
+    return hoisted
+
+
+def _make_intervals(header: ir.ForLoop):
+    return {interval_from_iterable(iterable) for iterable in unpack_iterated(header)}
+
+
+def make_loop_range(intervals):
     # This does not use safe subtraction
     simplify_diff = arithmetic_folding()
     by_step = defaultdict(set)
-    diffs = set() # diffs are cacheable
+    unique_starts = set()
+    unique_stops = set()
     for _, iterable in unpack_iterated(header):
         start, stop, step = interval_from_iterable(iterable)
+        unique_starts.add(start)
+        unique_stops.add(stop)
         d = ir.BinOp(stop, start, "-")
         # remove trivial arithmetic
         d = simplify_diff(d)
-        diffs.add(d)
         by_step[step].add(d)
-
-    # Since division is expensive, compute exact step count
-    # only on the minimum difference per step.
-
-    # Find commmon components
-    all_diff_sets = tuple(frozenset(v) for v in by_step.values())
-    common = set.intersection(*all_diff_sets)
-
-    # factor out shared component
-    if len(common) > 0:
-        for diffs in by_step.values():
-            diffs.difference_update(shared)
-        # If the common component equals the diff set
-        # for any sets, then we can consider only the max
-        # step for these
-        step_reduc = set()
-        for step, diffs in by_step.values():
-            if not diffs:
-                step_reduc.add(step)
-        for step in step_reduc:
-            by_step.pop(step)
-        max_common = ir.Max(tuple(step_reduc))
-        by_step[max_common].update(common)
-
-
-
-
-
+    if len(by_step) == 1:
+        # check if we can fold step calculation
+        step = next(iter(by_step))
+        if len(unique_starts) == 1:
+            start = unique_starts.pop()
+            if len(unique_stops) == 1:
+                stop = unique_stops.pop()
+            else:
+                stop = ir.Min(frozenset(unique_stops))
+            return (start, stop, step)
+        elif len(unique_stops) == 1:
+            start = ir.Max(unique_starts)
+            stop = unique_stops.pop()
+            return (start, stop, step)
+    _reduce_per_step_diff_sets(by_step)
+    count = _compute_iter_count(by_step)
+    return (ir.Zero, count, ir.One)
 
 
 def make_openmp_compatible_loop(header: ir.ForLoop, symbols):
