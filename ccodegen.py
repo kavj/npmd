@@ -10,7 +10,7 @@ import type_resolution as tr
 
 from errors import CompilerError
 from pretty_printing import binop_ordering
-from symbol_table import symbol_table
+from symbol_table import symbol, symbol_table
 from type_inference import ExprTypeInfer
 from visitor import StmtVisitor
 
@@ -27,12 +27,21 @@ At this point, statements are serialized to the level expected by C code.
 std_include_headers = ["Python.h", "numpy/arrayobject.h", "stdint.h", "stdbool.h", "math.h"]
 
 
-# This assumes that C99 floats are 32 bits and C doubles are 64 bits.
-# Numpy seems to depend on this anyway and probably won't compile on
-# platforms where this does not hold.
+# initial function name mangling abi
+# scalar types use a single letter + bit count
+# This is meant to disambiguate multiple lowerings based on arguments.
 
-
-# Todo: need to write codegen for module setup and method declaration in addition to header imports
+scalar_type_mangling = {
+    tr.Int32: "i32",
+    tr.Int64: "i64",
+    tr.Float32: "f32",
+    tr.Float64: "f64",
+    tr.Predicate32: "p32",
+    tr.Predicate64: "p64",
+    tr.FPredicate32: "q32",
+    tr.FPredicate64: "q64",
+    tr.BoolType: "b8"
+}
 
 
 scalar_type_map = {tr.Int32: "int32_t",
@@ -44,6 +53,41 @@ scalar_type_map = {tr.Int32: "int32_t",
                    tr.BoolType: "bool"}
 
 
+def get_ctype_name(sym: symbol):
+    type_ = sym.type_
+    if isinstance(type_, ir.ArrayType):
+        # numpy array type
+        return "PyArrayObject"
+    else:
+        dtype = scalar_type_map.get(type_)
+        if dtype is None:
+            msg = f"Unsupported type {type_}"
+            raise CompilerError(msg)
+        return dtype
+
+
+def get_ctype_tag(sym):
+    t = sym.type_
+    # Todo: add something to distinguish uniform, by dim, sliding window
+    if isinstance(t, ir.ArrayType):
+        ndims = t.ndims
+        dtype = scalar_type_mangling.get(t.dtype)
+        if dtype is None:
+            msg = f"Array {sym.name} uses unrecognized element type: {t.dtype}"
+            raise CompilerError(msg)
+        tag = f"a{ndims}{dtype}"
+    else:
+        tag = scalar_type_mangling.get(t)
+        if tag is None:
+            msg = f"Scalar {sym.name} has unrecognized type: {t}"
+            raise CompilerError(msg)
+    return tag
+
+
+# This assumes that C99 floats are 32 bits and C doubles are 64 bits.
+# Numpy seems to depend on this anyway and probably won't compile on
+# platforms where this does not hold.
+
 def parenthesized(expr):
     # This is its own thing to avoid too much inline text formatting
     # and allow for a more detailed implementation if redundancy
@@ -51,10 +95,30 @@ def parenthesized(expr):
     return f"({expr})"
 
 
-class CodeBuffer:
+def make_func_sig(func: ir.Function, syms: symbol_table, ret_type):
+    # maintain argument order
+    args = tuple(syms.lookup(arg) for arg in func.args)
+    suffix = "".join(get_type_tag(arg) for arg in args)
+    base = extract_name(func.name)
+    mangled_name = f"{base}_{suffix}"
+    formatted_args = []
+    for arg in args:
+        type_str = get_ctype_name(arg)
+        if isinstance(arg.type_, ir.ArrayType):
+            type_str = f"{type_str}*"
+        formatted_args.append(type_str)
+    arg_str = ", ".join(arg for arg in formatted_args)
+    arg_str = parenthesized(arg_str)
+    return f"{ret_type} {mangled_name}{arg_str}"
+
+
+# Todo: need to write codegen for module setup and method declaration in addition to header imports
+
+
+class Emitter:
 
     def __init__(self, path, indent="    ", max_line_width=70):
-        self.ctx = context
+        self._indent = ""
         self.path = path
         self.single_indent = indent
         self.max_line_width = max_line_width
@@ -66,9 +130,8 @@ class CodeBuffer:
         return self.line_formatter.initial_indent
 
     @indent.setter
-    def indent(self, indent_):
-        self.line_formatter.initial_indent = indent_
-        self.line_formatter.subsequent_indent = indent_
+    def indent(self, level):
+        self._indent = level
 
     @property
     def indent_len(self):
@@ -78,16 +141,23 @@ class CodeBuffer:
     def indented(self):
         base_indent = self.indent
         scoped_indent = f"{base_indent}{self.single_indent}"
-        self.indent = scoped_indent
+        self._indent = scoped_indent
         yield
         assert self.indent == scoped_indent
-        self.indent = base_indent
+        self._indent = base_indent
+
+    @contextmanager
+    def curly_braces(self):
+        self.printer.print_line("{")
+        with self.printer.indented():
+            yield
+        self.printer.print_line("}")
 
     def print_line(self, line):
         lines = self.line_formatter.wrap(line)
         self.line_buffer.extend(lines)
 
-    def write_to(self, path):
+    def flush(self):
         if self.line_buffer:
             output_gen = "\n".join(line for line in self.line_buffer)
             pathlib.Path(path).write_text(output_gen)
@@ -116,7 +186,7 @@ def format_header(prefix, cond):
 #       via a header.
 
 
-class pretty_formatter:
+class Formatter:
     """
     Pretty printer for C99. This does not support tuples or variable length min/max.
 
@@ -280,50 +350,10 @@ class pretty_formatter:
         return expr
 
 
-class CodeGenBase:
-
-    def __init__(self, ctx, dest):
-        self.printer = CodeEmitter(ctx, dest)
-        self.format = pretty_formatter()
-
-    @contextmanager
-    def indented(self):
-        with self.printer.indented():
-            yield
-
-    @contextmanager
-    def closing_brace(self):
-        with self.printer.indented():
-            yield
-        self.printer.print_line("}")
-
-
-def mangle_function_name(func, argtypes):
-    """
-    Produce a C function name based on the argument types, which conforms to
-    internal ABI conventions.
-    """
-
-    raise NotImplementedError("in my todo list")
-
-
-def c_decl_from_symbol(sym):
-    t = find_c_type(sym.type_)
-    return f"{t} {sym.name}"
-
-
-def gen_arg_decls(symbols: symbol_table):
-    return ", ".join(c_decl_from_symbol(s) for s in symbols.arguments)
-
-
-def gen_variable_decls(symbols):
-    return ";\n".join(c_decl_from_symbol(s) for s in symbols.source_locals)
-
-
-class CModuleCodeGen(CodeGenBase, StmtVisitor):
+class ModuleCodeGen(StmtVisitor):
 
     def __init__(self):
-        self.format = pretty_formatter()
+        self.format = Formatter()
         self.symbols = None
 
     @contextmanager
@@ -337,16 +367,6 @@ class CModuleCodeGen(CodeGenBase, StmtVisitor):
         assert symbols.namespace == func.name
         with self.function_context(symbol_table):
             self.visit(func)
-
-    @contextmanager
-    def scoped(self, prefix, cond):
-        if cond is None:
-            line = f"{prefix}{'{'}"
-        else:
-            line = f"{prefix} ({cond}){'{'}"
-        self.printer.print_line(line)
-        with self.printer.closing_brace():
-            yield
 
     @singledispatchmethod
     def visit(self, node):
@@ -459,13 +479,15 @@ class CModuleCodeGen(CodeGenBase, StmtVisitor):
 
 # need a header file generator..
 
-class BoilerplateWriter(CodeGenBase):
+class BoilerplateWriter:
 
     # This is meant to be controlled by a codegen driver,
     # which manages opening/closing of a real or virtual destination file.
 
-    def __init__(self, ctx, dest):
-        super().__init__(ctx, dest)
+    def __init__(self, symbols, dest):
+        self.symbols = symbols
+        self.format = Formatter()
+        self.printer = Emitter(dest)
 
     def print_sys_header_text(self, name):
         s = f"#include<{name}>"

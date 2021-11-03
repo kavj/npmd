@@ -96,6 +96,7 @@ class symbol_table:
         return name in self.symbols
 
     def lookup(self, name):
+        name = extract_name(name)
         sym = self.symbols.get(name)
         return sym
 
