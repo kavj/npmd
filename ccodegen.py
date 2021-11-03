@@ -26,7 +26,6 @@ At this point, statements are serialized to the level expected by C code.
 
 std_include_headers = ["Python.h", "numpy/arrayobject.h", "stdint.h", "stdbool.h", "math.h"]
 
-
 # initial function name mangling abi
 # scalar types use a single letter + bit count
 # This is meant to disambiguate multiple lowerings based on arguments.
@@ -42,7 +41,6 @@ scalar_type_mangling = {
     tr.FPredicate64: "q64",
     tr.BoolType: "b8"
 }
-
 
 scalar_type_map = {tr.Int32: "int32_t",
                    tr.Int64: "int64_t",
@@ -88,12 +86,6 @@ def get_ctype_tag(sym):
 # Numpy seems to depend on this anyway and probably won't compile on
 # platforms where this does not hold.
 
-def parenthesized(expr):
-    # This is its own thing to avoid too much inline text formatting
-    # and allow for a more detailed implementation if redundancy
-    # issues ever arise.
-    return f"({expr})"
-
 
 def make_func_sig(func: ir.Function, syms: symbol_table, ret_type):
     # maintain argument order
@@ -108,8 +100,7 @@ def make_func_sig(func: ir.Function, syms: symbol_table, ret_type):
             type_str = f"{type_str}*"
         formatted_args.append(type_str)
     arg_str = ", ".join(arg for arg in formatted_args)
-    arg_str = parenthesized(arg_str)
-    return f"{ret_type} {mangled_name}{arg_str}"
+    return f"{ret_type} {mangled_name}({arg_str})"
 
 
 # Todo: need to write codegen for module setup and method declaration in addition to header imports
@@ -147,11 +138,14 @@ class Emitter:
         self._indent = base_indent
 
     @contextmanager
-    def curly_braces(self):
+    def curly_braces(self, semicolon=False):
         self.printer.print_line("{")
         with self.printer.indented():
             yield
-        self.printer.print_line("}")
+        if semicolon:
+            self.print_line("};")
+        else:
+            self.printer.print_line("}")
 
     def print_line(self, line):
         lines = self.line_formatter.wrap(line)
@@ -171,13 +165,6 @@ def else_is_elif(stmt: ir.IfElse):
     return False
 
 
-def format_header(prefix, cond):
-    if cond is None:
-        return f"{prefix}{'{'}"
-    else:
-        return f"{prefix} ({cond}){'{'}"
-
-
 # Todo: need utilities to check for cases where output type does not match input operand types
 #       C99 has totally different type promotion rules, so it's better to break expressions
 #       and add indicators to determine exact cast types.
@@ -188,13 +175,16 @@ def format_header(prefix, cond):
 
 class Formatter:
     """
-    Pretty printer for C99. This does not support tuples or variable length min/max.
-
+    Formatter for
     """
 
-    def __call__(self, node):
+    def braced(self, node):
         expr = self.visit(node)
-        return expr
+        return f"{expr}"
+
+    def parenthesized(self, node):
+        expr = self.visit(node)
+        return f"({expr})"
 
     @singledispatchmethod
     def visit(self, node):
@@ -204,23 +194,29 @@ class Formatter:
     @visit.register
     def _(self, node: ir.Max):
         assert len(node.values) == 2
+        left_, right_ = node.values
+        left = self.visit(left_)
+        right = self.visit(right_)
+        expr = f"{left} > {right} ? {left} : {right}"
+        return expr
 
     @visit.register
     def _(self, node: ir.Min):
         assert len(node.values) == 2
+        left_, right_ = node.values
+        left = self.visit(left_)
+        right = self.visit(right_)
+        expr = f"{left} < {right} ? {left} : {right}"
+        return expr
 
     @visit.register
     def _(self, node: ir.Select):
-        test = self.visit(node.test)
-        if isinstance(node.test, ir.Select):
-            test = parenthesized(test)
-        on_true = self.visit(node.on_true)
-        if isinstance(node.on_true, (ir.Select, ir.Tuple)):
-            on_true = parenthesized(on_true)
-        on_false = self.visit(node.on_false)
-        if isinstance(node.on_false, (ir.Select, ir.Tuple)):
-            on_false = parenthesized(on_false)
-        expr = f"{on_true} if {test} else {on_false}"
+        test = self.parenthesized(node.test) if isinstance(node.test, ir.Select) else self.visit(node.test)
+        on_true = self.parenthesized(node.on_true) if isinstance(node.on_true, (ir.Select, ir.Tuple)) \
+            else self.visit(node.on_true)
+        on_false = self.parenthesized(node.on_false) if isinstance(node.on_false, (ir.Select, ir.Tuple)) \
+            else self.parenthesized(node.on_false)
+        expr = f"{test} ? {on_true} : {on_false}"
         return expr
 
     @visit.register
@@ -254,14 +250,14 @@ class Formatter:
             op_ordering = binop_ordering[op]
             if isinstance(node.left, ir.BinOp):
                 if op_ordering < binop_ordering[node.left.op]:
-                    left = parenthesized(left)
+                    left = self.parenthesized(left)
             elif isinstance(node.left, (ir.BoolOp, ir.CompareOp, ir.Select)):
-                left = parenthesized(left)
+                left = self.parenthesized(left)
             if isinstance(node.right, ir.BinOp):
                 if op_ordering < binop_ordering[right.op]:
-                    left = parenthesized(right)
+                    left = self.parenthesized(right)
             elif isinstance(node.right, (ir.BoolOp, ir.CompareOp, ir.Select)):
-                right = parenthesized(right)
+                right = self.parenthesized(right)
         expr = f"{left} {op} {right}"
         return expr
 
@@ -270,9 +266,9 @@ class Formatter:
         left = self.visit(node.left)
         right = self.visit(node.right)
         if isinstance(node.left, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple)):
-            left = parenthesized(left)
+            left = self.parenthesized(left)
         if isinstance(node.right, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple)):
-            right = parenthesized(right)
+            right = self.parenthesized(right)
         expr = f"{left} {node.op} {right}"
         return expr
 
@@ -282,7 +278,7 @@ class Formatter:
         for operand in node.operands:
             formatted = self.visit(operand)
             if isinstance(operand, (ir.AND, ir.OR, ir.Select)):
-                formatted = parenthesized(formatted)
+                formatted = self.parenthesized(formatted)
             operands.append(formatted)
         expr = " && ".join(operand for operand in operands)
         return expr
@@ -293,7 +289,7 @@ class Formatter:
         for operand in node.operands:
             formatted = self.visit(operand)
             if isinstance(operand, ir.Select):
-                formatted = parenthesized(formatted)
+                formatted = self.parenthesized(formatted)
             operands.append(formatted)
         expr = " || ".join(operand for operand in operands)
         return expr
@@ -302,7 +298,7 @@ class Formatter:
     def _(self, node: ir.NOT):
         formatted = self.visit(node.operand)
         if isinstance(node.operand, (ir.AND, ir.OR, ir.Select)):
-            formatted = parenthesized(formatted)
+            formatted = self.parenthesized(formatted)
         expr = f"!{formatted}"
         return expr
 
@@ -340,12 +336,12 @@ class Formatter:
         operand = self.visit(node.operand)
         if isinstance(node.operand, ir.BinOp) and not node.operand.in_place:
             if node.operand.op != "**":
-                operand = parenthesized(operand)
+                operand = self.parenthesized(operand)
         elif isinstance(node.operand, (ir.UnaryOp, ir.BoolOp, ir.Select)):
             # if we have an unfolded double unary expression such as --,
             # '--expr' would be correct but it's visually jarring. Adding
             # unnecessary parentheses makes it '-(-expr)'.
-            operand = parenthesized(operand)
+            operand = self.parenthesized(operand)
         expr = f"{op}({operand})"
         return expr
 
@@ -353,7 +349,8 @@ class Formatter:
 class ModuleCodeGen(StmtVisitor):
 
     def __init__(self):
-        self.format = Formatter()
+        self._formatter = Formatter()
+        self.format = self.formatter.visit
         self.symbols = None
 
     @contextmanager
@@ -428,7 +425,7 @@ class ModuleCodeGen(StmtVisitor):
         assert isinstance(node.target, ir.NameRef)
         assert isinstance(node.iterable, (ir.AffineSeq, ir.Reversed))
         # check for unit step
-        target = self.format_lvalue_ref(node.target)
+        target = self.format(node.target)
         # check whether we can use ++ op
         # insufficient support for reversed() thus far.
         if node.iterable.step == ir.One:
@@ -464,10 +461,10 @@ class ModuleCodeGen(StmtVisitor):
         value = self.format(node.value)
         if node.in_place:
             assert isinstance(node.value, ir.BinOp)
-            op = node.value.op
+            assign_op = node.value.op
         else:
-            op = "="
-        line = f"{target} {op} {value};"
+            assign_op = "="
+        line = f"{target} {assign_op} {value};"
         self.printer.print_line(line)
 
     @visit.register
@@ -508,29 +505,29 @@ class BoilerplateWriter:
     def gen_module_init(self, modname):
         if modname == "mod":
             raise CompilerError("mod is treated as a reserved name.")
-        self.print_line(f"PyMODINIT_FUNC PyInit_{modname}(void){'{'}")
-        with self.closing_brace():
-            self.print_line(f"PyObject* mod = PyModule_Create(&{modname});")
-            printline("if(mod == NULL){")
-            with self.closing_brace():
+        self.print_line(f"PyMODINIT_FUNC PyInit_{modname}(void)")
+        with self.printer.curly_braces():
+            self.printer.print_line(f"PyObject* mod = PyModule_Create(&{modname});")
+            printline("if(mod == NULL)")
+            with self.printer.curly_braces():
                 printline("return NULL;")
 
     def gen_method_table(self, modname, funcs):
         # no keyword support..
-        self.print_line(f"static PyMethodDef {modname}Methods[] = {'{'}")
-        with self.indented():
+        self.print_line(f"static PyMethodDef {modname}Methods[] =")
+        with self.printer.curly_braces(semicolon=True):
             for name, doc in funcs:
                 if doc is None:
-                    self.print_line(f"{name}, {modname}_{name}, METH_VARARGS, NULL{'{'}")
-                else:
-                    self.print_line(f"{name}, {modname}_{name}, METH_VARARGS, {doc}{'{'}")
-        self.print_line("};")
+                    doc = "NULL"
+                line = f"{name}, {modname}_{name}, METH_VARARGS, {doc}"
+                with_braces = f"{'{'}{line}{'}'}"
+                self.print_line(with_braces)
         # sentinel ending entry
         self.print_line("{NULL, NULL, 0, NULL}")
 
     def gen_module_def(self, modname):
-        self.print_line(f"static PyModuleDef {modname} = {'{'}")
-        with self.indented():
+        self.print_line(f"static PyModuleDef {modname} =")
+        with self.printer.curly_braces():
             self.print_line("PyModuleDef_HEAD_INIT,")
             self.print_line(f"{modname},")
             self.print_line("NULL,")
