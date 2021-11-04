@@ -128,17 +128,15 @@ class Emitter:
     def indent_len(self):
         return len(self.line_formatter.initial_indent)
 
-    def blank_line(self):
-        self.line_buffer.append("\n")
+    def blank_lines(self, count=1):
+        for c in range(count):
+             self.line_buffer.append("")
 
     @contextmanager
     def indented(self):
-        base_indent = self.indent
-        scoped_indent = f"{base_indent}{self.single_indent}"
-        self._indent = scoped_indent
+        self._indent = f"{self._indent}{self.single_indent}"
         yield
-        assert self._indent == scoped_indent
-        self._indent = base_indent
+        self._indent = self._indent[:-len(self.single_indent)]
 
     @contextmanager
     def curly_braces(self, semicolon=False):
@@ -178,9 +176,6 @@ def else_is_elif(stmt: ir.IfElse):
 
 
 class Formatter:
-    """
-    Formatter for
-    """
 
     def braced(self, node):
         expr = self.visit(node)
@@ -488,13 +483,13 @@ class BoilerplateWriter:
     def __init__(self, dest):
         self.printer = Emitter(dest)
 
-    def print_sys_header_text(self, name):
+    def print_sys_header(self, name):
         s = f"#include<{name}>"
-        self.print_line(s)
+        self.printer.print_line(s)
 
-    def print_user_header_text(self, name):
+    def print_user_header(self, name):
         s = f"#include \"{name}\""
-        self.print_line(s)
+        self.printer.print_line(s)
 
     def gen_source_top(self, sys_headers=(), user_headers=()):
         self.print_line("#define PY_SSIZE_T_CLEAN")
@@ -507,12 +502,12 @@ class BoilerplateWriter:
     def gen_module_init(self, modname):
         if modname == "mod":
             raise CompilerError("mod is treated as a reserved name.")
-        self.print_line(f"PyMODINIT_FUNC PyInit_{modname}(void)")
+        self.printer.print_line(f"PyMODINIT_FUNC PyInit_{modname}(void)")
         with self.printer.curly_braces():
             self.printer.print_line(f"PyObject* mod = PyModule_Create(&{modname});")
-            printline("if(mod == NULL)")
+            self.printer.print_line("if(mod == NULL)")
             with self.printer.curly_braces():
-                printline("return NULL;")
+                self.printer.print_line("return NULL;")
 
     def gen_method_table(self, modname, funcs):
         # no keyword support..
@@ -524,8 +519,8 @@ class BoilerplateWriter:
                 line = f"{name}, {modname}_{name}, METH_VARARGS, {doc}"
                 with_braces = f"{'{'}{line}{'}'}"
                 self.print_line(with_braces)
-        # sentinel ending entry
-        self.print_line("{NULL, NULL, 0, NULL}")
+            # sentinel ending entry
+            self.printer.print_line("{NULL, NULL, 0, NULL}")
 
     def gen_module_def(self, modname):
         self.printer.print_line(f"static PyModuleDef {modname} =")

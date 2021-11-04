@@ -199,7 +199,7 @@ FALSE = BoolConst(False)
 
 # Top Level
 
-
+# Todo: add typing to these to avoid needing constant access to symbol table
 @dataclass(frozen=True)
 class NameRef(ValueRef):
     # variable name ref

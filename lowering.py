@@ -671,10 +671,23 @@ def make_loop_range(intervals):
     return (ir.Zero, count, ir.One)
 
 
-def make_openmp_compatible_loop(header: ir.ForLoop, symbols):
+def make_single_index_loop(header: ir.ForLoop, symbols):
     """
-    Make single index loop without break.
-    This is unsafe if it's unsafe to explicitly compute trip count. It probably needs overflow checks.
+
+        Make loop interval of the form (start, stop, step).
+
+        This tries to find a safe method of calculation.
+
+        This assumes (with runtime verification if necessary)
+        that 'stop - start' will not overflow.
+
+        References:
+            LIVINSKII et. al, Random Testing for C and C++ Compilers with YARPGen
+            Dietz et. al, Understanding Integer Overflow in C/C++
+            Bachmann et. al, Chains of Recurrences - a method to expedite the evaluation of closed-form functions
+            https://gcc.gnu.org/onlinedocs/gcc/Integer-Overflow-Builtins.html
+            https://developercommunity.visualstudio.com/t/please-implement-integer-overflow-detection/409051
+            https://numpy.org/doc/stable/user/building.html
 
     """
 
@@ -698,29 +711,30 @@ def make_openmp_compatible_loop(header: ir.ForLoop, symbols):
             starts.add(start)
             stops.add(stop)
         if len(starts) == 1:
-            pass
+            start = starts.pop()
+            stop = stops.pop() if len(stops) == 1 else ir.Min(frozenset(stops))
+            seq = ir.AffineSeq(start, stop, step)
+        elif len(stops) == 1:
+            start = ir.Max(frozenset(starts))
+            stop = stops.pop()
+            diff = ir.BinOp(stop, start, "-")
+            seq = ir.AffineSeq(start, stop, step)
+    else:
+        by_start_step_opt = {}
+        loop_params = {}
 
-    by_start_step_opt = {}
-    loop_params = {}
+        # make index variables
 
-    # make index variables
+        for key, stop in by_start_step.items():
+            stop = ir.Min(stop)
+            stop = simplify_commutative_min_max(stop)
+            index_var = symbols.register_unique_name(prefix="i")
+            loop_params[key] = stop, iv
 
-    for key, stop in by_start_step.items():
-        stop = ir.Min(stop)
-        stop = simplify_commutative_min_max(stop)
-        index_var = symbols.register_unique_name(prefix="i")
-        loop_params[key] = stop, iv
+        lp = iter(loop_params.items())
+        loop_index_params = next(lp)
 
-    # Getting well defined explicit iteration counts has a lot of edge cases, including
-    # division by zero and possible arithmetic overflow, where checks for arithmetic overflow
-    # are compiler specific. In addition, there's the cost of potentially computing division for low trip counts
-    # on multiple step sizes. It's easier just to take the naive approach and put all additional tests at the beginning
-    # of the loop body.
-
-    lp = iter(loop_params.items())
-    loop_index_params = next(lp)
-
-    initializers = []
+        initializers = []
 
     # anything other than the primary loop index is tested at the end of the loop body
     # This doesn't preserve initial testing order.
