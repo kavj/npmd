@@ -128,33 +128,37 @@ class Emitter:
     def indent_len(self):
         return len(self.line_formatter.initial_indent)
 
+    def blank_line(self):
+        self.line_buffer.append("\n")
+
     @contextmanager
     def indented(self):
         base_indent = self.indent
         scoped_indent = f"{base_indent}{self.single_indent}"
         self._indent = scoped_indent
         yield
-        assert self.indent == scoped_indent
+        assert self._indent == scoped_indent
         self._indent = base_indent
 
     @contextmanager
     def curly_braces(self, semicolon=False):
-        self.printer.print_line("{")
-        with self.printer.indented():
+        self.print_line("{")
+        with self.indented():
             yield
         if semicolon:
             self.print_line("};")
         else:
-            self.printer.print_line("}")
+            self.print_line("}")
 
     def print_line(self, line):
-        lines = self.line_formatter.wrap(line)
+        indented_line = f"{self._indent}{line}"
+        lines = self.line_formatter.wrap(indented_line)
         self.line_buffer.extend(lines)
 
     def flush(self):
         if self.line_buffer:
             output_gen = "\n".join(line for line in self.line_buffer)
-            pathlib.Path(path).write_text(output_gen)
+            pathlib.Path(self.path).write_text(output_gen)
             self.line_buffer.clear()
 
 
@@ -481,9 +485,7 @@ class BoilerplateWriter:
     # This is meant to be controlled by a codegen driver,
     # which manages opening/closing of a real or virtual destination file.
 
-    def __init__(self, symbols, dest):
-        self.symbols = symbols
-        self.format = Formatter()
+    def __init__(self, dest):
         self.printer = Emitter(dest)
 
     def print_sys_header_text(self, name):
@@ -514,7 +516,7 @@ class BoilerplateWriter:
 
     def gen_method_table(self, modname, funcs):
         # no keyword support..
-        self.print_line(f"static PyMethodDef {modname}Methods[] =")
+        self.printer.print_line(f"static PyMethodDef {modname}Methods[] =")
         with self.printer.curly_braces(semicolon=True):
             for name, doc in funcs:
                 if doc is None:
@@ -526,10 +528,10 @@ class BoilerplateWriter:
         self.print_line("{NULL, NULL, 0, NULL}")
 
     def gen_module_def(self, modname):
-        self.print_line(f"static PyModuleDef {modname} =")
-        with self.printer.curly_braces():
-            self.print_line("PyModuleDef_HEAD_INIT,")
-            self.print_line(f"{modname},")
-            self.print_line("NULL,")
-            self.print_line("-1")
-            self.print_line(f"{modname}Methods")
+        self.printer.print_line(f"static PyModuleDef {modname} =")
+        with self.printer.curly_braces(semicolon=True):
+            self.printer.print_line("PyModuleDef_HEAD_INIT,")
+            self.printer.print_line(f"{modname},")
+            self.printer.print_line("NULL,")
+            self.printer.print_line("-1,")
+            self.printer.print_line(f"{modname}Methods")
