@@ -694,13 +694,11 @@ def make_single_index_loop(header: ir.ForLoop, symbols):
 
     # loop_interval = _find_shared_interval(intervals)
     loop_start, loop_stop, loop_step = _find_shared_interval(intervals)
+    loop_expr = ir.AffineSeq(loop_start, loop_stop, loop_step)
     loop_counter = symbols.register_unique_name("i")
-    assigns = []
+    body = []
     pos = header.pos
     simplify_expr = arithmetic_folding()
-
-    have_unit_step = loop_step == ir.One
-    have_zero_start = loop_start == ir.Zero
 
     for target, iterable in unpack_iterated(header):
         (start, _, step) = by_iterable[iterable]
@@ -708,33 +706,23 @@ def make_single_index_loop(header: ir.ForLoop, symbols):
         assert (start == loop_start) or (loop_start == ir.Zero)
         if step == loop_step:
             if start == loop_start:
-                assert start == loop_start
                 index = loop_counter
             else:
                 assert loop_start == ir.Zero
                 index = ir.BinOp(loop_counter, start, "+")
-        elif start == ir.Zero:
+        else:
+            # loop counter must be normalized
             assert loop_start == ir.Zero
             assert loop_step == ir.One
             index = ir.BinOp(step, loop_counter, "*")
-        else:
-            assert loop_start == ir.Zero
-            assert loop_step == ir.One
-            offset = ir.BinOp(step, loop_counter, "*")
-            index = ir.BinOp(start, offset, "+")
+            if start != ir.Zero:
+                index = ir.BinOp(start, index, "+")
 
-        if isinstance(iterable, ir.AffineSeq):
-            value = index
-        else:
-            # Todo: need an extract array target util for this to be correct
-            # with subscripted targets.
-            value = ir.Subscript(iterable, index)
+        value = index if isinstance(iterable, ir.AffineSeq) else ir.Subscript(iterable, index)
         assign = ir.Assign(target, value, pos)
-        assigns.append(assign)
+        body.append(assign)
 
     # Todo: this doesn't hoist initial setup
-
-    assigns.extend(header.body)
-    loop_expr = ir.AffineSeq(loop_start, loop_stop, loop_step)
-    repl = ir.ForLoop(target=loop_counter, iterable=loop_expr, body=assigns, pos=pos)
+    body.extend(header.body)
+    repl = ir.ForLoop(loop_counter, loop_expr, body, pos)
     return repl
