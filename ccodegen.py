@@ -130,7 +130,7 @@ class Emitter:
 
     def blank_lines(self, count=1):
         for c in range(count):
-             self.line_buffer.append("")
+            self.line_buffer.append("")
 
     @contextmanager
     def indented(self):
@@ -211,9 +211,9 @@ class Formatter:
     @visit.register
     def _(self, node: ir.Select):
         test = self.parenthesized(node.test) if isinstance(node.test, ir.Select) else self.visit(node.test)
-        on_true = self.parenthesized(node.on_true) if isinstance(node.on_true, (ir.Select, ir.Tuple)) \
+        on_true = self.parenthesized(node.on_true) if isinstance(node.on_true, ir.Select) \
             else self.visit(node.on_true)
-        on_false = self.parenthesized(node.on_false) if isinstance(node.on_false, (ir.Select, ir.Tuple)) \
+        on_false = self.parenthesized(node.on_false) if isinstance(node.on_false, ir.Select) \
             else self.parenthesized(node.on_false)
         expr = f"{test} ? {on_true} : {on_false}"
         return expr
@@ -341,7 +341,7 @@ class Formatter:
             # '--expr' would be correct but it's visually jarring. Adding
             # unnecessary parentheses makes it '-(-expr)'.
             operand = self.parenthesized(operand)
-        expr = f"{op}({operand})"
+        expr = f"{op}{operand}"
         return expr
 
 

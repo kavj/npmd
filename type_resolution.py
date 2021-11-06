@@ -30,12 +30,21 @@ by_input_type = {np.int32: Int32,
                  bool: BoolType,
                  np.bool_: BoolType}
 
+
+by_ir_type = {Int32, np.int32,
+              Int64, np.int64,
+              Float32, np.float32,
+              }
+
+
+
 by_input_type_name = {"numpy.int32": Int32,
                       "numpy.int64": Int64,
                       "numpy.float32": Float32,
                       "numpy.float64": Float64,
                       "numpy.bool": BoolType,
                       "numpy.bool_": BoolType}
+
 
 # initially supported, untyped ints and other ranges require additional
 # work, and they are less commonly used
