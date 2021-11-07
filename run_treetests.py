@@ -116,9 +116,4 @@ for i, t in enumerate(tests):
     except CompilerError as e:
         msg = f"Error in module: {filepath}"
         raise Exception(msg) from e
-
-    p = pathlib.Path().cwd().joinpath("build")
-    p.mkdir(parents=True, exist_ok=True)
-    p.joinpath("blah").write_text("check if writes")
-    break
     print('\n\n\n')

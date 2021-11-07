@@ -94,6 +94,7 @@ class symbol_table:
                 yield s
 
     def declares(self, name):
+        name = extract_name(name)
         return name in self.symbols
 
     def lookup(self, name):
@@ -123,20 +124,16 @@ class symbol_table:
             self.name_manglers[prefix] = gen
         return gen
 
-    def make_unique_name_like(self, name, type_ = None):
+    def make_unique_name_like(self, name, type_):
         """
         This is used to add a unique typed temporary variable name.
         """
-
-        name = extract_name(name)
-        prefix_ = name
+        prefix_ = extract_name(name)
         if type_ is None:
-            # If we're value numbering a name, this grabs type info from the base name.
-            type_ = self.check_type(name)
-            if type_ is None:
-                msg = f"Failed to retrieve a type for name {name}."
-                raise CompilerError(msg)
+            msg = f"Failed to retrieve a type for name {prefix_}."
+            raise CompilerError(msg)
         gen = self._get_name_mangler(prefix_)
+        name = wrap_input(f"{prefix_}_{next(gen)}")
         while self.declares(name):
             name = wrap_input(f"{prefix_}_{next(gen)}")
         sym = symbol(name, type_, is_arg=False, is_source_name=False)

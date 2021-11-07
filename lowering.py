@@ -4,6 +4,7 @@ from collections import Counter, defaultdict, deque
 from functools import singledispatch, singledispatchmethod
 
 import ir
+import type_resolution as tr
 from errors import CompilerError
 from utils import is_addition, is_division, is_multiplication, is_pow, is_subtraction, is_truth_test, wrap_constant, \
     unpack_iterated, equals_unary_negate
@@ -348,6 +349,10 @@ class arithmetic_folding(ExpressionVisitor):
         raise NotImplementedError(msg)
 
     @visit.register
+    def _(self, node: ir.NameRef):
+        return node
+
+    @visit.register
     def _(self, node: ir.Expression):
         return node
 
@@ -615,7 +620,7 @@ def _find_shared_interval(intervals):
         if len(starts) == 1:
             start = starts.pop()
             if len(stops) == 1:
-                stop = stop.pop()
+                stop = stops.pop()
                 simplify_expr(stop)
             else:
                 stop = ir.Min(frozenset({simplify_expr(s) for s in stops}))
@@ -702,7 +707,8 @@ def make_single_index_loop(header: ir.ForLoop, symbols):
     # loop_interval = _find_shared_interval(intervals)
     loop_start, loop_stop, loop_step = _find_shared_interval(intervals)
     loop_expr = ir.AffineSeq(loop_start, loop_stop, loop_step)
-    loop_counter = symbols.make_unique_name_like("i")
+    # Todo: this needs a default setting to avoid excessive casts
+    loop_counter = symbols.make_unique_name_like("i", type_=tr.Int32)
     body = []
     pos = header.pos
     simplify_expr = arithmetic_folding()
@@ -749,7 +755,7 @@ class loop_lowering(StmtTransformer):
 
     @visit.register
     def _(self, node: ir.ForLoop):
-        body = self.visit(node.body)
-        initial_rewrite = ir.ForLoop(node.target, node.iterable, body, node.pos)
-        repl = make_single_index_loop(initial_rewrite, self.symbols)
+        interm =  make_single_index_loop(node, self.symbols)
+        body = self.visit(interm.body)
+        repl = ir.ForLoop(interm.target, interm.iterable, body, node.pos)
         return repl

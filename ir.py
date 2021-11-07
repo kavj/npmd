@@ -336,8 +336,12 @@ class Subscript(Expression):
     slice: ValueRef
 
     def __post_init__(self):
-        assert isinstance(self.value, ValueRef)
-        assert isinstance(self.slice, ValueRef)
+        if not isinstance(self.value, ValueRef):
+            msg = f"Expected ValueRef, got {self.value}, type: {type(self.value)}."
+            raise TypeError(msg)
+        elif not isinstance(self.slice, ValueRef):
+            msg = f"Expected ValueRef, got {self.slice}, type: {type(self.slice)}."
+            raise TypeError(msg)
 
     @property
     def subexprs(self):
@@ -816,8 +820,12 @@ class ForLoop(StmtBase):
     pos: Position
 
     def __post_init__(self):
-        assert isinstance(self.target, ValueRef)
-        assert isinstance(self.iterable, ValueRef)
+        if not isinstance(self.target, ValueRef):
+            msg = f"Expected ValueRef, got {self.target}, type: {type(self.target)}."
+            raise TypeError(msg)
+        elif not isinstance(self.iterable, ValueRef):
+            msg = f"Expected ValueRef, got {self.iterable}, type: {type(self.iterable)}."
+            raise TypeError(msg)
 
 
 @dataclass(frozen=True)
