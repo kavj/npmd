@@ -18,7 +18,6 @@ from canonicalize import NormalizePaths
 from errors import error_context, CompilerError
 from pretty_printing import pretty_printer
 from reaching_check import ReachingCheck
-from type_inference import TypeInfer
 from utils import wrap_input
 
 

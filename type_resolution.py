@@ -1,10 +1,13 @@
 import itertools
 
 import numpy as np
+
+from functools import singledispatchmethod
+
 import ir
 
-
 from errors import CompilerError
+from visitor import ExpressionVisitor
 
 # Todo: At the tree layer, this should be much with fine grained tests moving to dataflow layer.
 #       In particular, just check for bad use of division and truth testing of arrays
@@ -30,13 +33,11 @@ by_input_type = {np.int32: Int32,
                  bool: BoolType,
                  np.bool_: BoolType}
 
-
-by_ir_type = {Int32, np.int32,
-              Int64, np.int64,
-              Float32, np.float32,
-              }
-
-
+by_ir_type = {Int32: np.int32,
+              Int64: np.int64,
+              Float32: np.float32,
+              Float64: np.float64,
+              BoolType: np.bool}
 
 by_input_type_name = {"numpy.int32": Int32,
                       "numpy.int64": Int64,
@@ -45,10 +46,26 @@ by_input_type_name = {"numpy.int32": Int32,
                       "numpy.bool": BoolType,
                       "numpy.bool_": BoolType}
 
+np_func_by_binop = {
+    "+": np.add,
+    "-": np.subtract,
+    "*": np.multiply,
+    "/": np.true_divide,
+    "//": np.floor_divide,
+    "%": np.mod,
+    "**": np.power,
+    "<<": np.left_shift,
+    ">>": np.right_shift,
+    "|": np.bitwise_or,
+    "&": np.bitwise_and,
+    "^": np.bitwise_xor,
+    "~": np.bitwise_not
+}
+
 
 # initially supported, untyped ints and other ranges require additional
 # work, and they are less commonly used
-scalar_types = {int, float, np.float32, np.float64, np.int32, np.int64}
+scalar_types = {np.int32, np.int64, np.float32, np.float64, np.bool}
 
 binary_ops = {"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&",
               "+=", "-=", "*=", "/=", "//=", "%=", "**="}
@@ -77,114 +94,59 @@ matmul_inplace = {"@="}
 bitwise = {"<<", ">>", "|", "&", "^"}
 bitwise_inplace = {"<<=", ">>=", "|=", "&=", "^="}
 
-# no support for arbitrary arithmetic on predicate or plain boolean types
 
-binops_dispatch = {
-    (Int32, Int32): Int32,
-    (Int32, Int64): Int64,
-    (Int32, Float32): Float64,
-    (Int32, Float64): Float64,
-    (Int64, Int32): Int64,
-    (Int64, Int64): Int64,
-    (Int64, Float32): Float64,
-    (Int64, Float64): Float64,
-    (Float32, Int32): Float64,
-    (Float32, Int64): Float64,
-    (Float32, Float32): Float64,
-    (Float32, Float64): Float64,
-    (Float64, Int32): Float64,
-    (Float64, Int64): Float64,
-    (Float64, Float32): Float64,
-    (Float64, Float64): Float64
-}
-
-compare_dispatch = {
-    (Int32, Int32): Predicate32,
-    (Int32, Int64): Predicate64,
-    (Int32, Float32): FPredicate32,
-    (Int32, Float64): FPredicate64,
-    (Int64, Int32): Predicate32,
-    (Int64, Int64): Predicate64,
-    (Int64, Float32): FPredicate64,
-    (Int64, Float64): FPredicate64,
-    (Float32, Int32): FPredicate32,
-    (Float32, Int64): FPredicate64,
-    (Float32, Float32): FPredicate32,
-    (Float32, Float64): FPredicate64,
-    (Float64, Int32): Float64,
-    (Float64, Int64): Float64,
-    (Float64, Float32): Float64,
-    (Float64, Float64): Float64
-}
-
-true_div_dispatch = {
-    (Int32, Int32): Float64,
-    (Int32, Int64): Float64,
-    (Int32, Float32): Float64,
-    (Int32, Float64): Float64,
-    (Int64, Int32): Float64,
-    (Int64, Int64): Float64,
-    (Int64, Float32): Float64,
-    (Int64, Float64): Float64,
-    (Float32, Int32): Float64,
-    (Float32, Int64): Float64,
-    (Float32, Float32): Float32,
-    (Float32, Float64): Float64,
-    (Float64, Int32): Float64,
-    (Float64, Int64): Float64,
-    (Float64, Float32): Float64,
-    (Float64, Float64): Float64
+inplace_to_ooplace = {
+    "+=": "+",
+    "-=": "-",
+    "*=": "*",
+    "/": "/",
+    "//=": "//",
+    "%=": "%",
+    "**=": "**",
+    "<<=": "<<",
+    ">>=": ">>",
+    "|=": "|",
+    "&=": "&",
+    "^=": "^",
+    "~=" : "~"
 }
 
 
-bitwise_dispatch = {
-    (Int32, Int32): Int32,
-    (Int32, Int64): Int64,
-    (Int64, Int32): Int64,
-    (Int64, Int64): Int64
-}
+def get_compare_type(a, b):
+    # will be updated
+    bits = max(a.bits, b.bits)
+    integral = a.integral and b.integral
+    if integral and bits == 32:
+        return Predicate32
+    elif integral and bits == 64:
+        return Predicate64
+    elif (not integral) and bits == 32:
+        return FPredicate32
+    elif (not integral) and bits == 64:
+        return FPredicate64
 
 
-dispatch = {
-    "+": binops_dispatch,
-    "-": binops_dispatch,
-    "*": binops_dispatch,
-    "//": binops_dispatch,
-    "%": binops_dispatch,
-    "**": binops_dispatch,
-    "/": true_div_dispatch,
-    "<<": bitwise_dispatch,
-    ">>": bitwise_dispatch,
-    "|": bitwise_dispatch,
-    "&": bitwise_dispatch,
-    "^": bitwise_dispatch,
-    "+=": binops_dispatch,
-    "-=": binops_dispatch,
-    "*=": binops_dispatch,
-    "//=": binops_dispatch,
-    "%=": binops_dispatch,
-    "**=": binops_dispatch,
-    "/=": true_div_dispatch,
-    "<<=": bitwise_dispatch,
-    ">>=": bitwise_dispatch,
-    "|=": bitwise_dispatch,
-    "&=": bitwise_dispatch,
-    "^=": bitwise_dispatch,
-}
-
-
-def truth_type_from_type(base_type):
-    """
-    Truth cast interned type to interned truth type.
-    """
-    assert isinstance(base_type, ir.ScalarType)
-    if base_type.bits == 32:
-        return Predicate32 if base_type.integral else FPredicate32
-    elif base_type.bits == 64:
-        return FPredicate32 if base_type.integral else FPredicate64
-    else:
-        msg = f"Unknown type {base_type}."
-        raise ValueError(msg)
+def resolve_binop_type(a, b, op):
+    if op in bitwise:
+        # bitwise requires integral or predicate
+        if a.boolean and b.boolean:
+            return get_compare_type(a,b)
+    a_ = by_ir_type[a]
+    b_ = by_ir_type[b]
+    if op == "/":
+        # get numpy
+        a_one = a_(1)
+        b_one = b_(1)
+        c_one = np.divide(a_one, b_one)
+        c_ = type(c_one)
+        c = by_input_type.get(c_)
+        if c is None:
+            msg = f"No op to implement division for types {a_} and {b_}."
+            raise CompilerError(msg)
+        return c
+    res_ = np.result_type(a_, b_)
+    res = by_input_type[res_]
+    return res
 
 
 def type_from_spec(bit_width, is_integral, is_boolean):
@@ -232,6 +194,88 @@ def merge_truth_types(types):
         raise CompilerError(msg)
 
 
-def resolve_binop_type(left_type, right_type, op):
-    assert op in itertools.chain(ir.binary_ops, ir.in_place_ops)
-    # if utils.is_multiplication()
+class ExprTypeInfer(ExpressionVisitor):
+    """
+    This exists to determine the output types generated by expressions. Actual inference
+    injects greater ambiguity here.
+
+    references:
+    Ole Ageson, The Cartesian Product Algorithm
+    Simple and Precise Type Inference of Parametric Polymorphism
+
+    """
+
+    def __init__(self, symbols):
+        # types updated externally
+        self.symbols = symbols
+        self.expr_types = None
+
+    def __call__(self, expr):
+        assert isinstance(expr, ir.ValueRef)
+        return self.visit(expr)
+
+    @singledispatchmethod
+    def visit(self, node):
+        super().visit(node)
+
+    @visit.register
+    def _(self, node: ir.Subscript):
+        array_type = self.visit(node.value)
+        if not isinstance(array_type, ir.ArrayType):
+            # would be better not to raise here..
+            msg = f"Cannot subscript non-array type {array_type}."
+            raise CompilerError(msg)
+        if isinstance(node.slice, ir.Slice):
+            t = array_type
+        else:
+            # single index
+            ndims = array_type.ndims - 1
+            if ndims == 0:
+                t = array_type.dtype
+            else:
+                t = ir.ArrayType(ndims, array_type.dtype)
+        return t
+
+    @visit.register
+    def _(self, node: ir.NameRef):
+        sym = self.symbols.lookup(node)
+        return sym.type_
+
+    @visit.register
+    def _(self, node: ir.BinOp):
+        # no caching since they may change
+        left = self.visit(node.left)
+        right = self.visit(node.right)
+        expr_type = binops_dispatch.get((left, right))
+        if expr_type is None:
+            msg = f"No signature match for operator {node.op} with candidate signatures: ({left}, {right})."
+            raise CompilerError(msg)
+        return expr_type
+
+    @visit.register
+    def _(self, node: ir.UnaryOp):
+        return self.visit(node.operand)
+
+    @visit.register
+    def _(self, node: ir.CompareOp):
+        # Todo: currently assumes all scalar types... need to generalize
+        ltype = self.visit(node.left)
+        rtype = self.visit(node.right)
+        left_dtype = ltype.dtype if isinstance(ltype, ir.ArrayType) else ltype
+        right_dtype = rtype.dtype if isinstance(ltype, ir.ArrayType) else rtype
+        if isinstance(left_dtype, BoolType) and isinstance(right_dtype, BoolType):
+            cmp_type = BoolType
+        else:
+            cmp_type = get_compare_type(left_dtype, right_dtype)
+        return cmp_type
+
+    @visit.register
+    def _(self, node: ir.BoolOp):
+        truth_types = []
+        for operand in node.subexprs:
+            type_ = self.visit(operand)
+            if isinstance(type_, ir.ArrayType):
+                msg = f"Cannot truth test array type {operand}."
+                return TypeMismatch(msg)
+            truth_types.append(truth_type_from_type(type_))
+        return merge_truth_types(truth_types)
