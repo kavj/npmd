@@ -16,6 +16,7 @@ import type_resolution as tr
 from ASTTransform import build_module_ir_and_symbols
 from canonicalize import NormalizePaths
 from errors import error_context, CompilerError
+from lowering import loop_lowering
 from pretty_printing import pretty_printer
 from reaching_check import ReachingCheck
 from utils import wrap_input
@@ -100,11 +101,13 @@ def compile_module(file_path, types, verbose=False, print_result=True):
     norm_paths = NormalizePaths()
     # rc = ReachingCheck()
     for func in mod_ir.functions:
+        s = symbols.get(func.name)
+        ll = loop_lowering(s)
         func = norm_paths(func)
+        func = ll(func)
         funcs.append(func)
         if print_result:
             from pretty_printing import pretty_printer
             pp = pretty_printer()
-            s = symbols.get(func.name)
             pp(func, s)
     return mod_ir

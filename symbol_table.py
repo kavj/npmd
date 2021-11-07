@@ -73,6 +73,7 @@ class symbol_table:
     def __init__(self, namespace, symbols):
         self.namespace = namespace
         self.symbols = symbols
+        self.name_manglers = {}
 
     @property
     def from_source(self):
@@ -113,13 +114,13 @@ class symbol_table:
     def get_arguments(self):
         return {s for s in self.symbols if s.is_arg}
 
-    def _get_num_generator(self, prefix: str):
+    def _get_name_mangler(self, prefix: str):
         # splitting by prefix helps avoids appending
         # large numbers in most cases
-        gen = self.prefixes.get(prefix)
+        gen = self.name_manglers.get(prefix)
         if gen is None:
             gen = itertools.count()
-            self.prefixes[prefix] = gen
+            self.name_manglers[prefix] = gen
         return gen
 
     def make_unique_name_like(self, name, type_ = None):
@@ -128,19 +129,18 @@ class symbol_table:
         """
 
         name = extract_name(name)
+        prefix_ = name
         if type_ is None:
             # If we're value numbering a name, this grabs type info from the base name.
             type_ = self.check_type(name)
             if type_ is None:
                 msg = f"Failed to retrieve a type for name {name}."
                 raise CompilerError(msg)
-        gen = self._get_num_generator(prefix_)
+        gen = self._get_name_mangler(prefix_)
         while self.declares(name):
             name = wrap_input(f"{prefix_}_{next(gen)}")
-        name = self.make_unique_name(name)
-        sym = symbol(name, is_source_name=False, is_arg=False, is_assigned=True)
+        sym = symbol(name, type_, is_arg=False, is_source_name=False)
         self.symbols[name] = sym
-        self.declare_type(name, type_)
         # The input name may require mangling for uniqueness.
         # Return the name as it is registered.
         return name

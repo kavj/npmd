@@ -69,7 +69,7 @@ class pretty_formatter:
 
     @visit.register
     def _(self, node: ir.SingleDimRef):
-        expr = self.visit(node.expr)
+        expr = self.visit(node.base)
         if node.dim == ir.Zero:
             return f"len({expr})"
         else:

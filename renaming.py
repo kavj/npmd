@@ -23,7 +23,7 @@ def walk_params(expr):
             yield subexpr
 
 
-liveness_info = namedtuple('liveness_info', 'uev read, writes')
+liveness_info = namedtuple('liveness_info', 'uev read writes')
 
 
 class LivenessDetail(StmtVisitor):
@@ -239,4 +239,3 @@ class Renamer(StmtTransformer):
     @visit.register
     def _(self, node: ir.WhileLoop):
         self.visit(node.body)
-

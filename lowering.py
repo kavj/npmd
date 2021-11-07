@@ -7,7 +7,7 @@ import ir
 from errors import CompilerError
 from utils import is_addition, is_division, is_multiplication, is_pow, is_subtraction, is_truth_test, wrap_constant, \
     unpack_iterated, equals_unary_negate
-from visitor import ExpressionVisitor
+from visitor import ExpressionVisitor, StmtTransformer
 
 unaryops = {"+": operator.pos,
             "-": operator.neg,
@@ -87,7 +87,7 @@ def rewrite_pow(expr):
         return expr
 
 
-@singledispatchmethod
+@singledispatch
 def simplify_commutative_min_max(node):
     msg = f"Internal Error: Expected min or max ir node, received {type(node)}."
     raise TypeError(msg)
@@ -319,11 +319,6 @@ class const_folding(ExpressionVisitor):
         return expr
 
 
-@singledispatch
-def simplify_commutative_min_max(node):
-    raise NotImplementedError
-
-
 def unwrap_truth_tested(expr):
     """
     Extract truth tested operands. This helps limit isinstance checks for cases
@@ -349,7 +344,12 @@ class arithmetic_folding(ExpressionVisitor):
 
     @singledispatchmethod
     def visit(self, expr):
-        raise NotImplementedError
+        msg = f"no method to fold {expr}"
+        raise NotImplementedError(msg)
+
+    @visit.register
+    def _(self, node: ir.Expression):
+        return node
 
     @visit.register
     def _(self, node: ir.BinOp):
@@ -523,6 +523,10 @@ class arithmetic_folding(ExpressionVisitor):
                     return ir.Min((on_false, on_true))
         return node
 
+    @visit.register
+    def _(self, node: ir.Constant):
+        return node
+
 
 @singledispatch
 def interval_from_iterable(iterable):
@@ -537,7 +541,7 @@ def _(iterable: ir.AffineSeq):
 
 @interval_from_iterable.register
 def _(iterable: ir.NameRef):
-    return (ir.Zero, ir.Length(iterable), ir.One)
+    return (ir.Zero, ir.SingleDimRef(iterable, ir.Zero), ir.One)
 
 
 @interval_from_iterable.register
@@ -598,6 +602,9 @@ def _find_shared_interval(intervals):
         stops.add(stop)
         steps.add(step)
 
+    # enumerate doesn't declare a bound, so it shows up as None
+    stops.discard(None)
+
     simplify_expr = arithmetic_folding()
 
     if len(steps) == 1:
@@ -606,18 +613,18 @@ def _find_shared_interval(intervals):
         step = steps.pop()
         step = simplify_expr(step)
         if len(starts) == 1:
-            start = start.pop()
+            start = starts.pop()
             if len(stops) == 1:
                 stop = stop.pop()
                 simplify_expr(stop)
             else:
-                stop = ir.Min(frozenset({simplify_expr(s) for s in stop}))
+                stop = ir.Min(frozenset({simplify_expr(s) for s in stops}))
                 stop = simplify_commutative_min_max(stop)
             return start, stop, step
         elif len(stops) == 1:
-            stop = stop.pop()
+            stop = stops.pop()
             stop = simplify_expr(stop)
-            start = frozenset({simplify_expr(s) for s in start})
+            start = frozenset({simplify_expr(s) for s in starts})
             start = ir.Max(frozenset(start))
             start = simplify_commutative_min_max(start)
             diff = ir.BinOp(stop, start, "-")
@@ -687,7 +694,7 @@ def make_single_index_loop(header: ir.ForLoop, symbols):
 
     by_iterable = {}
     intervals = set()
-    for _, iterable in unpack_iterated(header):
+    for _, iterable in unpack_iterated(header.target, header.iterable):
         interval = interval_from_iterable(iterable)
         by_iterable[iterable] = interval
         intervals.add(interval)
@@ -695,12 +702,12 @@ def make_single_index_loop(header: ir.ForLoop, symbols):
     # loop_interval = _find_shared_interval(intervals)
     loop_start, loop_stop, loop_step = _find_shared_interval(intervals)
     loop_expr = ir.AffineSeq(loop_start, loop_stop, loop_step)
-    loop_counter = symbols.register_unique_name("i")
+    loop_counter = symbols.make_unique_name_like("i")
     body = []
     pos = header.pos
     simplify_expr = arithmetic_folding()
 
-    for target, iterable in unpack_iterated(header):
+    for target, iterable in unpack_iterated(header.target, header.iterable):
         (start, _, step) = by_iterable[iterable]
         assert step == loop_step
         assert (start == loop_start) or (loop_start == ir.Zero)
@@ -726,3 +733,23 @@ def make_single_index_loop(header: ir.ForLoop, symbols):
     body.extend(header.body)
     repl = ir.ForLoop(loop_counter, loop_expr, body, pos)
     return repl
+
+
+class loop_lowering(StmtTransformer):
+
+    def __init__(self, symbols):
+        self.symbols = symbols
+
+    def __call__(self, node):
+        return self.visit(node)
+
+    @singledispatchmethod
+    def visit(self, node):
+        return super().visit(node)
+
+    @visit.register
+    def _(self, node: ir.ForLoop):
+        body = self.visit(node.body)
+        initial_rewrite = ir.ForLoop(node.target, node.iterable, body, node.pos)
+        repl = make_single_index_loop(initial_rewrite, self.symbols)
+        return repl

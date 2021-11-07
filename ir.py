@@ -261,13 +261,16 @@ class ArrayRef(ValueRef):
         return len(self.dims)
 
 
-@dataclass
+@dataclass(frozen=True)
 class SingleDimRef(Expression):
     base: ValueRef
     dim: IntConst
 
     def __post_init__(self):
         assert isinstance(self.dim, IntConst)
+
+    def subexprs(self):
+        yield base
 
 
 # Todo: changes here should be bested as the component yielded by loop unpacking.
@@ -350,7 +353,7 @@ class Min(Expression):
     values: typing.Union[typing.Tuple[ValueRef, ...], typing.FrozenSet[ValueRef,...]]
 
     def __post_init__(self):
-        assert isinstance(self.values, tuple)
+        assert isinstance(self.values, (tuple, frozenset))
         assert all(isinstance(v, ValueRef) for v in self.values)
 
     @property
@@ -367,7 +370,7 @@ class Max(Expression):
     values: typing.Union[typing.Tuple[ValueRef, ...], typing.FrozenSet[ValueRef,...]]
 
     def __post_init__(self):
-        assert isinstance(self.values, tuple)
+        assert isinstance(self.values, (tuple,frozenset))
         assert all(isinstance(v, ValueRef) for v in self.values)
 
     @property
