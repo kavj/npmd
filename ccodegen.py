@@ -11,7 +11,6 @@ import type_resolution as tr
 from errors import CompilerError
 from pretty_printing import binop_ordering
 from symbol_table import symbol, symbol_table
-from type_inference import ExprTypeInfer
 from visitor import StmtVisitor
 
 """
@@ -51,8 +50,7 @@ scalar_type_map = {tr.Int32: "int32_t",
                    tr.BoolType: "bool"}
 
 
-def get_ctype_name(sym: symbol):
-    type_ = sym.type_
+def get_ctype_name(type_):
     if isinstance(type_, ir.ArrayType):
         # numpy array type
         return "PyArrayObject"
@@ -64,20 +62,19 @@ def get_ctype_name(sym: symbol):
         return dtype
 
 
-def get_ctype_tag(sym):
-    t = sym.type_
+def get_ctype_tag(type_):
     # Todo: add something to distinguish uniform, by dim, sliding window
-    if isinstance(t, ir.ArrayType):
-        ndims = t.ndims
-        dtype = scalar_type_mangling.get(t.dtype)
+    if isinstance(type_, ir.ArrayType):
+        ndims = type_.ndims
+        dtype = scalar_type_mangling.get(type_.dtype)
         if dtype is None:
-            msg = f"Array {sym.name} uses unrecognized element type: {t.dtype}"
+            msg = f"Array has unrecognized element type: {type_.dtype}"
             raise CompilerError(msg)
         tag = f"a{ndims}{dtype}"
     else:
-        tag = scalar_type_mangling.get(t)
+        tag = scalar_type_mangling.get(type_)
         if tag is None:
-            msg = f"Scalar {sym.name} has unrecognized type: {t}"
+            msg = f"Scalar {sym.name} has unrecognized type: {type_}"
             raise CompilerError(msg)
     return tag
 
@@ -105,6 +102,57 @@ def make_func_sig(func: ir.Function, syms: symbol_table, ret_type):
 
 # Todo: need to write codegen for module setup and method declaration in addition to header imports
 
+def make_array_struct():
+    pass
+
+
+class c_array_templ:
+    def __init__(self, array_type: ir.ArrayType, dim_prefix, int_type, allocator_cls, printer):
+        self.ndims = array_type.ndims
+        self.dim_prefix = dim_prefix
+        self.int_type_str = get_ctype_name(int_type) if not isinstance(int_type, str) else int_type
+        self.c_dtype = get_ctype_name(array_type.dtype)
+        self.struct_name = get_ctype_tag(array_type)
+        self.allocator_templ = allocator_cls(printer)
+
+    def get_dim_attr_str(self, dim: int):
+        return f"{self.dim_prefix}{dim}"
+
+    def print_decl_str(self):
+        head = f"struct {self.struct_name}"
+        self.printer.print_line(head)
+        with self.printer.curly_braces(semicolon=True):
+            for i in range(self.ndims):
+                dim_ref = self.get_dim_attr_str(i)
+                dim_decl = f"{self.int_type_str} {dim_ref};"
+                self.printer.print_line(dim_decl)
+
+    def make_initializer_str(self, target, dims):
+        assert(len(dims)) == self.array_type.ndims
+        head = f"struct {self.struct_name} {self.target} ="
+        self.printer.print_line(head)
+        with self.printer.curly_braces(semicolon=True):
+            for i, dim in enumerate(dims):
+                dim_ref = self.get_dim_attr_str(i)
+                self.printer.print_line(f".{dim_ref} = {dim_ref};")
+        # Todo: could allow over aligned here, but it's probably
+        #       best to handle padding in an external function.
+        # array_sz = "* ".join(d for d in dims)
+        # head = f"struct {}{'{'}"
+        # allocate based on total size
+
+        # Now set dims one by one
+
+    def make_unboxing_from_numpy_interf(self):
+        pass
+
+
+def gen_array_type(c_elem_type, ndims):
+
+    ndims = len(dims)
+
+    pass
+
 
 class Emitter:
 
@@ -131,6 +179,13 @@ class Emitter:
     def blank_lines(self, count=1):
         for c in range(count):
             self.line_buffer.append("")
+
+    @contextmanager
+    def ifdef_region(self, cond):
+        line = f"#ifdef {cond}"
+        self.print_line(line)
+        yield
+        self.print_line("#endif")
 
     @contextmanager
     def indented(self):
@@ -377,6 +432,8 @@ class ModuleCodeGen(StmtVisitor):
             msg = f"Cannot cast type {rhs_type} to type {lhs_type} on assignment: line {node.pos.line_begin}."
             raise CompilerError(msg)
 
+        # if isinstance(node.value, ir.ArrayInit):
+
         target = self.format(node.target)
         value = self.format(node.value)
 
@@ -457,7 +514,27 @@ class ModuleCodeGen(StmtVisitor):
     @visit.register
     def _(self, node: ir.Assign):
         target = self.format(node.target)
-        value = self.format(node.value)
+        if isinstance(node.value, ir.ArrayInit):
+            # get array type for target
+            # no support for assigning array allocation to NameRef
+            if not isinstance(node.target, ir.NameRef):
+                raise CompilerError
+            target_type = self.symbols.check_type(node.target)
+            # check that these match, this could be hoisted prior to codegen
+            assert target_type.dtype == node.value.dtype
+            assert target_type.ndims == node.value.ndims
+            # assume array types pre-declared
+            dims = [self.visit(dim) for dim in node.value.dims]
+            elem_count = " * ".join(d for d in dims)
+            c_dtype = get_ctype_name(target_type.dtype)
+            # Todo: replace with more general allocator
+            alloc = f"malloc({elem_count} * sizeof({c_dtype}))"
+            stmt = f"{target}.data = {alloc};"
+            self.printer.print_line(stmt)
+            for i, dim in enumerate(dims):
+                self.printer.print_line(f"{target}.d{i} = {dim};")
+        else:
+            value = self.format(node.value)
         if node.in_place:
             assert isinstance(node.value, ir.BinOp)
             assign_op = node.value.op
@@ -504,6 +581,8 @@ class BoilerplateWriter:
             raise CompilerError("mod is treated as a reserved name.")
         self.printer.print_line(f"PyMODINIT_FUNC PyInit_{modname}(void)")
         with self.printer.curly_braces():
+            self.printer.print_line("import_array();")
+            self.printer.print_line("import_ufunc();")
             self.printer.print_line(f"PyObject* mod = PyModule_Create(&{modname});")
             self.printer.print_line("if(mod == NULL)")
             with self.printer.curly_braces():

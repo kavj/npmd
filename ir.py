@@ -221,7 +221,7 @@ class ArrayType(ValueRef):
 
 
 @dataclass(frozen=True)
-class ArrayInit(ValueRef):
+class ArrayInit(Expression):
     ndims: int
     dtype: typing.Hashable
     dims: typing.Tuple[typing.Union[NameRef, IntConst], ...]
@@ -232,17 +232,27 @@ class ArrayInit(ValueRef):
         assert self.dims is None or isinstance(self.dims, tuple)
         assert isinstance(self.dtype, Hashable)
 
+    @property
+    def subexprs(self):
+        for d in self.dims:
+            yield d
+
 
 @dataclass(frozen=True)
-class ArrayArg(ValueRef):
+class ArrayArg(Expression):
     ndims: int
     dtype: typing.Hashable
     dims: typing.Optional[typing.Tuple[typing.Tuple[int, int],...]]
     evol: typing.Optional[str]
 
+    @property
+    def subexprs(self):
+        for d in self.dims:
+            yield d
+
 
 @dataclass(frozen=True)
-class ArrayRef(ValueRef):
+class ArrayRef(Expression):
     name: NameRef
     dims: typing.Tuple[typing.Union[NameRef, IntConst], ...]
     dtype: typing.Hashable
@@ -260,6 +270,11 @@ class ArrayRef(ValueRef):
     def ndims(self):
         return len(self.dims)
 
+    @property
+    def subexprs(self):
+        for d in self.dims:
+            yield d
+
 
 @dataclass(frozen=True)
 class SingleDimRef(Expression):
@@ -269,6 +284,7 @@ class SingleDimRef(Expression):
     def __post_init__(self):
         assert isinstance(self.dim, IntConst)
 
+    @property
     def subexprs(self):
         yield base
 

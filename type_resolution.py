@@ -62,7 +62,6 @@ np_func_by_binop = {
     "~": np.bitwise_not
 }
 
-
 # initially supported, untyped ints and other ranges require additional
 # work, and they are less commonly used
 scalar_types = {np.int32, np.int64, np.float32, np.float64, np.bool}
@@ -94,7 +93,6 @@ matmul_inplace = {"@="}
 bitwise = {"<<", ">>", "|", "&", "^"}
 bitwise_inplace = {"<<=", ">>=", "|=", "&=", "^="}
 
-
 inplace_to_ooplace = {
     "+=": "+",
     "-=": "-",
@@ -108,7 +106,7 @@ inplace_to_ooplace = {
     "|=": "|",
     "&=": "&",
     "^=": "^",
-    "~=" : "~"
+    "~=": "~"
 }
 
 
@@ -130,7 +128,7 @@ def resolve_binop_type(a, b, op):
     if op in bitwise:
         # bitwise requires integral or predicate
         if a.boolean and b.boolean:
-            return get_compare_type(a,b)
+            return get_compare_type(a, b)
     a_ = by_ir_type[a]
     b_ = by_ir_type[b]
     if op == "/":
@@ -246,7 +244,7 @@ class ExprTypeInfer(ExpressionVisitor):
         # no caching since they may change
         left = self.visit(node.left)
         right = self.visit(node.right)
-        expr_type = binops_dispatch.get((left, right))
+        expr_type = resolve_binop_type(left, right, node.op)
         if expr_type is None:
             msg = f"No signature match for operator {node.op} with candidate signatures: ({left}, {right})."
             raise CompilerError(msg)
