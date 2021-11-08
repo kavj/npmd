@@ -104,7 +104,7 @@ uws_types = {"test_forifcont.py": {"something":
 
 for i, t in enumerate(tests):
     print(t)
-    filepath = os.path.join("tests", t)
+    filepath = pathlib.Path("tests").joinpath(t)
     print("\n\nSOURCE\n\n")
     with open(filepath) as reader:
         src = reader.read()

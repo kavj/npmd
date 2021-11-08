@@ -14,6 +14,7 @@ import type_interface as ti
 import type_resolution as tr
 
 from ASTTransform import build_module_ir_and_symbols
+from ccodegen import codegen
 from canonicalize import NormalizePaths
 from errors import error_context, CompilerError
 from lowering import loop_lowering
@@ -91,11 +92,15 @@ def build_function_pipeline():
     return pipeline
 
 
-def compile_module(file_path, types, verbose=False, print_result=True):
-    pipeline = build_function_pipeline()
+def compile_module(file_path, types, verbose=False, print_result=True, out=None):
+    # pipeline = build_function_pipeline()
     if verbose:
         if file_path:
             print(f"Compiling: {file_name}:")
+    modname = file_path.name
+    if not modname:
+        msg = "No module specified"
+        raise CompilerError(msg)
     mod_ir, symbols = build_module_ir_and_symbols(file_path, types)
     funcs = []
     norm_paths = NormalizePaths()
@@ -110,4 +115,7 @@ def compile_module(file_path, types, verbose=False, print_result=True):
             from pretty_printing import pretty_printer
             pp = pretty_printer()
             pp(func, s)
-    return mod_ir
+    if out is None:
+        # try in same folder
+        out = Path.cwd()
+    codegen(out, funcs, symbols, modname)

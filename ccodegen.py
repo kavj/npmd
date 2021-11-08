@@ -1,9 +1,9 @@
 import pathlib
 import textwrap
+import pathlib
 
 from contextlib import contextmanager
 from functools import singledispatchmethod
-from pathlib import Path
 
 import ir
 
@@ -382,12 +382,12 @@ class BoilerplateWriter:
         self.printer.print_line(s)
 
     def gen_source_top(self, sys_headers=(), user_headers=()):
-        self.print_line("#define PY_SSIZE_T_CLEAN")
-        self.print_sys_header_text("Python.h")
+        self.printer.print_line("#define PY_SSIZE_T_CLEAN")
+        self.print_sys_header("Python.h")
         for h in sys_headers:
-            self.print_sys_header_text(h)
+            self.print_sys_header(h)
         for h in user_headers:
-            self.print_user_header_text(h)
+            self.print_user_header(h)
 
     def gen_module_init(self):
         if self.modname == "mod":
@@ -569,7 +569,7 @@ class ModuleCodeGen(StmtVisitor):
 
 
 def codegen(build_dir, funcs, symbols, modname):
-    file_path = path(build_dir).joinpath(f"{modname}{module}.c")
+    file_path = pathlib.Path(build_dir).joinpath(f"{modname}Module.c")
     printer = Emitter(file_path)
     mod_builder = ModuleCodeGen(modname, printer)
     bp_gen = BoilerplateWriter(printer, modname)
@@ -580,7 +580,8 @@ def codegen(build_dir, funcs, symbols, modname):
     bp_gen.gen_module_init()
     for func in funcs:
         basename = func.name
-        mangled_name, arg_seq = make_func_sig(func, symbols, modname)
+        func_symbols = symbols.get(basename)
+        mangled_name, arg_seq = make_func_sig(func, func_symbols, modname)
         # return_type = get_return_type(func)
         func_lookup[basename] = (mangled_name, arg_seq)
         # return_type = get_ctype_name(return_type)
