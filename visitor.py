@@ -139,6 +139,12 @@ class ExpressionVisitor:
         return ir.AffineSeq(start, stop, step)
 
     @visit.register
+    def _(self, expr: ir.SingleDimRef):
+        base = self.visit(expr.base)
+        dim = expr.dim
+        return ir.SingleDimRef(base, dim)
+
+    @visit.register
     def _(self, expr: ir.UnaryOp):
         operand = self.lookup(expr.operand)
         return ir.UnaryOp(operand, expr.op)

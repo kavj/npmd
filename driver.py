@@ -98,6 +98,7 @@ def compile_module(file_path, types, verbose=False, print_result=True, out=None)
         if file_path:
             print(f"Compiling: {file_name}:")
     modname = file_path.name
+    modname, _ = os.path.splitext(modname)
     if not modname:
         msg = "No module specified"
         raise CompilerError(msg)

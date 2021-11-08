@@ -12,6 +12,7 @@ import type_resolution as tr
 from errors import CompilerError
 from pretty_printing import binop_ordering
 from symbol_table import symbol, symbol_table
+from utils import extract_name
 from visitor import StmtVisitor
 
 """
@@ -52,8 +53,9 @@ scalar_type_map = {tr.Int32: "int32_t",
 
 
 def get_ctype_name(type_):
-    if isinstance(type_, ir.ArrayType):
+    if isinstance(type_, (ir.ArrayType, ir.ArrayArg)):
         # numpy array type
+        # Todo: array arg needs to match a specific struct
         return "PyArrayObject"
     else:
         dtype = scalar_type_map.get(type_)
@@ -65,7 +67,7 @@ def get_ctype_name(type_):
 
 def get_ctype_tag(type_):
     # Todo: add something to distinguish uniform, by dim, sliding window
-    if isinstance(type_, ir.ArrayType):
+    if isinstance(type_, (ir.ArrayType, ir.ArrayArg)):
         ndims = type_.ndims
         dtype = scalar_type_mangling.get(type_.dtype)
         if dtype is None:
@@ -75,7 +77,7 @@ def get_ctype_tag(type_):
     else:
         tag = scalar_type_mangling.get(type_)
         if tag is None:
-            msg = f"Scalar {sym.name} has unrecognized type: {type_}"
+            msg = f"Scalar has unrecognized type: {type_}"
             raise CompilerError(msg)
     return tag
 
@@ -86,7 +88,7 @@ def get_ctype_tag(type_):
 
 
 def mangle_func_name(basename, arg_types, modname):
-    tag = "".join(get_type_tag(t) for t in arg_types)
+    tag = "".join(get_ctype_tag(t) for t in arg_types)
     mangled_name = f"{modname}{basename}_{tag}"
     return mangled_name
 
@@ -161,6 +163,11 @@ class Emitter:
         else:
             self.print_line("}")
 
+    @contextmanager
+    def flush_on_exit(self):
+        yield
+        self.flush()
+
     def print_line(self, line):
         indented_line = f"{self._indent}{line}"
         lines = self.line_formatter.wrap(indented_line)
@@ -205,6 +212,10 @@ class Formatter:
     def visit(self, node):
         msg = f"No method to convert node: {node} to C99 code."
         raise NotImplementedError(msg)
+
+    @visit.register
+    def _(self, node: ir.SingleDimRef):
+        pass
 
     @visit.register
     def _(self, node: ir.Max):
@@ -408,7 +419,7 @@ class BoilerplateWriter:
             for base, mangled in funcs:
                 line = f"\"{base}\", {mangled}, METH_VARARGS, NULL"
                 with_braces = f"{'{'}{line}{'}'}"
-                self.print_line(with_braces)
+                self.printer.print_line(with_braces)
             # sentinel ending entry
             self.printer.print_line("{NULL, NULL, 0, NULL}")
 
@@ -426,6 +437,7 @@ class ModuleCodeGen(StmtVisitor):
 
     def __init__(self, modname: str, printer):
         self.modname = modname
+        self.format = Formatter()
         self.printer = printer
         self.symbols = None
 
@@ -442,7 +454,13 @@ class ModuleCodeGen(StmtVisitor):
 
     @singledispatchmethod
     def visit(self, node):
-        raise NotImplementedError
+        msg = f"no ModuleCodeGen visitor for node {node} of type {type(node)}"
+        raise NotImplementedError(msg)
+
+    @visit.register
+    def _(self, node: list):
+        for stmt in node:
+            self.visit(stmt)
 
     @visit.register
     def _(self, node: ir.Assign):
@@ -454,42 +472,38 @@ class ModuleCodeGen(StmtVisitor):
             raise CompilerError(msg)
         target = self.format(node.target)
         value = self.format(node.value)
-
-        # Todo: need to determine how much of the numpy api should be directly exposed.
-        #    At present, I am guessing anything that doesn't require the gil may be exposed,
-        #    unless the use of restrict or __restrict__ becomes necessary
-        #    (supported on all compilers that compile CPython).
-        if isinstance(node.target, ir.NameRef) and node.target not in self.declared:
-            if node.in_place:
-                msg = f"Inplace assignment cannot be performed against unbound variables, line: {node.pos.line_begin}."
-                raise CompilerError(msg)
+        if node.in_place:
+            self.printer.print_line(f"{value};")
+        else:
             # For now, assume C99 back end,
             # compliant with PEP 7
-            type_ = self.ctx.get_type(target)
-            ctype_ = scalar_type_map.get(type_)
-            target = f"{ctype_} {target}"
-        stmt = f"{target} = {value};"
-        self.printer.print_line(stmt)
+            stmt = f"{target} = {value};"
+            self.printer.print_line(stmt)
 
     def visit_elif(self, node: ir.IfElse):
-        test = self.visit(node.test)
-        with self.scoped("else if", test):
+        test = self.format(node.test)
+        self.printer.print_line(test)
+        with self.printer.curly_braces():
             self.visit(node.if_branch)
         if else_is_elif(node):
             self.visit_elif(node.else_branch[0])
         elif node.else_branch:
-            with self.scoped("else", None):
+            self.printer.print_line("else")
+            with self.printer.curly_braces():
                 self.visit(node.else_branch)
 
     @visit.register
     def _(self, node: ir.IfElse):
-        test = self.visit(node.test)
-        with self.scoped("if", test):
+        test = self.format(node.test)
+        # with self.scoped("if", test):
+        self.printer.print_line(f"if({test})")
+        with self.printer.curly_braces():
             self.visit(node.if_branch)
         if else_is_elif(node):
-            self.visit_elif(node)
+            self.visit_elif(node.else_branch[0])
         elif node.else_branch:
-            with self.scoped("else", None):
+            self.printer.print_line("else")
+            with self.printer.curly_braces():
                 self.visit(node.else_branch)
 
     @visit.register
@@ -509,16 +523,17 @@ class ModuleCodeGen(StmtVisitor):
             step_expr = f"{target} += {increm_by}"
         start = self.format(node.iterable.start)
         stop = self.format(node.iterable.stop)
-        # implements range semantics with forward step, with the caveat
-        # that any escaping value of target must be copied out in the loop body
-        cond = f"{target} = {start}; {target} < {stop}; {step_expr}"
-        with self.scoped("for", cond):
+        # Todo: should declare symbol here..
+        cond = f"for({target} = {start}; {target} < {stop}; {step_expr})"
+        self.printer.print_line(cond)
+        with self.printer.curly_braces():
             self.visit(node.body)
 
     @visit.register
     def _(self, node: ir.WhileLoop):
         cond = self.format(node.test)
-        with self.scoped("while", cond):
+        self.printer.print_line(f"while({cond})")
+        with self.printer.curly_braces():
             self.visit(node.body)
 
     @visit.register
@@ -567,6 +582,17 @@ class ModuleCodeGen(StmtVisitor):
         line = f"{expr};"
         self.printer.print_line(line)
 
+    @visit.register
+    def _(self, node: ir.Return):
+        # Todo: These need to be split to a degree, depending on whether
+        # this is called from Python or C. In reality, for calls from C,
+        # we're probably pushing an out. For Python we need a PyObject*.
+        if node.value is not None:
+            value = self.format(node.value)
+            self.printer.print_line(f"return {value};")
+        else:
+            self.printer.print_line("return;")
+
 
 def codegen(build_dir, funcs, symbols, modname):
     file_path = pathlib.Path(build_dir).joinpath(f"{modname}Module.c")
@@ -574,25 +600,29 @@ def codegen(build_dir, funcs, symbols, modname):
     mod_builder = ModuleCodeGen(modname, printer)
     bp_gen = BoilerplateWriter(printer, modname)
     sys_headers = ("ndarraytypes.h.",)
+    func_lookup = {}
     methods = []
     # get return type
-    bp_gen.gen_source_top(sys_headers)
-    bp_gen.gen_module_init()
-    for func in funcs:
-        basename = func.name
-        func_symbols = symbols.get(basename)
-        mangled_name, arg_seq = make_func_sig(func, func_symbols, modname)
-        # return_type = get_return_type(func)
-        func_lookup[basename] = (mangled_name, arg_seq)
-        # return_type = get_ctype_name(return_type)
-        return_type = "void"  # temporary standin..
-        arg_str = ", ".join(arg for arg in arg_seq)
-        sig = f"{return_type} {mangled_name}({arg_str})"
-        self.printer.print_line(sig)
-        with self.printer.curly_braces():
-            mod_builder(node.body, symbols)
-        methods.append((basename, mangled_name))
+    with printer.flush_on_exit():
+        bp_gen.gen_source_top(sys_headers)
         printer.blank_lines(count=2)
-    bp_gen.gen_method_table(methods)
-    printer.blank_lines(count=2)
-    bp_gen.gen_module_def()
+        bp_gen.gen_module_init()
+        printer.blank_lines(count=2)
+        for func in funcs:
+            basename = func.name
+            func_symbols = symbols.get(basename)
+            mangled_name, arg_seq = make_func_sig(func, func_symbols, modname)
+            # return_type = get_return_type(func)
+            func_lookup[basename] = (mangled_name, arg_seq)
+            # return_type = get_ctype_name(return_type)
+            return_type = "void"  # temporary standin..
+            arg_str = ", ".join(arg for arg in arg_seq)
+            sig = f"{return_type} {mangled_name}({arg_str})"
+            printer.print_line(sig)
+            with printer.curly_braces():
+                mod_builder(func.body, symbols)
+            methods.append((basename, mangled_name))
+            printer.blank_lines(count=2)
+        bp_gen.gen_method_table(methods)
+        printer.blank_lines(count=2)
+        bp_gen.gen_module_def()
