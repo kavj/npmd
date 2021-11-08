@@ -3,6 +3,7 @@ import textwrap
 
 from contextlib import contextmanager
 from functools import singledispatchmethod
+from pathlib import Path
 
 import ir
 
@@ -84,74 +85,31 @@ def get_ctype_tag(type_):
 # platforms where this does not hold.
 
 
-def make_func_sig(func: ir.Function, syms: symbol_table, ret_type):
+def mangle_func_name(basename, arg_types, modname):
+    tag = "".join(get_type_tag(t) for t in arg_types)
+    mangled_name = f"{modname}{basename}_{tag}"
+    return mangled_name
+
+
+def make_func_sig(func: ir.Function, syms: symbol_table, modname):
     # maintain argument order
     args = tuple(syms.lookup(arg) for arg in func.args)
-    suffix = "".join(get_type_tag(arg) for arg in args)
-    base = extract_name(func.name)
-    mangled_name = f"{base}_{suffix}"
+    arg_names = []
+    for arg in func.args:
+        sym = syms.lookup(arg)
+        name = sym.name
+        type_ = get_ctype_name(sym.type_)
+        arg_names.append(f"{type_} {name}")
+    types = [syms.check_type(arg) for arg in func.args]
+    basename = extract_name(func.name)
+    mangled_name = mangle_func_name(basename, types, modname)
     formatted_args = []
-    for arg in args:
-        type_str = get_ctype_name(arg)
+    for type_, arg in zip(types, args):
+        type_str = get_ctype_name(type_)
         if isinstance(arg.type_, ir.ArrayType):
             type_str = f"{type_str}*"
         formatted_args.append(type_str)
-    arg_str = ", ".join(arg for arg in formatted_args)
-    return f"{ret_type} {mangled_name}({arg_str})"
-
-
-# Todo: need to write codegen for module setup and method declaration in addition to header imports
-
-def make_array_struct():
-    pass
-
-
-class c_array_templ:
-    def __init__(self, array_type: ir.ArrayType, dim_prefix, int_type, allocator_cls, printer):
-        self.ndims = array_type.ndims
-        self.dim_prefix = dim_prefix
-        self.int_type_str = get_ctype_name(int_type) if not isinstance(int_type, str) else int_type
-        self.c_dtype = get_ctype_name(array_type.dtype)
-        self.struct_name = get_ctype_tag(array_type)
-        self.allocator_templ = allocator_cls(printer)
-
-    def get_dim_attr_str(self, dim: int):
-        return f"{self.dim_prefix}{dim}"
-
-    def print_decl_str(self):
-        head = f"struct {self.struct_name}"
-        self.printer.print_line(head)
-        with self.printer.curly_braces(semicolon=True):
-            for i in range(self.ndims):
-                dim_ref = self.get_dim_attr_str(i)
-                dim_decl = f"{self.int_type_str} {dim_ref};"
-                self.printer.print_line(dim_decl)
-
-    def make_initializer_str(self, target, dims):
-        assert(len(dims)) == self.array_type.ndims
-        head = f"struct {self.struct_name} {self.target} ="
-        self.printer.print_line(head)
-        with self.printer.curly_braces(semicolon=True):
-            for i, dim in enumerate(dims):
-                dim_ref = self.get_dim_attr_str(i)
-                self.printer.print_line(f".{dim_ref} = {dim_ref};")
-        # Todo: could allow over aligned here, but it's probably
-        #       best to handle padding in an external function.
-        # array_sz = "* ".join(d for d in dims)
-        # head = f"struct {}{'{'}"
-        # allocate based on total size
-
-        # Now set dims one by one
-
-    def make_unboxing_from_numpy_interf(self):
-        pass
-
-
-def gen_array_type(c_elem_type, ndims):
-
-    ndims = len(dims)
-
-    pass
+    return mangled_name, formatted_args
 
 
 class Emitter:
@@ -239,6 +197,9 @@ class Formatter:
     def parenthesized(self, node):
         expr = self.visit(node)
         return f"({expr})"
+
+    def __call__(self, node):
+        return self.visit(node)
 
     @singledispatchmethod
     def visit(self, node):
@@ -400,11 +361,72 @@ class Formatter:
         return expr
 
 
+# need a header file generator..
+
+
+class BoilerplateWriter:
+
+    # This is meant to be controlled by a codegen driver,
+    # which manages opening/closing of a real or virtual destination file.
+
+    def __init__(self, emitter, modname):
+        self.printer = emitter
+        self.modname = modname
+
+    def print_sys_header(self, name):
+        s = f"#include<{name}>"
+        self.printer.print_line(s)
+
+    def print_user_header(self, name):
+        s = f"#include \"{name}\""
+        self.printer.print_line(s)
+
+    def gen_source_top(self, sys_headers=(), user_headers=()):
+        self.print_line("#define PY_SSIZE_T_CLEAN")
+        self.print_sys_header_text("Python.h")
+        for h in sys_headers:
+            self.print_sys_header_text(h)
+        for h in user_headers:
+            self.print_user_header_text(h)
+
+    def gen_module_init(self):
+        if self.modname == "mod":
+            raise CompilerError("mod is treated as a reserved name.")
+        self.printer.print_line(f"PyMODINIT_FUNC PyInit_{self.modname}(void)")
+        with self.printer.curly_braces():
+            self.printer.print_line("import_array();")
+            self.printer.print_line("import_ufunc();")
+            self.printer.print_line(f"PyObject* mod = PyModule_Create(&{self.modname});")
+            self.printer.print_line("if(mod == NULL)")
+            with self.printer.curly_braces():
+                self.printer.print_line("return NULL;")
+
+    def gen_method_table(self, funcs):
+        # no keyword support..
+        self.printer.print_line(f"static PyMethodDef {self.modname}Methods[] =")
+        with self.printer.curly_braces(semicolon=True):
+            for base, mangled in funcs:
+                line = f"\"{base}\", {mangled}, METH_VARARGS, NULL"
+                with_braces = f"{'{'}{line}{'}'}"
+                self.print_line(with_braces)
+            # sentinel ending entry
+            self.printer.print_line("{NULL, NULL, 0, NULL}")
+
+    def gen_module_def(self):
+        self.printer.print_line(f"static PyModuleDef {self.modname} =")
+        with self.printer.curly_braces(semicolon=True):
+            self.printer.print_line("PyModuleDef_HEAD_INIT,")
+            self.printer.print_line(f"{self.modname},")
+            self.printer.print_line("NULL,")  # no module docstring support
+            self.printer.print_line("-1,")  # no support for per interpreter state tracking
+            self.printer.print_line(f"{self.modname}Methods")  # method table
+
+
 class ModuleCodeGen(StmtVisitor):
 
-    def __init__(self):
-        self._formatter = Formatter()
-        self.format = self.formatter.visit
+    def __init__(self, modname: str, printer):
+        self.modname = modname
+        self.printer = printer
         self.symbols = None
 
     @contextmanager
@@ -414,10 +436,9 @@ class ModuleCodeGen(StmtVisitor):
         yield
         self.symbols = None
 
-    def __call__(self, func: ir.Function, symbols: symbol_table):
-        assert symbols.namespace == func.name
-        with self.function_context(symbol_table):
-            self.visit(func)
+    def __call__(self, node, symbols: symbol_table):
+        with self.function_context(symbols):
+            self.visit(node)
 
     @singledispatchmethod
     def visit(self, node):
@@ -431,9 +452,6 @@ class ModuleCodeGen(StmtVisitor):
         if lhs_type != rhs_type:
             msg = f"Cannot cast type {rhs_type} to type {lhs_type} on assignment: line {node.pos.line_begin}."
             raise CompilerError(msg)
-
-        # if isinstance(node.value, ir.ArrayInit):
-
         target = self.format(node.target)
         value = self.format(node.value)
 
@@ -523,7 +541,7 @@ class ModuleCodeGen(StmtVisitor):
             # check that these match, this could be hoisted prior to codegen
             assert target_type.dtype == node.value.dtype
             assert target_type.ndims == node.value.ndims
-            # assume array types pre-declared
+            # assume array types are always pre-declared
             dims = [self.visit(dim) for dim in node.value.dims]
             elem_count = " * ".join(d for d in dims)
             c_dtype = get_ctype_name(target_type.dtype)
@@ -535,13 +553,13 @@ class ModuleCodeGen(StmtVisitor):
                 self.printer.print_line(f"{target}.d{i} = {dim};")
         else:
             value = self.format(node.value)
-        if node.in_place:
-            assert isinstance(node.value, ir.BinOp)
-            assign_op = node.value.op
-        else:
-            assign_op = "="
-        line = f"{target} {assign_op} {value};"
-        self.printer.print_line(line)
+            if node.in_place:
+                assert isinstance(node.value, ir.BinOp)
+                assign_op = node.value.op
+            else:
+                assign_op = "="
+            line = f"{target} {assign_op} {value};"
+            self.printer.print_line(line)
 
     @visit.register
     def _(self, node: ir.SingleExpr):
@@ -550,62 +568,30 @@ class ModuleCodeGen(StmtVisitor):
         self.printer.print_line(line)
 
 
-# need a header file generator..
-
-class BoilerplateWriter:
-
-    # This is meant to be controlled by a codegen driver,
-    # which manages opening/closing of a real or virtual destination file.
-
-    def __init__(self, dest):
-        self.printer = Emitter(dest)
-
-    def print_sys_header(self, name):
-        s = f"#include<{name}>"
-        self.printer.print_line(s)
-
-    def print_user_header(self, name):
-        s = f"#include \"{name}\""
-        self.printer.print_line(s)
-
-    def gen_source_top(self, sys_headers=(), user_headers=()):
-        self.print_line("#define PY_SSIZE_T_CLEAN")
-        self.print_sys_header_text("Python.h")
-        for h in sys_headers:
-            self.print_sys_header_text(h)
-        for h in user_headers:
-            self.print_user_header_text(h)
-
-    def gen_module_init(self, modname):
-        if modname == "mod":
-            raise CompilerError("mod is treated as a reserved name.")
-        self.printer.print_line(f"PyMODINIT_FUNC PyInit_{modname}(void)")
+def codegen(build_dir, funcs, symbols, modname):
+    file_path = path(build_dir).joinpath(f"{modname}{module}.c")
+    printer = Emitter(file_path)
+    mod_builder = ModuleCodeGen(modname, printer)
+    bp_gen = BoilerplateWriter(printer, modname)
+    sys_headers = ("ndarraytypes.h.",)
+    methods = []
+    # get return type
+    bp_gen.gen_source_top(sys_headers)
+    bp_gen.gen_module_init()
+    for func in funcs:
+        basename = func.name
+        mangled_name, arg_seq = make_func_sig(func, symbols, modname)
+        # return_type = get_return_type(func)
+        func_lookup[basename] = (mangled_name, arg_seq)
+        # return_type = get_ctype_name(return_type)
+        return_type = "void"  # temporary standin..
+        arg_str = ", ".join(arg for arg in arg_seq)
+        sig = f"{return_type} {mangled_name}({arg_str})"
+        self.printer.print_line(sig)
         with self.printer.curly_braces():
-            self.printer.print_line("import_array();")
-            self.printer.print_line("import_ufunc();")
-            self.printer.print_line(f"PyObject* mod = PyModule_Create(&{modname});")
-            self.printer.print_line("if(mod == NULL)")
-            with self.printer.curly_braces():
-                self.printer.print_line("return NULL;")
-
-    def gen_method_table(self, modname, funcs):
-        # no keyword support..
-        self.printer.print_line(f"static PyMethodDef {modname}Methods[] =")
-        with self.printer.curly_braces(semicolon=True):
-            for name, doc in funcs:
-                if doc is None:
-                    doc = "NULL"
-                line = f"{name}, {modname}_{name}, METH_VARARGS, {doc}"
-                with_braces = f"{'{'}{line}{'}'}"
-                self.print_line(with_braces)
-            # sentinel ending entry
-            self.printer.print_line("{NULL, NULL, 0, NULL}")
-
-    def gen_module_def(self, modname):
-        self.printer.print_line(f"static PyModuleDef {modname} =")
-        with self.printer.curly_braces(semicolon=True):
-            self.printer.print_line("PyModuleDef_HEAD_INIT,")
-            self.printer.print_line(f"{modname},")
-            self.printer.print_line("NULL,")
-            self.printer.print_line("-1,")
-            self.printer.print_line(f"{modname}Methods")
+            mod_builder(node.body, symbols)
+        methods.append((basename, mangled_name))
+        printer.blank_lines(count=2)
+    bp_gen.gen_method_table(methods)
+    printer.blank_lines(count=2)
+    bp_gen.gen_module_def()
