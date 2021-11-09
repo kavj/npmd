@@ -1,14 +1,15 @@
+import math
 import operator
 import typing
 from collections import Counter, defaultdict, deque
-from functools import singledispatch, singledispatchmethod
+from functools import singledispatchmethod
 
 import ir
 import type_resolution as tr
 from errors import CompilerError
 from utils import is_addition, is_division, is_multiplication, is_pow, is_subtraction, is_truth_test, wrap_constant, \
     unpack_iterated, equals_unary_negate
-from visitor import ExpressionVisitor, StmtTransformer
+from visitor import ExpressionVisitor, ExpressionTransformer, StmtTransformer
 
 unaryops = {"+": operator.pos,
             "-": operator.neg,
@@ -88,84 +89,100 @@ def rewrite_pow(expr):
         return expr
 
 
-@singledispatch
-def simplify_commutative_min_max(node):
-    msg = f"Internal Error: Expected min or max ir node, received {type(node)}."
-    raise TypeError(msg)
+class MinMaxSimplifier(ExpressionTransformer):
 
+    @singledispatchmethod
+    def visit(self, node):
+        return super().visit(node)
 
-@simplify_commutative_min_max.register
-def _(node: ir.Max):
-    numeric = set()
-    seen = set()
-    unchecked = deque(node.subexprs)
-    unique = deque()
+    @visit.register
+    def _(self, node: ir.MaxReduction):
+        numeric = set()
+        seen = set()
+        unchecked = deque(node.subexprs)
+        unique = deque()
 
-    while unchecked:
-        value = unchecked.popleft()
-        if value.constant:
-            numeric.add(value.value)
-        elif value not in seen:
-            seen.add(value)
-            if isinstance(value, ir.Max):
-                # Since this handles expressions that are assumed to
-                # be commutative and not overflow or contain unordered
-                # operands, we can inline nested max terms the first time
-                # a unique max expression is encountered.
-                unchecked.extend(value.values)
+        while unchecked:
+            value = unchecked.popleft()
+            if value.constant:
+                numeric.add(value.value)
+            elif value not in seen:
+                seen.add(value)
+                if isinstance(value, ir.Max):
+                    # Since this handles expressions that are assumed to
+                    # be commutative and not overflow or contain unordered
+                    # operands, we can inline nested max terms the first time
+                    # a unique max expression is encountered.
+                    unchecked.extend(value.values)
+                else:
+                    unique.append(value)
+
+        if unique:
+            if numeric:
+                as_const = wrap_constant(max(numeric))
+                unique.append(as_const)
+            if len(unique) > 1:
+                repl = ir.Max(tuple(unique))
             else:
-                unique.append(value)
-
-    if unique:
-        if numeric:
-            as_const = wrap_constant(max(numeric))
-            unique.append(as_const)
-        if len(unique) > 1:
-            repl = ir.Max(tuple(unique))
+                repl, = unique
+        elif numeric:
+            repl = wrap_constant(max(numeric))
         else:
-            repl, = unique
-    elif numeric:
-        repl = wrap_constant(max(numeric))
-    else:
-        # should never happen
-        raise ValueError("Internal Error: commutative min max simplification.")
+            # should never happen
+            raise ValueError("Internal Error: commutative min max simplification.")
 
-    return repl
+        return repl
 
+    @visit.register
+    def _(self, node: ir.MinReduction):
+        numeric = set()
+        seen = set()
+        unchecked = deque(node.values)
+        unique = deque()
 
-@simplify_commutative_min_max.register
-def _(node: ir.Min):
-    numeric = set()
-    seen = set()
-    unchecked = deque(node.values)
-    unique = deque()
+        while unchecked:
+            value = unchecked.popleft()
+            if value.constant:
+                numeric.add(value.value)
+            elif value not in seen:
+                seen.add(value)
+                if isinstance(value, ir.Min):
+                    unchecked.extend(value.values)
+                else:
+                    unique.append(value)
 
-    while unchecked:
-        value = unchecked.popleft()
-        if value.constant:
-            numeric.add(value.value)
-        elif value not in seen:
-            seen.add(value)
-            if isinstance(value, ir.Min):
-                unchecked.extend(value.values)
+        if unique:
+            if numeric:
+                as_const = wrap_constant(min(numeric))
+                unique.append(as_const)
+            if len(unique) > 1:
+                repl = ir.Min(tuple(unique))
             else:
-                unique.append(value)
-
-    if unique:
-        if numeric:
-            as_const = wrap_constant(min(numeric))
-            unique.append(as_const)
-        if len(unique) > 1:
-            repl = ir.Min(tuple(unique))
+                repl, = unique
+        elif numeric:
+            repl = wrap_constant(min(numeric))
         else:
-            repl, = unique
-    elif numeric:
-        repl = wrap_constant(min(numeric))
-    else:
-        # should never happen
-        raise ValueError("Internal Error: commutative min max simplification.")
+            # should never happen
+            raise ValueError("Internal Error: commutative min max simplification.")
 
-    return repl
+        return repl
+
+    @visit.register
+    def _(self, node: ir.Min):
+        if node.a == node.b:
+            return node.a
+        elif ir.NAN in node.subexprs:
+            # follow numpy rules
+            return ir.NAN
+        return node
+
+    @visit.register
+    def _(self, node: ir.Max):
+        if node.a == node.b:
+            return node.a
+        elif ir.NAN in node.subexprs:
+            return ir.NAN
+
 
 
 # Todo: A lot of this can't be done consistently without type information. Some folding of constants
@@ -174,7 +191,7 @@ def _(node: ir.Min):
 #       in a way that may differ from compiler sanitization flags.
 
 
-class const_folding(ExpressionVisitor):
+class const_folding(ExpressionTransformer):
     # These don't reject large integer values, since they may be intermediate values.
     # It only matters if they are explicitly bound to a fixed width data type that
     # cannot contain them.
@@ -331,7 +348,7 @@ def unwrap_truth_tested(expr):
     return expr
 
 
-class arithmetic_folding(ExpressionVisitor):
+class arithmetic_folding(ExpressionTransformer):
     """
     Non-recursive visitor for folding identity ops
 
@@ -340,21 +357,9 @@ class arithmetic_folding(ExpressionVisitor):
 
     """
 
-    def __call__(self, expr):
-        return self.lookup(expr)
-
     @singledispatchmethod
     def visit(self, expr):
-        msg = f"no method to fold {expr}"
-        raise NotImplementedError(msg)
-
-    @visit.register
-    def _(self, node: ir.NameRef):
-        return node
-
-    @visit.register
-    def _(self, node: ir.Expression):
-        return node
+        return super().visit(expr)
 
     @visit.register
     def _(self, node: ir.BinOp):
@@ -420,8 +425,7 @@ class arithmetic_folding(ExpressionVisitor):
     def _(self, node: ir.UnaryOp):
         if isinstance(node.operand, ir.UnaryOp) and node.operand == node.op:
             return node.operand.operand
-        else:
-            return node
+        return node
 
     @visit.register
     def _(self, node: ir.AND):
@@ -528,45 +532,40 @@ class arithmetic_folding(ExpressionVisitor):
                     return ir.Min((on_false, on_true))
         return node
 
+
+class IntervalBuilder(ExpressionVisitor):
+
+    @singledispatchmethod
+    def visit(self, iterable):
+        msg = f"No method to generate interval for {iterable} of type {type(iterable)}."
+        raise TypeError(msg)
+
     @visit.register
-    def _(self, node: ir.Constant):
-        return node
+    def _(self, iterable: ir.AffineSeq):
+        return (iterable.start, iterable.stop, iterable.step)
 
+    @visit.register
+    def _(self, iterable: ir.NameRef):
+        return (ir.Zero, ir.SingleDimRef(iterable, ir.Zero), ir.One)
 
-@singledispatch
-def interval_from_iterable(iterable):
-    msg = f"Cannot retrieve interval from iterable of type {iterable}."
-    raise NotImplementedError(msg)
-
-
-@interval_from_iterable.register
-def _(iterable: ir.AffineSeq):
-    return (iterable.start, iterable.stop, iterable.step)
-
-
-@interval_from_iterable.register
-def _(iterable: ir.NameRef):
-    return (ir.Zero, ir.SingleDimRef(iterable, ir.Zero), ir.One)
-
-
-@interval_from_iterable.register
-def _(iterable: ir.Subscript):
-    if isinstance(iterable.slice, ir.Slice):
-        slice_ = iterable.slice
-        start = slice_.start
-        if start is None:
+    @visit.register
+    def _(self, iterable: ir.Subscript):
+        if isinstance(iterable.slice, ir.Slice):
+            slice_ = iterable.slice
+            start = slice_.start
+            if start is None:
+                start = ir.Zero
+            stop = ir.SingleDimRef(iterable.target, ir.Zero)
+            if slice_.stop is not None:
+                stop = ir.Min(stop, slice_.stop)
+            step = slice_.step
+            if step is None:
+                step = ir.One
+        else:
             start = ir.Zero
-        stop = ir.SingleDimRef(iterable.target, ir.Zero)
-        if slice_.stop is not None:
-            stop = ir.Min(stop, slice_.stop)
-        step = slice_.step
-        if step is None:
+            stop = ir.SingleDimRef(iterable, ir.One)
             step = ir.One
-    else:
-        start = ir.Zero
-        stop = ir.SingleDimRef(iterable, ir.One)
-        step = ir.One
-    return start, stop, step
+        return start, stop, step
 
 
 def _compute_iter_count(diff, step):
@@ -594,10 +593,6 @@ def _find_range_intersection(by_step):
     return initial
 
 
-def _make_intervals(header: ir.ForLoop):
-    return {interval_from_iterable(iterable) for iterable in unpack_iterated(header)}
-
-
 def _find_shared_interval(intervals):
     starts = set()
     stops = set()
@@ -609,7 +604,7 @@ def _find_shared_interval(intervals):
 
     # enumerate doesn't declare a bound, so it shows up as None
     stops.discard(None)
-
+    simplify_min_max = MinMaxSimplifier()
     simplify_expr = arithmetic_folding()
 
     if len(steps) == 1:
@@ -623,15 +618,15 @@ def _find_shared_interval(intervals):
                 stop = stops.pop()
                 simplify_expr(stop)
             else:
-                stop = ir.Min(frozenset({simplify_expr(s) for s in stops}))
-                stop = simplify_commutative_min_max(stop)
+                stop = ir.MinReduction(frozenset({simplify_expr(s) for s in stops}))
+                stop = simplify_min_max(stop)
             return start, stop, step
         elif len(stops) == 1:
             stop = stops.pop()
             stop = simplify_expr(stop)
             start = frozenset({simplify_expr(s) for s in starts})
-            start = ir.Max(frozenset(start))
-            start = simplify_commutative_min_max(start)
+            start = ir.MaxReduction(frozenset(start))
+            start = simplify_min_max(start)
             diff = ir.BinOp(stop, start, "-")
             diff = simplify_arith(diff)
             return ir.Zero, diff, step
@@ -699,6 +694,7 @@ def make_single_index_loop(header: ir.ForLoop, symbols):
 
     by_iterable = {}
     intervals = set()
+    interval_from_iterable = IntervalBuilder()
     for _, iterable in unpack_iterated(header.target, header.iterable):
         interval = interval_from_iterable(iterable)
         by_iterable[iterable] = interval

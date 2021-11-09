@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import numbers
 import operator
 import typing
@@ -193,6 +194,7 @@ class StringConst(Constant):
 Zero = IntConst(0)
 One = IntConst(1)
 Neg_One = IntConst(-1)
+NAN = FloatConst(math.nan)
 TRUE = BoolConst(True)
 FALSE = BoolConst(False)
 
@@ -282,11 +284,14 @@ class SingleDimRef(Expression):
     dim: IntConst
 
     def __post_init__(self):
-        assert isinstance(self.dim, IntConst)
+        if not isinstance(self.dim, IntConst):
+            msg = f"Expected integer constant, received {self.dim} of type {type(self.dim)}."
+            raise TypeError(msg)
 
     @property
     def subexprs(self):
-        yield base
+        yield self.base
+        yield self.dim
 
 
 # Todo: changes here should be bested as the component yielded by loop unpacking.
@@ -365,38 +370,118 @@ class Subscript(Expression):
         yield self.slice
 
 
-@dataclass(frozen=True)
 class Min(Expression):
-    """
-    Min iteration count over a number of counters
-    """
-    values: typing.Union[typing.Tuple[ValueRef, ...], typing.FrozenSet[ValueRef,...]]
 
-    def __post_init__(self):
-        assert isinstance(self.values, (tuple, frozenset))
-        assert all(isinstance(v, ValueRef) for v in self.values)
+    def __init__(self, a, b):
+        self._a = a
+        self._b = b
+
+    @property
+    def a(self):
+        return self._a
+
+    @property
+    def b(self):
+        return self._b
 
     @property
     def subexprs(self):
-        for subexpr in self.values:
-            yield subexpr
+        yield self._a
+        yield self._b
+
+    def __eq__(self, other):
+        if not isinstance(other, ir.Min):
+            return False
+        return self.a == other.a and self.b == other.b
+
+    def __ne__(self, other):
+        if not isinstance(other, ir.Max):
+            return True
+        return self.a != other.a or self.b != other.b
+
+    def __hash__(self):
+        return hash((self._a, self._b))
+
+    def __str__(self):
+        return f"Min({self._a}, {self._b})"
 
 
-@dataclass(frozen=True)
+class MinReduction(Expression):
+
+    def __init__(self, *values):
+        self._values = frozenset(values)
+
+    @property
+    def values(self):
+        return self._values
+
+    @property
+    def subexprs(self):
+        for v in self._values:
+            yield v
+
+    def __hash__(self):
+        return hash(self._values)
+
+    def __str__(self):
+        return f"MinReduction({str(self._values)})"
+
+
 class Max(Expression):
-    """
-    Max iteration count over a number of counters
-    """
-    values: typing.Union[typing.Tuple[ValueRef, ...], typing.FrozenSet[ValueRef,...]]
 
-    def __post_init__(self):
-        assert isinstance(self.values, (tuple,frozenset))
-        assert all(isinstance(v, ValueRef) for v in self.values)
+    def __init__(self, a, b):
+        self._a = a
+        self._b = b
+
+    @property
+    def a(self):
+        return self._a
+
+    @property
+    def b(self):
+        return self._b
 
     @property
     def subexprs(self):
-        for subexpr in self.values:
-            yield subexpr
+        yield self._a
+        yield self._b
+
+    def __eq__(self, other):
+        if not isinstance(other, ir.Min):
+            return False
+        return self.a == other.a and self.b == other.b
+
+    def __ne__(self, other):
+        if not isinstance(other, ir.Max):
+            return True
+        return self.a != other.a or self.b != other.b
+
+    def __hash__(self):
+        return hash((self._a, self._b))
+
+    def __str__(self):
+        return f"Max({str(self._a)}, {str(self._b)})"
+
+
+class MaxReduction(Expression):
+
+    def __init__(self, *values):
+        self._values = frozenset(values)
+
+    @property
+    def values(self):
+        return self._values
+
+    @property
+    def subexprs(self):
+        for v in self._values:
+            yield v
+
+    def __hash__(self):
+        return hash(self._values)
+
+    def __str__(self):
+        return f"MaxReduction({str(self._values)})"
 
 
 @dataclass
@@ -919,17 +1004,3 @@ class WhileLoop(StmtBase):
 
     def __post_init__(self):
         assert isinstance(self.test, ValueRef)
-
-
-@dataclass
-class break_if_matches(StmtBase):
-    expr: Expression
-    cond: bool
-
-
-@dataclass
-class raise_if_matches(StmtBase):
-    expr: ValueRef
-    err_type: type
-    msg: str
-    cond: bool
