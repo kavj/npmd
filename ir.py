@@ -423,6 +423,12 @@ class MinReduction(Expression):
         for v in self._values:
             yield v
 
+    def __eq__(self, other):
+        return isinstance(other, ir.MaxReduction) and self.values == other.values
+
+    def __ne__(self, other):
+        return (not isinstance(other, ir.MaxReduction)) or self.values != other.values
+
     def __hash__(self):
         return hash(self._values)
 
@@ -469,7 +475,10 @@ class Max(Expression):
 class MaxReduction(Expression):
 
     def __init__(self, *values):
-        self._values = frozenset(values)
+        if isinstance(values, set):
+            self._values = frozenset(values)
+        else:
+            self._values = frozenset(*values)
 
     @property
     def values(self):
@@ -479,6 +488,12 @@ class MaxReduction(Expression):
     def subexprs(self):
         for v in self._values:
             yield v
+
+    def __eq__(self, other):
+        return isinstance(other, ir.MaxReduction) and self.values == other.values
+
+    def __ne__(self, other):
+        return (not isinstance(other, ir.MaxReduction)) or self.values != other.values
 
     def __hash__(self):
         return hash(self._values)

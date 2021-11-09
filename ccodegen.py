@@ -108,7 +108,7 @@ def make_func_sig(func: ir.Function, syms: symbol_table, modname):
     formatted_args = []
     for type_, arg in zip(types, args):
         type_str = get_ctype_name(type_)
-        if isinstance(arg.type_, ir.ArrayType):
+        if isinstance(arg.type_, (ir.ArrayType, ir.ArrayArg)):
             type_str = f"{type_str}*"
         formatted_args.append(type_str)
     return mangled_name, formatted_args
@@ -121,20 +121,15 @@ class Emitter:
         self.path = path
         self.single_indent = indent
         self.max_line_width = max_line_width
-        self.line_formatter = textwrap.TextWrapper(tabsize=4, break_long_words=False, break_on_hyphens=False)
         self.line_buffer = []
 
     @property
     def indent(self):
-        return self.line_formatter.initial_indent
+        return self._indent
 
     @indent.setter
     def indent(self, level):
         self._indent = level
-
-    @property
-    def indent_len(self):
-        return len(self.line_formatter.initial_indent)
 
     def blank_lines(self, count=1):
         for c in range(count):
@@ -169,8 +164,7 @@ class Emitter:
         self.flush()
 
     def print_line(self, line):
-        indented_line = f"{self._indent}{line}"
-        lines = self.line_formatter.wrap(indented_line)
+        lines = textwrap.wrap(initial_indent=self._indent, subsequent_indent=self._indent, text=line)
         self.line_buffer.extend(lines)
 
     def flush(self):
@@ -611,12 +605,13 @@ def codegen(build_dir, funcs, symbols, modname):
         for func in funcs:
             basename = func.name
             func_symbols = symbols.get(basename)
-            mangled_name, arg_seq = make_func_sig(func, func_symbols, modname)
+            mangled_name, arg_types = make_func_sig(func, func_symbols, modname)
             # return_type = get_return_type(func)
-            func_lookup[basename] = (mangled_name, arg_seq)
+            func_lookup[basename] = (mangled_name, arg_types)
             # return_type = get_ctype_name(return_type)
             return_type = "void"  # temporary standin..
-            arg_str = ", ".join(arg for arg in arg_seq)
+            arg_names = (extract_name(arg) for arg in func.args)
+            arg_str = ", ".join(f"{type_} {arg}" for (type_, arg) in zip(arg_types, arg_names))
             sig = f"{return_type} {mangled_name}({arg_str})"
             printer.print_line(sig)
             with printer.curly_braces():
