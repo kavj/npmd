@@ -77,13 +77,23 @@ class pretty_formatter:
             return f"{expr}.shape[{dim}]"
 
     @visit.register
-    def _(self, node: ir.Max):
-        args = ", ".join(self.visit(arg) for arg in node.values)
+    def _(self, node: ir.MaxReduction):
+        args = ", ".join(self.visit(arg) for arg in node.subexprs)
         return f"max({args})"
 
     @visit.register
+    def _(self, node: ir.Max):
+        args = ", ".join(self.visit(arg) for arg in node.subexprs)
+        return f"max({args})"
+
+    @visit.register
+    def _(self, node: ir.MinReduction):
+        args = ", ".join(self.visit(arg) for arg in node.subexprs)
+        return f"min({args})"
+
+    @visit.register
     def _(self, node: ir.Min):
-        args = ", ".join(self.visit(arg) for arg in node.values)
+        args = ", ".join(self.visit(arg) for arg in node.subexprs)
         return f"min({args})"
 
     @visit.register

@@ -1,6 +1,7 @@
 import math
 import operator
 import typing
+import numpy as np
 from collections import Counter, defaultdict, deque
 from functools import singledispatchmethod
 
@@ -98,91 +99,57 @@ class MinMaxSimplifier(ExpressionTransformer):
     @visit.register
     def _(self, node: ir.MaxReduction):
         numeric = set()
-        seen = set()
-        unchecked = deque(node.subexprs)
-        unique = deque()
-
-        while unchecked:
-            value = unchecked.popleft()
-            if value.constant:
-                numeric.add(value.value)
-            elif value not in seen:
-                seen.add(value)
-                if isinstance(value, ir.Max):
-                    # Since this handles expressions that are assumed to
-                    # be commutative and not overflow or contain unordered
-                    # operands, we can inline nested max terms the first time
-                    # a unique max expression is encountered.
-                    unchecked.extend(value.values)
-                else:
-                    unique.append(value)
-
-        if unique:
-            if numeric:
-                as_const = wrap_constant(max(numeric))
-                unique.append(as_const)
-            if len(unique) > 1:
-                repl = ir.Max(tuple(unique))
+        symbolic = set()
+        for subexpr in node.subexprs:
+            subexpr = self.visit(subexpr)
+            if isinstance(subexpr, ir.Constant):
+                numeric.add(subexpr.value)
             else:
-                repl, = unique
-        elif numeric:
-            repl = wrap_constant(max(numeric))
-        else:
-            # should never happen
-            raise ValueError("Internal Error: commutative min max simplification.")
-
-        return repl
+                symbolic.add(subexpr)
+        if numeric:
+            numeric = wrap_constant(np.max(tuple(numeric)))
+            if numeric == ir.NAN or not symbolic:
+                return numeric
+            symbolic.add(numeric)
+        return ir.MaxReduction(symbolic)
 
     @visit.register
     def _(self, node: ir.MinReduction):
         numeric = set()
-        seen = set()
-        unchecked = deque(node.values)
-        unique = deque()
-
-        while unchecked:
-            value = unchecked.popleft()
-            if value.constant:
-                numeric.add(value.value)
-            elif value not in seen:
-                seen.add(value)
-                if isinstance(value, ir.Min):
-                    unchecked.extend(value.values)
-                else:
-                    unique.append(value)
-
-        if unique:
-            if numeric:
-                as_const = wrap_constant(min(numeric))
-                unique.append(as_const)
-            if len(unique) > 1:
-                repl = ir.Min(tuple(unique))
+        symbolic = set()
+        for subexpr in node.subexprs:
+            subexpr = self.visit(subexpr)
+            if isinstance(subexpr, ir.Constant):
+                numeric.add(subexpr.value)
             else:
-                repl, = unique
-        elif numeric:
-            repl = wrap_constant(min(numeric))
-        else:
-            # should never happen
-            raise ValueError("Internal Error: commutative min max simplification.")
-
-        return repl
+                symbolic.add(subexpr)
+        if numeric:
+            numeric = wrap_constant(np.min(tuple(numeric)))
+            if numeric == ir.NAN or not symbolic:
+                return numeric
+            symbolic.add(numeric)
+        return ir.MinReduction(symbolic)
 
     @visit.register
     def _(self, node: ir.Min):
-        if node.a == node.b:
-            return node.a
-        elif ir.NAN in node.subexprs:
+        a = self.visit(node.a)
+        b = self.visit(node.b)
+        if a == b:
+            return a
+        elif ir.NAN in (a,b):
             # follow numpy rules
             return ir.NAN
-        return node
+        return ir.Min(a,b)
 
     @visit.register
     def _(self, node: ir.Max):
-        if node.a == node.b:
-            return node.a
-        elif ir.NAN in node.subexprs:
+        a = self.visit(node.a)
+        b = self.visit(node.b)
+        if a == b:
+            return a
+        elif ir.NAN in (a,b):
             return ir.NAN
-
+        return ir.Max(a,b)
 
 
 # Todo: A lot of this can't be done consistently without type information. Some folding of constants
@@ -618,14 +585,14 @@ def _find_shared_interval(intervals):
                 stop = stops.pop()
                 simplify_expr(stop)
             else:
-                stop = ir.MinReduction(frozenset({simplify_expr(s) for s in stops}))
+                stop = ir.MinReduction({simplify_expr(s) for s in stops})
                 stop = simplify_min_max(stop)
             return start, stop, step
         elif len(stops) == 1:
             stop = stops.pop()
             stop = simplify_expr(stop)
-            start = frozenset({simplify_expr(s) for s in starts})
-            start = ir.MaxReduction(frozenset(start))
+            start = {simplify_expr(s) for s in starts}
+            start = ir.MaxReduction(start)
             start = simplify_min_max(start)
             diff = ir.BinOp(stop, start, "-")
             diff = simplify_arith(diff)
@@ -648,14 +615,14 @@ def _find_shared_interval(intervals):
             # remove combinable entries
             for step in steps:
                 by_step.pop(step)
-            steps = frozenset(steps)
+            steps = ir.MaxReduction(steps)
             steps = simplify_commutative_min_max(steps)
             by_step[steps].update(diff)
 
     by_step_refined = {}
 
     for step, diffs in by_step.items():
-        diffs = ir.Min(frozenset(diffs))
+        diffs = ir.Min(diffs)
         diffs = simplify_commutative_min_max(diffs)
         by_step_refined[step] = diffs
 
@@ -667,7 +634,7 @@ def _find_shared_interval(intervals):
         count = _compute_iter_count(diff, step)
         count = simplify_expr(count)
         counts.add(count)
-    counts = ir.Min(frozenset(counts))
+    counts = ir.Min(counts)
     counts = simplify_commutative_min_max(counts)
     return ir.Zero, counts, ir.One
 

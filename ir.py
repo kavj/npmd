@@ -409,7 +409,10 @@ class Min(Expression):
 class MinReduction(Expression):
 
     def __init__(self, *values):
-        self._values = frozenset(values)
+        if isinstance(values, set):
+            self._values = frozenset(values)
+        else:
+            self._values = frozenset(*values)
 
     @property
     def values(self):
