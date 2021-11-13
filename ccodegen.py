@@ -13,7 +13,7 @@ from errors import CompilerError
 from pretty_printing import binop_ordering
 from symbol_table import symbol, symbol_table
 from utils import extract_name
-from visitor import StmtVisitor
+from visitor import ExpressionTransformer, StmtVisitor
 
 """
 
@@ -189,7 +189,167 @@ def else_is_elif(stmt: ir.IfElse):
 #       via a header.
 
 
-class Formatter:
+class pretty_formatter:
+    """
+    The pretty printer is intended as a way to show the state of the IR in a way that resembles a
+    typical source representation.
+
+    Note: This will parenthesize some expressions that are unsupported yet accepted by plain Python.
+          It's designed this way, because the alternative is more confusing.
+
+    """
+
+    def __call__(self, node):
+        expr = self.visit(node)
+        return expr
+
+    @singledispatchmethod
+    def visit(self, node):
+        msg = f"No method to format node: {node}."
+        raise NotImplementedError(msg)
+
+    @visit.register
+    def _(self, node: ir.SingleDimRef):
+        expr = self.visit(node.base)
+        if node.dim == ir.Zero:
+            return f"len({expr})"
+        else:
+            dim = self.visit(node.dim)
+            return f"{expr}.shape[{dim}]"
+
+    @visit.register
+    def _(self, node: ir.MaxReduction):
+        args = ", ".join(self.visit(arg) for arg in node.subexprs)
+        return f"max({args})"
+
+    @visit.register
+    def _(self, node: ir.Max):
+        args = ", ".join(self.visit(arg) for arg in node.subexprs)
+        return f"max({args})"
+
+    @visit.register
+    def _(self, node: ir.MinReduction):
+        args = ", ".join(self.visit(arg) for arg in node.subexprs)
+        return f"min({args})"
+
+    @visit.register
+    def _(self, node: ir.Min):
+        args = ", ".join(self.visit(arg) for arg in node.subexprs)
+        return f"min({args})"
+
+    @visit.register
+    def _(self, node: ir.Select):
+        predicate = self.visit(node.predicate)
+        if isinstance(node.predicate, (ir.Select, ir.Tuple)):
+            predicate = parenthesized(predicate)
+        on_true = self.visit(node.on_true)
+        if isinstance(node.on_true, (ir.Select, ir.Tuple)):
+            on_true = parenthesized(on_true)
+        on_false = self.visit(node.on_false)
+        if isinstance(node.on_false, (ir.Select, ir.Tuple)):
+            on_false = parenthesized(on_false)
+        expr = f"{on_true} if {predicate} else {on_false}"
+        return expr
+
+    @visit.register
+    def _(self, node: ir.BoolConst):
+        return str(node.value)
+
+    @visit.register
+    def _(self, node: ir.IntConst):
+        return str(node.value)
+
+    @visit.register
+    def _(self, node: ir.FloatConst):
+        return str(node.value)
+
+    @visit.register
+    def _(self, node: ir.StringConst):
+        return f"\"{node.value}\""
+
+    @visit.register
+    def _(self, node: ir.BinOp):
+        left = self.visit(node.left)
+        right = self.visit(node.right)
+        op = node.op
+        if not node.in_place:
+            op_ordering = binop_ordering[op]
+            if isinstance(node.left, ir.BinOp):
+                if op_ordering < binop_ordering[node.left.op]:
+                    left = parenthesized(left)
+            elif isinstance(node.left, ir.UnaryOp):
+                if op == "**":
+                    left = parenthesized(left)
+            elif isinstance(node.left, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple)):
+                left = parenthesized(left)
+            if isinstance(node.right, ir.BinOp):
+                if op_ordering < binop_ordering[right.op]:
+                    left = parenthesized(right)
+            elif isinstance(node.right, ir.UnaryOp):
+                if op == "**":
+                    left = parenthesized(left)
+            elif isinstance(node.right, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple)):
+                right = parenthesized(right)
+        expr = f"{left} {op} {right}"
+        return expr
+
+    @visit.register
+    def _(self, node: ir.CompareOp):
+        left = self.visit(node.left)
+        right = self.visit(node.right)
+        if isinstance(node.left, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple)):
+            left = parenthesized(left)
+        if isinstance(node.right, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple)):
+            right = parenthesized(right)
+        expr = f"{left} {node.op} {right}"
+        return expr
+
+    @visit.register
+    def _(self, node: ir.AND):
+        groups = []
+        start = 0
+        count = len(node.operands)
+        assert count > 1
+        while start < count:
+            # group things like a < b < c
+            # whether they arose from ir changes or input source
+            first = node.operands[0]
+            if isinstance(first, ir.CompareOp):
+                cmp_op = first.op
+                group = [first.left, first.right]
+                prev_rhs = first.right
+                for operand in islice(node.operands, start + 1, None):
+                    if not (isinstance(operand, ir.CompareOp) and cmp_op == operand.op and operand.left == prev_rhs):
+                        break
+                    group.append(operand.right)
+                    prev_rhs = operand.right
+                groups.append((group, cmp_op))
+                start += len(group) - 1
+            else:
+                # something else, anded
+                cmp_op = None
+                groups.append((first, cmp_op))
+                start += 1
+        operands = []
+        expr = None
+        for group, cmp_op in groups:
+            if cmp_op is not None:
+                op = f" {cmp_op} "
+                chain = op.join(self.visit(suboperand) for suboperand in group)
+                operands.append(chain)
+            else:
+                # single expression
+                assert isinstance(group, ir.ValueRef)
+                formatted = self.visit(group)
+                if isinstance(group, (ir.AND, ir.OR, ir.Select, ir.Tuple)):
+                    formatted = parenthesized(formatted)
+                operands.append(formatted)
+            expr = "and ".join(operand for operand in operands)
+        assert expr is not None
+        return expr
+
+
+class Formatter(ExpressionTransformer):
 
     def braced(self, node):
         expr = self.visit(node)
@@ -199,44 +359,87 @@ class Formatter:
         expr = self.visit(node)
         return f"({expr})"
 
-    def __call__(self, node):
-        return self.visit(node)
-
     @singledispatchmethod
     def visit(self, node):
         msg = f"No method to convert node: {node} to C99 code."
         raise NotImplementedError(msg)
 
     @visit.register
+    def _(self, node: ir.MinReduction):
+        # save first
+        subexprs = node.subexprs
+        first_term = next(subexprs)
+        nested = first_term
+        # turn this into a nesting of single min ops
+        for subexpr in subexprs:
+            nested = ir.Min(nested, subexpr)
+        # if we are left with a one term expression,
+        # then this is either an error or should have been tagged as an array reduction
+        if nested == first_term:
+            msg = f"single term reduction is ambiguous and should not have made it to this point {first_term}"
+            raise RuntimeError(msg)
+        # format nested version
+        expr = self.visit(nested)
+        return expr
+
+    @visit.register
+    def _(self, node: ir.MaxReduction):
+        # save first
+        subexprs = node.subexprs
+        first_term = next(subexprs)
+        nested = first_term
+        # turn this into a nesting of single min ops
+        for subexpr in subexprs:
+            nested = ir.Max(nested, subexpr)
+        # if we are left with a one term expression,
+        # then this is either an error or should have been tagged as an array reduction
+        if nested == first_term:
+            msg = f"single term reduction is ambiguous and should not have made it to this point {first_term}"
+            raise RuntimeError(msg)
+        # format nested version
+        expr = self.visit(nested)
+        return expr
+
+    @visit.register
     def _(self, node: ir.SingleDimRef):
-        pass
+        dim = self.visit(node.dim)
+        arr = self.visit(node.base)
+        return f"PyArray_DIM({arr}, {dim})"
 
     @visit.register
     def _(self, node: ir.Max):
-        assert len(node.values) == 2
-        left_, right_ = node.values
-        left = self.visit(left_)
-        right = self.visit(right_)
+        terms = []
+        for term in node.subexpr:
+            if isinstance(term, (ir.Min, ir.Max, ir.Select)):
+                term = self.parenthesized(term)
+            else:
+                term = self.visit(term)
+            terms.append(term)
+        left, right = terms
         expr = f"{left} > {right} ? {left} : {right}"
         return expr
 
     @visit.register
     def _(self, node: ir.Min):
-        assert len(node.values) == 2
-        left_, right_ = node.values
-        left = self.visit(left_)
-        right = self.visit(right_)
+        terms = []
+        for term in node.subexprs:
+            if isinstance(term, (ir.Min, ir.Max, ir.Select)):
+                term = self.parenthesized(term)
+            else:
+                term = self.visit(term)
+            terms.append(term)
+        left, right = terms
         expr = f"{left} < {right} ? {left} : {right}"
         return expr
 
     @visit.register
     def _(self, node: ir.Select):
-        test = self.parenthesized(node.test) if isinstance(node.test, ir.Select) else self.visit(node.test)
-        on_true = self.parenthesized(node.on_true) if isinstance(node.on_true, ir.Select) \
-            else self.visit(node.on_true)
-        on_false = self.parenthesized(node.on_false) if isinstance(node.on_false, ir.Select) \
-            else self.parenthesized(node.on_false)
-        expr = f"{test} ? {on_true} : {on_false}"
+        terms = []
+        for term in (node.predicate, node.on_true, node.on_false):
+            term = self.parenthesized(term) if isinstance(term, (ir.Select, ir.Tuple)) else self.visit(term)
+            terms.append(term)
+        predicate, on_true, on_false = terms
+        expr = f"{predicate} ? {on_true} : {on_false}"
         return expr
 
     @visit.register
@@ -283,22 +486,21 @@ class Formatter:
 
     @visit.register
     def _(self, node: ir.CompareOp):
-        left = self.visit(node.left)
-        right = self.visit(node.right)
-        if isinstance(node.left, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple)):
-            left = self.parenthesized(left)
-        if isinstance(node.right, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple)):
-            right = self.parenthesized(right)
+        left = (self.parenthesized(node.left)
+                if isinstance(node.left, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple))
+                else self.visit(node.left))
+        right = (self.parenthesized(node.right)
+                 if isinstance(node.right, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple))
+                 else self.visit(node.right))
         expr = f"{left} {node.op} {right}"
         return expr
 
     @visit.register
     def _(self, node: ir.AND):
         operands = []
-        for operand in node.operands:
-            formatted = self.visit(operand)
-            if isinstance(operand, (ir.AND, ir.OR, ir.Select)):
-                formatted = self.parenthesized(formatted)
+        for operand in node.subexprs:
+            formatted = (self.parenthesized(operand)
+                         if isinstance(operand, (ir.AND, ir.OR, ir.Select)) else self.visit(operand))
             operands.append(formatted)
         expr = " && ".join(operand for operand in operands)
         return expr
@@ -306,31 +508,26 @@ class Formatter:
     @visit.register
     def _(self, node: ir.OR):
         operands = []
-        for operand in node.operands:
-            formatted = self.visit(operand)
-            if isinstance(operand, ir.Select):
-                formatted = self.parenthesized(formatted)
+        for operand in node.subexprs:
+            formatted = self.parenthesized(operand) if isinstance(operand, ir.Select) else self.visit(operand)
             operands.append(formatted)
         expr = " || ".join(operand for operand in operands)
         return expr
 
     @visit.register
     def _(self, node: ir.NOT):
-        formatted = self.visit(node.operand)
-        if isinstance(node.operand, (ir.AND, ir.OR, ir.Select)):
-            formatted = self.parenthesized(formatted)
+        formatted = (self.parenthesized(node.operand) if isinstance(node.operand, (ir.AND, ir.OR, ir.Select))
+                     else self.visit(node.operand))
         expr = f"!{formatted}"
         return expr
 
     @visit.register
     def _(self, node: ir.TRUTH):
-        formatted = self.visit(node.operand)
-        if node.constant:
-            if not isinstance(node, ir.BoolConst):
-                # We don't distinguish between bools and predicates here in
-                # truth testing, since Python doesn't have any notion of
-                # predicate types.
-                formatted = f"(bool){formatted}"
+        if isinstance(node.operand, ir.Subscript):
+            formatted = self.parenthesized(node.operand)
+        else:
+            formatted = self.visit(node.operand)
+        formatted = f"(bool){formatted}"
         return formatted
 
     @visit.register

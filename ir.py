@@ -370,40 +370,21 @@ class Subscript(Expression):
         yield self.slice
 
 
+@dataclass(frozen=True, init=True)
 class Min(Expression):
+    left: ValueRef
+    right: ValueRef
 
-    def __init__(self, a, b):
-        self._a = a
-        self._b = b
-
-    @property
-    def a(self):
-        return self._a
-
-    @property
-    def b(self):
-        return self._b
+    def __init__(self, left,right):
+        assert isinstance(left, ValueRef)
+        assert isinstance(right, ValueRef)
+        object.__setattr__(self, "left", left)
+        object.__setattr__(self, "right", right)
 
     @property
     def subexprs(self):
-        yield self._a
-        yield self._b
-
-    def __eq__(self, other):
-        if not isinstance(other, ir.Min):
-            return False
-        return self.a == other.a and self.b == other.b
-
-    def __ne__(self, other):
-        if not isinstance(other, ir.Max):
-            return True
-        return self.a != other.a or self.b != other.b
-
-    def __hash__(self):
-        return hash((self._a, self._b))
-
-    def __str__(self):
-        return f"Min({self._a}, {self._b})"
+        yield self.left
+        yield self.right
 
 
 class MinReduction(Expression):
@@ -436,40 +417,21 @@ class MinReduction(Expression):
         return f"MinReduction({str(self._values)})"
 
 
+@dataclass(frozen=True, init=True)
 class Max(Expression):
+    left: ValueRef
+    right: ValueRef
 
-    def __init__(self, a, b):
-        self._a = a
-        self._b = b
-
-    @property
-    def a(self):
-        return self._a
-
-    @property
-    def b(self):
-        return self._b
+    def __init__(self, left,right):
+        assert isinstance(left, ValueRef)
+        assert isinstance(right, ValueRef)
+        object.__setattr__(self, "left", left)
+        object.__setattr__(self, "right", right)
 
     @property
     def subexprs(self):
-        yield self._a
-        yield self._b
-
-    def __eq__(self, other):
-        if not isinstance(other, ir.Min):
-            return False
-        return self.a == other.a and self.b == other.b
-
-    def __ne__(self, other):
-        if not isinstance(other, ir.Max):
-            return True
-        return self.a != other.a or self.b != other.b
-
-    def __hash__(self):
-        return hash((self._a, self._b))
-
-    def __str__(self):
-        return f"Max({str(self._a)}, {str(self._b)})"
+        yield self.left
+        yield self.right
 
 
 class MaxReduction(Expression):
