@@ -247,10 +247,10 @@ class Formatter(ExpressionTransformer):
 
     @visit.register
     def _(self, node: ir.Max):
-        left, right  = (self.parenthesized(subexpr)
-                        if isinstance(subexpr, (ir.Min, ir.Max, ir.Select))
-                        else self.visit(subexpr)
-                        for subexpr in node.subexprs)
+        left, right = (self.parenthesized(subexpr)
+                       if isinstance(subexpr, (ir.Min, ir.Max, ir.Select))
+                       else self.visit(subexpr)
+                       for subexpr in node.subexprs)
         expr = f"{left} > {right} ? {left} : {right}"
         return expr
 
@@ -304,8 +304,9 @@ class Formatter(ExpressionTransformer):
         else:
             op_ordering = binop_ordering[op]
             left, right = (self.parenthesized(subexpr)
-                           if ((isinstance(subexpr, ir.BinOp) and op_ordering < binop_ordering[subexpr.op])
-                           or isinstance(subexpr, (ir.BinOp, ir.CompareOp, ir.Select)))
+                           if ((isinstance(subexpr, ir.BinOp)
+                                and op_ordering < binop_ordering[subexpr.op])
+                                or isinstance(subexpr, (ir.BinOp, ir.CompareOp, ir.Select)))
                            else self.visit(subexpr)
                            for subexpr in node.subexprs)
             expr = f"{left} {op} {right}"
@@ -313,47 +314,41 @@ class Formatter(ExpressionTransformer):
 
     @visit.register
     def _(self, node: ir.CompareOp):
-        left = (self.parenthesized(node.left)
-                if isinstance(node.left, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple))
-                else self.visit(node.left))
-        right = (self.parenthesized(node.right)
-                 if isinstance(node.right, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple))
-                 else self.visit(node.right))
+        left, right = (self.parenthesized(subexpr)
+                       if isinstance(subexpr, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple))
+                       else self.visit(subexpr)
+                       for subexpr in node.subexprs)
         expr = f"{left} {node.op} {right}"
         return expr
 
     @visit.register
     def _(self, node: ir.AND):
-        operands = []
-        for operand in node.subexprs:
-            formatted = (self.parenthesized(operand)
-                         if isinstance(operand, (ir.AND, ir.OR, ir.Select)) else self.visit(operand))
-            operands.append(formatted)
-        expr = " && ".join(operand for operand in operands)
+        expr = " && ".join(self.parenthesized(operand)
+                           if isinstance(operand, (ir.AND, ir.OR, ir.Select))
+                           else self.visit(operand)
+                           for operand in node.subexprs)
         return expr
 
     @visit.register
     def _(self, node: ir.OR):
-        operands = []
-        for operand in node.subexprs:
-            formatted = self.parenthesized(operand) if isinstance(operand, ir.Select) else self.visit(operand)
-            operands.append(formatted)
-        expr = " || ".join(operand for operand in operands)
+        expr = " || ".join(self.parenthesized(operand) if isinstance(operand, ir.Select)
+                           else self.visit(operand)
+                           for operand in node.subexprs)
         return expr
 
     @visit.register
     def _(self, node: ir.NOT):
-        formatted = (self.parenthesized(node.operand) if isinstance(node.operand, (ir.AND, ir.OR, ir.Select))
+        formatted = (self.parenthesized(node.operand)
+                     if isinstance(node.operand, (ir.AND, ir.OR, ir.Select))
                      else self.visit(node.operand))
         expr = f"!{formatted}"
         return expr
 
     @visit.register
     def _(self, node: ir.TRUTH):
-        if isinstance(node.operand, ir.Subscript):
-            formatted = self.parenthesized(node.operand)
-        else:
-            formatted = self.visit(node.operand)
+        formatted = (self.parenthesized(node.operand)
+                     if isinstance(node.operand, ir.Subscript)
+                     else self.visit(node.operand))
         formatted = f"(bool){formatted}"
         return formatted
 
@@ -377,15 +372,9 @@ class Formatter(ExpressionTransformer):
     @visit.register
     def _(self, node: ir.UnaryOp):
         op = node.op
-        operand = self.visit(node.operand)
-        if isinstance(node.operand, ir.BinOp) and not node.operand.in_place:
-            if node.operand.op != "**":
-                operand = self.parenthesized(operand)
-        elif isinstance(node.operand, (ir.UnaryOp, ir.BoolOp, ir.Select)):
-            # if we have an unfolded double unary expression such as --,
-            # '--expr' would be correct but it's visually jarring. Adding
-            # unnecessary parentheses makes it '-(-expr)'.
-            operand = self.parenthesized(operand)
+        operand = (self.parenthesized(node.operand)
+                   if (isinstance(node.operand, ir.BinOp) and node.operand.op != "**")
+                   else self.visit(node.operand))
         expr = f"{op}{operand}"
         return expr
 
