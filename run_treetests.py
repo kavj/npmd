@@ -111,9 +111,10 @@ for i, t in enumerate(tests):
     print(src)
     print("\n\nOUTPUT\n\n")
     types = uws_types.get(t, {})
-    try:
-        module = driver.compile_module(filepath, types, print_result=True)
-    except CompilerError as e:
-        msg = f"Error in module: {filepath}"
-        raise Exception(msg) from e
+    # try:
+    module = driver.compile_module(filepath, types, print_result=True)
+    # except CompilerError as e:
+    #    pass
+        # msg = f"Error in module: {filepath}"
+        # raise Exception(msg) from e
     print('\n\n\n')
