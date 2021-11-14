@@ -12,7 +12,7 @@ import type_resolution as tr
 from errors import CompilerError
 from pretty_printing import binop_ordering
 from symbol_table import symbol, symbol_table
-from utils import extract_name
+from utils import extract_name, wrap_input
 from visitor import ExpressionTransformer, StmtVisitor
 
 """
@@ -455,11 +455,22 @@ class ModuleCodeGen(StmtVisitor):
     def function_context(self, symbols):
         assert self.symbols is None
         self.symbols = symbols
+        self._declared = set()
         yield
         self.symbols = None
 
+    def declare(self, name):
+        name = wrap_input(name)
+        if isinstance(name, ir.NameRef):
+            self._declared.add(name)
+
+    def declared(self, name):
+        return name in self._declared
+
     def __call__(self, node, symbols: symbol_table):
         with self.function_context(symbols):
+            for arg in symbols.arguments:
+                self.declare(arg.name)
             self.visit(node)
 
     @singledispatchmethod
@@ -481,9 +492,11 @@ class ModuleCodeGen(StmtVisitor):
             msg = f"Cannot cast type {rhs_type} to type {lhs_type} on assignment: line {node.pos.line_begin}."
             raise CompilerError(msg)
         if node.in_place:
+            if isinstance(node.target, ir.NameRef):
+                assert node.target in self.declared
             # already declared or compiler error
-            stmt = f"{self.visit(node.left)} {node.op} {self.visit(node.right)};"
-        elif self.symbols.is_impl_name(node.target):
+            stmt = f"{self.visit(node.value)};"
+        elif not self.declared:
             ctype_name = get_ctype_name(lhs_type)
             target = f"{ctype_name} {self.format(node.target)}"
             value = self.format(node.value)
@@ -529,9 +542,12 @@ class ModuleCodeGen(StmtVisitor):
         assert isinstance(node.iterable, (ir.AffineSeq, ir.Reversed))
         # check for unit step
         target = self.format(node.target)
-        if isinstance(node.target, ir.NameRef) and self.symbols.is_impl_name(node.target):
+        if isinstance(node.target, ir.NameRef) and not self.declared(node.target):
+            self.declare(node.target)
             type_ = get_ctype_name(self.symbols.check_type(node.target))
-            target = f"{type_} {target}"
+            decl = f"{type_} {target}"
+        else:
+            decl = target
         # check whether we can use ++ op
         # insufficient support for reversed() thus far.
         if node.iterable.step == ir.One:
@@ -542,7 +558,7 @@ class ModuleCodeGen(StmtVisitor):
         start = self.format(node.iterable.start)
         stop = self.format(node.iterable.stop)
         # Todo: should declare symbol here..
-        cond = f"for({target} = {start}; {target} < {stop}; {step_expr})"
+        cond = f"for({decl} = {start}; {target} < {stop}; {step_expr})"
         self.printer.print_line(cond)
         with self.printer.curly_braces():
             self.visit(node.body)
@@ -564,7 +580,11 @@ class ModuleCodeGen(StmtVisitor):
 
     @visit.register
     def _(self, node: ir.Assign):
-        target = self.format(node.target)
+        if isinstance(node.target, ir.NameRef) and not self.declared(node.target):
+            type_ = get_ctype_name(self.symbols.check_type(node.target))
+            target = f"{type_} {self.format(node.target)}"
+        else:
+            target = self.format(node.target)
         if isinstance(node.value, ir.ArrayInit):
             # get array type for target
             # no support for assigning array allocation to NameRef

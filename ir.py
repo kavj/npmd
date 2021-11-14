@@ -244,7 +244,7 @@ class ArrayInit(Expression):
 class ArrayArg(Expression):
     ndims: int
     dtype: typing.Hashable
-    dims: typing.Optional[typing.Tuple[typing.Tuple[int, int],...]]
+    dims: typing.Optional[typing.Tuple[typing.Tuple[int, int], ...]]
     evol: typing.Optional[str]
 
     @property
@@ -370,12 +370,12 @@ class Subscript(Expression):
         yield self.slice
 
 
-@dataclass(frozen=True, init=True)
+@dataclass(frozen=True)
 class Min(Expression):
     left: ValueRef
     right: ValueRef
 
-    def __init__(self, left,right):
+    def __init__(self, left, right):
         assert isinstance(left, ValueRef)
         assert isinstance(right, ValueRef)
         object.__setattr__(self, "left", left)
@@ -387,42 +387,28 @@ class Min(Expression):
         yield self.right
 
 
+@dataclass(frozen=True)
 class MinReduction(Expression):
+    values: typing.Union[typing.Set, typing.FrozenSet]
 
     def __init__(self, *values):
         if isinstance(values, set):
-            self._values = frozenset(values)
+            object.__setattr__(self, "values", set(values))
         else:
-            self._values = frozenset(*values)
-
-    @property
-    def values(self):
-        return self._values
+            object.__setattr__(self, "values", frozenset(*values))
 
     @property
     def subexprs(self):
-        for v in self._values:
+        for v in self.values:
             yield v
 
-    def __eq__(self, other):
-        return isinstance(other, ir.MaxReduction) and self.values == other.values
 
-    def __ne__(self, other):
-        return (not isinstance(other, ir.MaxReduction)) or self.values != other.values
-
-    def __hash__(self):
-        return hash(self._values)
-
-    def __str__(self):
-        return f"MinReduction({str(self._values)})"
-
-
-@dataclass(frozen=True, init=True)
+@dataclass(frozen=True)
 class Max(Expression):
     left: ValueRef
     right: ValueRef
 
-    def __init__(self, left,right):
+    def __init__(self, left, right):
         assert isinstance(left, ValueRef)
         assert isinstance(right, ValueRef)
         object.__setattr__(self, "left", left)
@@ -434,34 +420,20 @@ class Max(Expression):
         yield self.right
 
 
+@dataclass(frozen=True)
 class MaxReduction(Expression):
+    values: typing.Union[typing.Set, typing.FrozenSet]
 
     def __init__(self, *values):
         if isinstance(values, set):
-            self._values = frozenset(values)
+            object.__setattr__(self, "values", set(values))
         else:
-            self._values = frozenset(*values)
-
-    @property
-    def values(self):
-        return self._values
+            object.__setattr__(self, "values", frozenset(*values))
 
     @property
     def subexprs(self):
         for v in self._values:
             yield v
-
-    def __eq__(self, other):
-        return isinstance(other, ir.MaxReduction) and self.values == other.values
-
-    def __ne__(self, other):
-        return (not isinstance(other, ir.MaxReduction)) or self.values != other.values
-
-    def __hash__(self):
-        return hash(self._values)
-
-    def __str__(self):
-        return f"MaxReduction({str(self._values)})"
 
 
 @dataclass
@@ -911,11 +883,11 @@ class ForLoop(StmtBase):
 
 @dataclass(frozen=True)
 class ParallelLoop(StmtBase):
-   loop: ForLoop
+    loop: ForLoop
 
-   def __post_init__(self):
-       if not isinstance(loop, ForLoop):
-           raise CompilerError("Can only parallelize for loops.")
+    def __post_init__(self):
+        if not isinstance(loop, ForLoop):
+            raise CompilerError("Can only parallelize for loops.")
 
 
 @dataclass

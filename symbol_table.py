@@ -117,9 +117,6 @@ class symbol_table:
         name = extract_name(name)
         return self.symbols[name].type_
 
-    def get_arguments(self):
-        return {s for s in self.symbols if s.is_arg}
-
     def _get_name_mangler(self, prefix: str):
         # splitting by prefix helps avoids appending
         # large numbers in most cases

@@ -222,7 +222,9 @@ class TreeBuilder(ast.NodeVisitor):
         # single expression statement
         expr = self.visit(node.value)
         pos = extract_positional_info(node)
-        self.body.append(ir.SingleExpr(expr, pos))
+        # don't append single value references as statements
+        if not isinstance(expr, (ir.Constant, ir.NameRef, ir.Subscript)):
+            self.body.append(ir.SingleExpr(expr, pos))
 
     def visit_UnaryOp(self, node: ast.UnaryOp) -> ir.ValueRef:
         op = unary_ops.get(type(node.op))
