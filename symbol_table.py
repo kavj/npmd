@@ -77,21 +77,21 @@ class symbol_table:
 
     @property
     def from_source(self):
-        for s in self.symbols:
+        for s in self.symbols.values():
             if s.is_source_name:
                 yield s
 
     @property
     def source_locals(self):
-        for s in self.symbols:
-            if s.is_source_name and not s.is_arg:
-                yield s
+        for sym in self.symbols.values():
+            if sym.is_source_name and not sym.is_arg:
+                yield sym
 
     @property
     def arguments(self):
-        for s in self.symbols:
-            if s.is_arg:
-                yield s
+        for sym in self.symbols.values():
+            if sym.is_arg:
+                yield sym
 
     def declares(self, name):
         name = extract_name(name)
@@ -104,9 +104,14 @@ class symbol_table:
 
     def is_source_name(self, name):
         sym = self.lookup(name)
+        return (sym is not None
+                and sym.is_source_name)
+
+    def is_impl_name(self, name):
+        sym = self.lookup(name)
         if sym is None:
             return False
-        return sym.is_source_name
+        return not sym.is_source_name
 
     def check_type(self, name):
         name = extract_name(name)
@@ -133,14 +138,14 @@ class symbol_table:
             msg = f"Failed to retrieve a type for name {prefix_}."
             raise CompilerError(msg)
         gen = self._get_name_mangler(prefix_)
-        name = wrap_input(f"{prefix_}_{next(gen)}")
+        name = f"{prefix_}_{next(gen)}"
         while self.declares(name):
-            name = wrap_input(f"{prefix_}_{next(gen)}")
+            name = f"{prefix_}_{next(gen)}"
         sym = symbol(name, type_, is_arg=False, is_source_name=False)
         self.symbols[name] = sym
         # The input name may require mangling for uniqueness.
         # Return the name as it is registered.
-        return name
+        return wrap_input(name)
 
 
 def build_module_symbol_table(src, name):

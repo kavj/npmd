@@ -89,7 +89,7 @@ def get_ctype_tag(type_):
 
 def mangle_func_name(basename, arg_types, modname):
     tag = "".join(get_ctype_tag(t) for t in arg_types)
-    mangled_name = f"{modname}{basename}_{tag}"
+    mangled_name = f"{basename}_{tag}"
     return mangled_name
 
 
@@ -197,6 +197,9 @@ class Formatter(ExpressionTransformer):
     def parenthesized(self, node):
         expr = self.visit(node)
         return f"({expr})"
+
+    def __call__(self, node):
+        return self.visit(node)
 
     @singledispatchmethod
     def visit(self, node):
@@ -423,10 +426,10 @@ class BoilerplateWriter:
         # no keyword support..
         self.printer.print_line(f"static PyMethodDef {self.modname}Methods[] =")
         with self.printer.curly_braces(semicolon=True):
-            for base, mangled in funcs:
-                line = f"\"{base}\", {mangled}, METH_VARARGS, NULL"
-                with_braces = f"{'{'}{line}{'}'}"
-                self.printer.print_line(with_braces)
+            last = len(funcs) - 1
+            for index, (base, mangled) in enumerate(funcs):
+                line = f"{'{'}\"{base}\", {mangled}, METH_VARARGS, NULL{'}'},"
+                self.printer.print_line(line)
             # sentinel ending entry
             self.printer.print_line("{NULL, NULL, 0, NULL}")
 
@@ -477,15 +480,20 @@ class ModuleCodeGen(StmtVisitor):
         if lhs_type != rhs_type:
             msg = f"Cannot cast type {rhs_type} to type {lhs_type} on assignment: line {node.pos.line_begin}."
             raise CompilerError(msg)
-        target = self.format(node.target)
-        value = self.format(node.value)
         if node.in_place:
-            self.printer.print_line(f"{value};")
-        else:
-            # For now, assume C99 back end,
-            # compliant with PEP 7
+            # already declared or compiler error
+            stmt = f"{self.visit(node.left)} {node.op} {self.visit(node.right)};"
+        elif self.symbols.is_impl_name(node.target):
+            ctype_name = get_ctype_name(lhs_type)
+            target = f"{ctype_name} {self.format(node.target)}"
+            value = self.format(node.value)
             stmt = f"{target} = {value};"
-            self.printer.print_line(stmt)
+        else:
+            # already declared
+            target = self.format(node.target)
+            value = self.format(node.value)
+            stmt = f"{target} = {value};"
+        self.printer.print_line(stmt)
 
     def visit_elif(self, node: ir.IfElse):
         test = self.format(node.test)
@@ -521,6 +529,9 @@ class ModuleCodeGen(StmtVisitor):
         assert isinstance(node.iterable, (ir.AffineSeq, ir.Reversed))
         # check for unit step
         target = self.format(node.target)
+        if isinstance(node.target, ir.NameRef) and self.symbols.is_impl_name(node.target):
+            type_ = get_ctype_name(self.symbols.check_type(node.target))
+            target = f"{type_} {target}"
         # check whether we can use ++ op
         # insufficient support for reversed() thus far.
         if node.iterable.step == ir.One:
@@ -628,7 +639,13 @@ def codegen(build_dir, funcs, symbols, modname):
             sig = f"{return_type} {mangled_name}({arg_str})"
             printer.print_line(sig)
             with printer.curly_braces():
-                mod_builder(func.body, symbols)
+                # print decls
+                decls = ", ".join(f"{get_ctype_name(sym.type_)} {sym.name}"
+                                  for sym in func_symbols.source_locals)
+                if decls:
+                    # skip if no local variables declared in source
+                    printer.print_line(f"{decls};")
+                mod_builder(func.body, func_symbols)
             methods.append((basename, mangled_name))
             printer.blank_lines(count=2)
         bp_gen.gen_method_table(methods)
