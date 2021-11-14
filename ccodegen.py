@@ -509,7 +509,7 @@ class ModuleCodeGen(StmtVisitor):
         self.printer.print_line(stmt)
 
     def visit_elif(self, node: ir.IfElse):
-        test = self.format(node.test)
+        test = f"else if({self.format(node.test)})"
         self.printer.print_line(test)
         with self.printer.curly_braces():
             self.visit(node.if_branch)
@@ -632,6 +632,41 @@ class ModuleCodeGen(StmtVisitor):
             self.printer.print_line("return;")
 
 
+def format_string_from_type():
+    # get workable C type
+    pass
+
+
+def verify_array_type():
+    # insert runtime code to check that an array object is the type specified
+    pass
+
+
+def make_py_wrapper(modname, func, symbols, sig, printer):
+    mangled_name, arg_types = sig
+    wrapper_name = f"{modname}_{func.name}"
+    # use standard int when aiming for 32 bits,
+    # coerce as necessary
+    type_map = {tr.Int32: "i", tr.Int64: "L", tr.Float32: "f", tr.Float64: "d"}
+
+    # get type string
+    format_strs = []
+    for arg in func.args:
+        type_ = symbols.check_type(arg)
+        if isinstance(type_, ir.ArrayType):
+            format_strs.append("O")
+        else:
+            format_strs.append(type_map[type_])
+    decode = "".join(fs for fs in format_strs)
+
+    with printer.curly_braces():
+        header = f"PyObject* {wrapper_name}(PyObject* self, PyObject* args)"
+        arg_types = tuple((arg,symbols.check_type(arg)) for arg in func.args)
+
+
+
+# This needs to distinguish interpreter facing from internal
+
 def codegen(build_dir, funcs, symbols, modname):
     file_path = pathlib.Path(build_dir).joinpath(f"{modname}Module.c")
     printer = Emitter(file_path)
@@ -651,6 +686,8 @@ def codegen(build_dir, funcs, symbols, modname):
             func_symbols = symbols.get(basename)
             mangled_name, arg_types = make_func_sig(func, func_symbols, modname)
             # return_type = get_return_type(func)
+            # Generate python wrapper
+            wrapper_name = f"{modname}_{basename}"
             func_lookup[basename] = (mangled_name, arg_types)
             # return_type = get_ctype_name(return_type)
             return_type = "void"  # temporary standin..
