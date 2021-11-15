@@ -90,6 +90,54 @@ def rewrite_pow(expr):
         return expr
 
 
+class ReductionToSelect(ExpressionTransformer):
+    """
+    Turn min, max, min reduction, max reduction into easily printable expression types.
+    """
+
+    def __call__(self, node):
+        return self.visit(node)
+
+    def serialize_reduction(self, node, op):
+        subexprs = node.subexprs
+        first_term = self.visit(next(subexprs))
+        nested = first_term
+        # turn this into a nesting of single min ops
+        for subexpr in subexprs:
+            subexpr = self.visit(subexpr)
+            predicate = ir.CompareOp(nested, subexpr, op)
+            nested = ir.Select(predicate, nested, subexpr)
+        # if we are left with a one term expression,
+        # then this is either an error or should have been tagged as an array reduction
+        if nested == first_term:
+            msg = f"single term reduction is ambiguous and should not have made it to this point {first_term}"
+            raise RuntimeError(msg)
+        return nested
+
+    @singledispatchmethod
+    def visit(self, node):
+        return super().visit(node)
+
+    @visit.register
+    def _(self, node: ir.Min):
+        interm = super().visit(node)
+        return self.serialize_reduction(interm, "<")
+
+    @visit.register
+    def _(self, node: ir.Max):
+        interm = super().visit(node)
+        return self.serialize_reduction(interm, ">")
+
+    @visit.register
+    def _(self, node: ir.MinReduction):
+        interm = super().visit(node)
+        return self.serialize_reduction(interm, "<")
+
+    @visit.register
+    def _(self, node: ir.MaxReduction):
+        return self.serialize_reduction(node, ">")
+
+
 class MinMaxSimplifier(ExpressionTransformer):
 
     @singledispatchmethod

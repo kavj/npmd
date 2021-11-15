@@ -103,8 +103,11 @@ uws_types = {"test_forifcont.py": {"something":
 
 
 for i, t in enumerate(tests):
+
     print(t)
     filepath = pathlib.Path("tests").joinpath(t)
+    if filepath.name != "test_forifcont.py":
+        continue
     print("\n\nSOURCE\n\n")
     with open(filepath) as reader:
         src = reader.read()

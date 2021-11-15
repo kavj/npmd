@@ -392,10 +392,13 @@ class MinReduction(Expression):
     values: typing.Union[typing.Set, typing.FrozenSet]
 
     def __init__(self, *values):
-        if isinstance(values, set):
-            object.__setattr__(self, "values", set(values))
+        if len(values) == 1:
+            values, = values
+            if isinstance(values, set):
+                values = frozenset(values)
+            object.__setattr__(self, "values", values)
         else:
-            object.__setattr__(self, "values", frozenset(*values))
+            object.__setattr__(self, "values", frozenset(v for v in values))
 
     @property
     def subexprs(self):
@@ -425,10 +428,13 @@ class MaxReduction(Expression):
     values: typing.Union[typing.Set, typing.FrozenSet]
 
     def __init__(self, *values):
-        if isinstance(values, set):
-            object.__setattr__(self, "values", set(values))
+        if len(values) == 1:
+            values, = values
+            if isinstance(values, set):
+                values = frozenset(values)
+            object.__setattr__(self, "values", values)
         else:
-            object.__setattr__(self, "values", frozenset(*values))
+            object.__setattr__(self, "values", frozenset(v for v in values))
 
     @property
     def subexprs(self):
@@ -749,8 +755,8 @@ class Select(Expression):
 
     @property
     def subexprs(self):
-        yield self.on_true
         yield self.predicate
+        yield self.on_true
         yield self.on_false
 
 

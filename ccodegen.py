@@ -10,6 +10,7 @@ import ir
 import type_resolution as tr
 
 from errors import CompilerError
+from lowering import ReductionToSelect
 from pretty_printing import binop_ordering
 from symbol_table import symbol, symbol_table
 from utils import extract_name, wrap_input
@@ -188,7 +189,11 @@ def else_is_elif(stmt: ir.IfElse):
 # Todo: we need lowering for overflow checked arithmetic. It might be better to provide most of this
 #       via a header.
 
+
 class Formatter(ExpressionTransformer):
+
+    def __init__(self):
+        self.transform_reduction = ReductionToSelect()
 
     def braced(self, node):
         expr = self.visit(node)
@@ -208,39 +213,13 @@ class Formatter(ExpressionTransformer):
 
     @visit.register
     def _(self, node: ir.MinReduction):
-        # save first
-        subexprs = node.subexprs
-        first_term = next(subexprs)
-        nested = first_term
-        # turn this into a nesting of single min ops
-        for subexpr in subexprs:
-            nested = ir.Min(nested, subexpr)
-        # if we are left with a one term expression,
-        # then this is either an error or should have been tagged as an array reduction
-        if nested == first_term:
-            msg = f"single term reduction is ambiguous and should not have made it to this point {first_term}"
-            raise RuntimeError(msg)
-        # format nested version
-        expr = self.visit(nested)
-        return expr
+        node = self.transform_reduction(node)
+        return self.visit(node)
 
     @visit.register
     def _(self, node: ir.MaxReduction):
-        # save first
-        subexprs = node.subexprs
-        first_term = next(subexprs)
-        nested = first_term
-        # turn this into a nesting of single min ops
-        for subexpr in subexprs:
-            nested = ir.Max(nested, subexpr)
-        # if we are left with a one term expression,
-        # then this is either an error or should have been tagged as an array reduction
-        if nested == first_term:
-            msg = f"single term reduction is ambiguous and should not have made it to this point {first_term}"
-            raise RuntimeError(msg)
-        # format nested version
-        expr = self.visit(nested)
-        return expr
+        node = self.transform_reduction(node)
+        return node
 
     @visit.register
     def _(self, node: ir.SingleDimRef):
@@ -248,23 +227,17 @@ class Formatter(ExpressionTransformer):
         arr = self.visit(node.base)
         return f"PyArray_DIM({arr}, {dim})"
 
-    @visit.register
-    def _(self, node: ir.Max):
-        left, right = (self.parenthesized(subexpr)
-                       if isinstance(subexpr, (ir.Min, ir.Max, ir.Select))
-                       else self.visit(subexpr)
-                       for subexpr in node.subexprs)
-        expr = f"{left} > {right} ? {left} : {right}"
-        return expr
+    # @visit.register
+    # def _(self, node: ir.Max):
+    #    left, right = node.subexprs
+    #    expr = ir.Select(ir.CompareOp(left, right, ">"), left, right)
+    #    return self.visit(expr)
 
-    @visit.register
-    def _(self, node: ir.Min):
-        left, right = (self.parenthesized(subexpr)
-                       if isinstance(subexpr, (ir.Min, ir.Max, ir.Select))
-                       else self.visit(subexpr)
-                       for subexpr in node.subexprs)
-        expr = f"{left} < {right} ? {left} : {right}"
-        return expr
+    # @visit.register
+    # def _(self, node: ir.Min):
+    #    left, right = node.subexprs
+    #    expr = ir.Select(ir.CompareOp(left, right, "<"), left, right)
+    #    return self.visit(expr)
 
     @visit.register
     def _(self, node: ir.Select):
@@ -307,9 +280,9 @@ class Formatter(ExpressionTransformer):
         else:
             op_ordering = binop_ordering[op]
             left, right = (self.parenthesized(subexpr)
-                           if ((isinstance(subexpr, ir.BinOp)
-                                and op_ordering < binop_ordering[subexpr.op])
-                                or isinstance(subexpr, (ir.BinOp, ir.CompareOp, ir.Select)))
+                           if ((isinstance(subexpr, ir.BinOp) and op_ordering < binop_ordering[subexpr.op])
+                               or isinstance(subexpr, (ir.Min, ir.Max, ir.MinReduction, ir.MaxReduction,
+                                                       ir.CompareOp, ir.Select)))
                            else self.visit(subexpr)
                            for subexpr in node.subexprs)
             expr = f"{left} {op} {right}"
@@ -450,6 +423,7 @@ class ModuleCodeGen(StmtVisitor):
         self.format = Formatter()
         self.printer = printer
         self.symbols = None
+        self.reduction_transform = ReductionToSelect()
 
     @contextmanager
     def function_context(self, symbols):
@@ -556,9 +530,13 @@ class ModuleCodeGen(StmtVisitor):
             increm_by = self.format(node.iterable.step)
             step_expr = f"{target} += {increm_by}"
         start = self.format(node.iterable.start)
-        stop = self.format(node.iterable.stop)
+        # forming the expression here avoids missing parentheses
+        stop_cond = self.reduction_transform(node.iterable.stop)
+        stop_expr = self.format(ir.CompareOp(node.target, stop_cond, "<"))
+        # stop = ir.CompareOp(node.target, node.iterable.stop, "<")
+        # stop_expr = self.format(stop)
         # Todo: should declare symbol here..
-        cond = f"for({decl} = {start}; {target} < {stop}; {step_expr})"
+        cond = f"for({decl} = {start}; {stop_expr}; {step_expr})"
         self.printer.print_line(cond)
         with self.printer.curly_braces():
             self.visit(node.body)
@@ -661,8 +639,7 @@ def make_py_wrapper(modname, func, symbols, sig, printer):
 
     with printer.curly_braces():
         header = f"PyObject* {wrapper_name}(PyObject* self, PyObject* args)"
-        arg_types = tuple((arg,symbols.check_type(arg)) for arg in func.args)
-
+        arg_types = tuple((arg, symbols.check_type(arg)) for arg in func.args)
 
 
 # This needs to distinguish interpreter facing from internal
