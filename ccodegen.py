@@ -137,8 +137,15 @@ class Emitter:
             self.line_buffer.append("")
 
     @contextmanager
-    def ifdef_region(self, cond):
+    def ifdef_directive(self, cond):
         line = f"#ifdef {cond}"
+        self.print_line(line)
+        yield
+        self.print_line("#endif")
+
+    @contextmanager
+    def ifndef_directive(self, cond):
+        line = f"#ifndef {cond}"
         self.print_line(line)
         yield
         self.print_line("#endif")
@@ -192,9 +199,6 @@ def else_is_elif(stmt: ir.IfElse):
 
 class Formatter(ExpressionTransformer):
 
-    def __init__(self):
-        self.transform_reduction = ReductionToSelect()
-
     def braced(self, node):
         expr = self.visit(node)
         return f"{expr}"
@@ -213,13 +217,35 @@ class Formatter(ExpressionTransformer):
 
     @visit.register
     def _(self, node: ir.MinReduction):
-        node = self.transform_reduction(node)
-        return self.visit(node)
+        subexprs = node.subexprs
+        first_term = self.visit(next(subexprs))
+        nested = first_term
+        # turn this into a nesting of single min ops
+        for subexpr in subexprs:
+            subexpr = self.visit(subexpr)
+            nested = f"min({nested}, {subexpr})"
+        # if we are left with a one term expression,
+        # then this is either an error or should have been tagged as an array reduction
+        if nested == first_term:
+            msg = f"single term reduction is ambiguous and should not have made it to this point {first_term}"
+            raise RuntimeError(msg)
+        return nested
 
     @visit.register
     def _(self, node: ir.MaxReduction):
-        node = self.transform_reduction(node)
-        return node
+        subexprs = node.subexprs
+        first_term = self.visit(next(subexprs))
+        nested = first_term
+        # turn this into a nesting of single min ops
+        for subexpr in subexprs:
+            subexpr = self.visit(subexpr)
+            nested = f"max({nested}, {subexpr})"
+        # if we are left with a one term expression,
+        # then this is either an error or should have been tagged as an array reduction
+        if nested == first_term:
+            msg = f"single term reduction is ambiguous and should not have made it to this point {first_term}"
+            raise RuntimeError(msg)
+        return nested
 
     @visit.register
     def _(self, node: ir.SingleDimRef):
@@ -227,17 +253,19 @@ class Formatter(ExpressionTransformer):
         arr = self.visit(node.base)
         return f"PyArray_DIM({arr}, {dim})"
 
-    # @visit.register
-    # def _(self, node: ir.Max):
-    #    left, right = node.subexprs
-    #    expr = ir.Select(ir.CompareOp(left, right, ">"), left, right)
-    #    return self.visit(expr)
+    @visit.register
+    def _(self, node: ir.Max):
+        left, right = node.subexprs
+        left = self.visit(left)
+        right = self.visit(right)
+        return f"max({left}, {right})"
 
-    # @visit.register
-    # def _(self, node: ir.Min):
-    #    left, right = node.subexprs
-    #    expr = ir.Select(ir.CompareOp(left, right, "<"), left, right)
-    #    return self.visit(expr)
+    @visit.register
+    def _(self, node: ir.Min):
+        left, right = node.subexprs
+        left = self.visit(left)
+        right = self.visit(right)
+        return f"min({left}, {right})"
 
     @visit.register
     def _(self, node: ir.Select):
@@ -423,7 +451,6 @@ class ModuleCodeGen(StmtVisitor):
         self.format = Formatter()
         self.printer = printer
         self.symbols = None
-        self.reduction_transform = ReductionToSelect()
 
     @contextmanager
     def function_context(self, symbols):
@@ -531,12 +558,8 @@ class ModuleCodeGen(StmtVisitor):
             step_expr = f"{target} += {increm_by}"
         start = self.format(node.iterable.start)
         # forming the expression here avoids missing parentheses
-        stop_cond = self.reduction_transform(node.iterable.stop)
-        stop_expr = self.format(ir.CompareOp(node.target, stop_cond, "<"))
-        # stop = ir.CompareOp(node.target, node.iterable.stop, "<")
-        # stop_expr = self.format(stop)
-        # Todo: should declare symbol here..
-        cond = f"for({decl} = {start}; {stop_expr}; {step_expr})"
+        stop_cond = self.format(node.iterable.stop)
+        cond = f"for({decl} = {start}; {target} < {stop_cond}; {step_expr})"
         self.printer.print_line(cond)
         with self.printer.curly_braces():
             self.visit(node.body)
@@ -655,6 +678,10 @@ def codegen(build_dir, funcs, symbols, modname):
     # get return type
     with printer.flush_on_exit():
         bp_gen.gen_source_top(sys_headers)
+        with printer.ifndef_directive("min"):
+            printer.print_line("#define min(x,y) (x < y ? x : y)")
+        with printer.ifndef_directive("max"):
+            printer.print_line("#define max(x,y) (x > y ? x : y)")
         printer.blank_lines(count=2)
         bp_gen.gen_module_init()
         printer.blank_lines(count=2)
