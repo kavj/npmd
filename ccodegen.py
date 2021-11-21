@@ -269,11 +269,9 @@ class Formatter(ExpressionTransformer):
 
     @visit.register
     def _(self, node: ir.Select):
-        predicate, on_true, on_false = (self.parenthesized(subexpr)
-                                        if isinstance(subexpr, (ir.Select, ir.Tuple))
-                                        else self.visit(subexpr)
+        predicate, on_true, on_false = (self.visit(subexpr)
                                         for subexpr in node.subexprs)
-        expr = f"{predicate} ? {on_true} : {on_false}"
+        expr = f"select({on_true}, {on_false}, {predicate})"
         return expr
 
     @visit.register
@@ -309,8 +307,7 @@ class Formatter(ExpressionTransformer):
             op_ordering = binop_ordering[op]
             left, right = (self.parenthesized(subexpr)
                            if ((isinstance(subexpr, ir.BinOp) and op_ordering < binop_ordering[subexpr.op])
-                               or isinstance(subexpr, (ir.Min, ir.Max, ir.MinReduction, ir.MaxReduction,
-                                                       ir.CompareOp, ir.Select)))
+                               or isinstance(subexpr, ir.CompareOp))
                            else self.visit(subexpr)
                            for subexpr in node.subexprs)
             expr = f"{left} {op} {right}"
@@ -319,7 +316,7 @@ class Formatter(ExpressionTransformer):
     @visit.register
     def _(self, node: ir.CompareOp):
         left, right = (self.parenthesized(subexpr)
-                       if isinstance(subexpr, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple))
+                       if isinstance(subexpr, (ir.BoolOp, ir.CompareOp))
                        else self.visit(subexpr)
                        for subexpr in node.subexprs)
         expr = f"{left} {node.op} {right}"
@@ -328,22 +325,21 @@ class Formatter(ExpressionTransformer):
     @visit.register
     def _(self, node: ir.AND):
         expr = " && ".join(self.parenthesized(operand)
-                           if isinstance(operand, (ir.AND, ir.OR, ir.Select))
+                           if isinstance(operand, (ir.AND, ir.OR))
                            else self.visit(operand)
                            for operand in node.subexprs)
         return expr
 
     @visit.register
     def _(self, node: ir.OR):
-        expr = " || ".join(self.parenthesized(operand) if isinstance(operand, ir.Select)
-                           else self.visit(operand)
+        expr = " || ".join(self.visit(operand)
                            for operand in node.subexprs)
         return expr
 
     @visit.register
     def _(self, node: ir.NOT):
         formatted = (self.parenthesized(node.operand)
-                     if isinstance(node.operand, (ir.AND, ir.OR, ir.Select))
+                     if isinstance(node.operand, (ir.AND, ir.OR))
                      else self.visit(node.operand))
         expr = f"!{formatted}"
         return expr
@@ -422,6 +418,7 @@ class BoilerplateWriter:
             self.printer.print_line("if(mod == NULL)")
             with self.printer.curly_braces():
                 self.printer.print_line("return NULL;")
+            self.printer.print_line("return mod;")
 
     def gen_method_table(self, funcs):
         # no keyword support..
@@ -442,6 +439,29 @@ class BoilerplateWriter:
             self.printer.print_line("NULL,")  # no module docstring support
             self.printer.print_line("-1,")  # no support for per interpreter state tracking
             self.printer.print_line(f"{self.modname}Methods")  # method table
+
+    def convert_py_obj_to_array(self, obj, target):
+        # unwind result of PyArg_ParseTuple
+        # need a simple call to validate this, too much to do inline
+
+        pass
+
+    def gen_decref(self, target):
+        #
+        pass
+
+    def error_if_true(self, cond):
+        pass
+
+    def error_if_false(self, cond):
+        pass
+
+    def check_flags(self, target):
+        # This should be a call, not inline
+        pass
+
+    def get_ptr(self, target):
+        pass
 
 
 class ModuleCodeGen(StmtVisitor):
@@ -648,7 +668,7 @@ def make_py_wrapper(modname, func, symbols, sig, printer):
     wrapper_name = f"{modname}_{func.name}"
     # use standard int when aiming for 32 bits,
     # coerce as necessary
-    type_map = {tr.Int32: "i", tr.Int64: "L", tr.Float32: "f", tr.Float64: "d"}
+    type_map = {tr.Int32: "i", tr.Int64: "L", tr.Float32: "f", tr.Float64: "d", ir.ArrayType: "O"}
 
     # get type string
     format_strs = []
@@ -659,10 +679,25 @@ def make_py_wrapper(modname, func, symbols, sig, printer):
         else:
             format_strs.append(type_map[type_])
     decode = "".join(fs for fs in format_strs)
-
     with printer.curly_braces():
         header = f"PyObject* {wrapper_name}(PyObject* self, PyObject* args)"
-        arg_types = tuple((arg, symbols.check_type(arg)) for arg in func.args)
+        # arg_types = tuple((arg, symbols.check_type(arg)) for arg in func.args)
+        # declare arguments
+        decls = ()
+        self.printer.print_line(decls)
+        self.printer.print_line(f"if(PyArg_ParseTuple(args, {decode})) < 0)")
+        with self.printer.curly_braces():
+            self.printer.print_line("return NULL;")
+        # need return type
+
+
+@contextmanager
+def ensure_decrefs(printer):
+    increfs = []
+    writer = BoilerplateWriter(printer, "SHOULD_NOT_APPEAR")
+    yield increfs
+    for ref in increfs:
+        writer.gen_decref(ref)
 
 
 # This needs to distinguish interpreter facing from internal
@@ -678,10 +713,14 @@ def codegen(build_dir, funcs, symbols, modname):
     # get return type
     with printer.flush_on_exit():
         bp_gen.gen_source_top(sys_headers)
+        # These are just way too difficult to read as inline ternary ops, and their precedence
+        # flips completely when used with intrinsics, making this seem like a sensible option
         with printer.ifndef_directive("min"):
             printer.print_line("#define min(x,y) (x < y ? x : y)")
         with printer.ifndef_directive("max"):
             printer.print_line("#define max(x,y) (x > y ? x : y)")
+        with printer.ifndef_directive("select"):
+            printer.print_line("#def select(x, y, predicate) (predicate ? x : y)")
         printer.blank_lines(count=2)
         bp_gen.gen_module_init()
         printer.blank_lines(count=2)
