@@ -962,3 +962,32 @@ class WhileLoop(StmtBase):
 
     def __post_init__(self):
         assert isinstance(self.test, ValueRef)
+
+
+@dataclass(frozen=True)
+class gather(Expression):
+    array: ValueRef
+    stride: ValueRef
+    count: IntConst
+
+    def subexprs(self):
+        yield self.array
+        yield self.stride
+
+
+@dataclass(frozen=True)
+class unroll(ir.Expression):
+    array: ValueRef
+    count: IntConst
+
+    def subexprs(self):
+        yield self.array
+
+
+@dataclass(frozen=True)
+class interleave(ir.Expression):
+    arrays: typing.Tuple[ir.ValueRef, ...]
+
+    def subexprs(self):
+        for a in self.arrays:
+            yield a

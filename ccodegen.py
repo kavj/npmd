@@ -691,15 +691,6 @@ def make_py_wrapper(modname, func, symbols, sig, printer):
         # need return type
 
 
-@contextmanager
-def ensure_decrefs(printer):
-    increfs = []
-    writer = BoilerplateWriter(printer, "SHOULD_NOT_APPEAR")
-    yield increfs
-    for ref in increfs:
-        writer.gen_decref(ref)
-
-
 # This needs to distinguish interpreter facing from internal
 
 def codegen(build_dir, funcs, symbols, modname):

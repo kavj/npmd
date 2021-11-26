@@ -3,16 +3,38 @@ import itertools
 import keyword
 import numbers
 
-from functools import singledispatch
+from contextlib import contextmanager
+from functools import singledispatch, singledispatchmethod
 
 import ir
 from errors import CompilerError
-from visitor import walk
+from visitor import walk, StmtVisitor
 
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
 
 
 signed_integer_range = {p: (-(2**(p-1)-1), 2**(p-1)-1) for p in (8, 32, 64)}
+
+
+class ReturnGather(StmtVisitor):
+
+    @contextmanager
+    def tracking(self):
+        self.exprs = set()
+
+    def __call__(self, entry):
+        with self.tracking():
+            self.visit(entry)
+            exprs = self.exprs
+        return exprs
+
+    @singledispatchmethod
+    def visit(self, node):
+        super().visit(node)
+
+    @visit.register
+    def _(self, node: ir.Return):
+        self.exprs.add(node.value)
 
 
 def get_expr_parameters(expr):
