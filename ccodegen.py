@@ -44,6 +44,7 @@ scalar_type_mangling = {
     tr.BoolType: "b8"
 }
 
+
 scalar_type_map = {tr.Int32: "int32_t",
                    tr.Int64: "int64_t",
                    tr.Float32: "float",
@@ -51,6 +52,12 @@ scalar_type_map = {tr.Int32: "int32_t",
                    tr.Predicate32: "bool",
                    tr.Predicate64: "bool",
                    tr.BoolType: "bool"}
+
+
+npy_scalar_type_map = {tr.Int32: "npy_int32",
+                       tr.Int64: "npy_int64",
+                       tr.Float32: "float",
+                       tr.Float64: "double"}
 
 
 def get_ctype_name(type_):

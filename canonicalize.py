@@ -8,7 +8,7 @@ import ir
 import type_resolution as tr
 from errors import CompilerError
 from utils import extract_name, wrap_input
-from visitor import StmtTransformer
+from visitor import StmtVisitor, StmtTransformer
 
 
 def type_from_numpy_type(t: type):
@@ -166,6 +166,22 @@ class NormalizePaths(StmtTransformer):
                     if isinstance(stmt, (ir.Break, ir.Continue, ir.Return)):
                         break  # remaining statements are unreachable
         return repl
+
+
+class ViewCheck(StmtVisitor):
+    # check for view violations, eg derived from different parameters or escape from scope
+    # check uniformity, that is that view parameters don't depend data that varies across
+    # consecutive calls
+    pass
+
+
+class ViewInlining(StmtTransformer):
+    # Make explicit assignments for step and stride offset with respect to parent view
+    # parameters, so if   c is view of b is a view of a, then we would have offsets stored
+    # for b, and stride(c) == b_stride * c_stride, and offset(c) == b_offset + c_offset
+    # whenever these are not the base 0,1 values.
+    def __call__(self, node):
+        return self.visit(node)
 
 
 class CallSpecialize:
