@@ -1,112 +1,256 @@
+#include<Python.h>
+#include<numpy/arrayobject.h>
+#include<numpy/ndarraytypes.h>
+#include<stdlib.h>
+#include<stdbool.h>
 #include "npmd_utils.h"
 
 
-int dim_counts_match(PyArrayObject** arrs, int count){
-    if(count < 1){
-       return -1;
+PyArrayObject* unwrap_array(PyObject* obj, int typenum, int expected_ndims) {
+    if (obj == NULL) {
+        PyErr_SetString(PyExc_TypeError, "Unknown error.\n");
+        return NULL;
     }
-    if(count < 2){
-       return 1;
+
+    PyArrayObject* out = (PyArrayObject*) PyArray_FROM_OTF(obj, typenum, NPY_ARRAY_CARRAY_RO);
+
+    if (out == NULL) {
+        // error should be already set
+        return NULL;
     }
-    PyArrayObject* first = arrs[0];
-    int dims = PyArray_NDIM(first);
-    // check for identical dim count
-    for(int i = 1; i < count; ++i){
-        if(dims != PyArray_NDIM(arrs[i])){
-            return 0;
-	}
+
+    int actual_ndims = PyArray_NDIM(out);
+
+    if (actual_ndims != expected_ndims) {
+        char buffer[128];
+        sprintf(buffer, "Dimension mismatch. Expected array with %d dimensions, received %d dimensions", expected_ndims, actual_ndims);
+        PyErr_SetString(PyExc_ValueError, buffer);
+        return NULL;
     }
-    return 1;
+
+    return out;
 }
 
 
-int dims_match(PyArrayObject** arrs, int count){
-    if(count < 1){
-       return -1;
+npy_float unwrap_float(PyObject* obj) {
+    if (obj == NULL) {
+        return -1;
     }
-    else if(count < 2){
-        return 1;
+    
+    if (PyArray_IsPythonNumber(obj)) {
+        // disambiguate type
+        if (PyFloat_CheckExact(obj)) {
+            npy_float out = (npy_float) PyFloat_AsDouble(obj);
+            return out;
+        }
+
+        else if (PyLong_Check(obj)) {
+            npy_float out = (npy_float) PyLong_AsDouble(obj);
+            return out;
+        }
+
+        else {  // don't coerce any other builtin type
+            PyErr_SetString(PyExc_TypeError, "Unsupported numerical python type for expected type float or np.float32.\n")
+            return -1;
+        }
     }
-    if(!dim_counts_match(arrs, count)){
-        return 0;
-    }
-    for(int i = 1; i < count; ++i){
-        for(int j = 0; j < dims; ++j){
-            int n = PyArray_DIM(first, j)
-            for(k = 1; k < count; ++k){
-                if(n != PyArray_DIM(arrs[k], j)){
-                    return 0;
-                }
+
+    else {
+        // Check for exact numpy type
+        if (PyArray_CheckScalar(obj)) {
+            PyArray_Descr* outcode = PyArray_DescrFromType(NPY_FLOAT);
+            if (descr == NULL) {
+                return -1;  // caught by PyErr_Occurred on return
             }
-	}
-    }
-    return 1;
-}
+            npy_float out = 0;
+            PyArray_CastScalarToCtype(obj, &out, outcode);
+            DECREF(outcode);
+            return out;
+        }
 
+        else {
 
-int max_dim_count(PyArrayObject** arrays, int count){
-    if(count < 1){
-        return -1;
-    }
-    int max_dims = PyArray_NDIM(arrays[0]);
-    for(int i = 1; i < count; ++i){
-        int dims = PyArray_NDIM(arrays[i]);
-	if(dims > max_dims){
-            max_dims = dims;
-	}
+            // not an array scalar
+            PyErr_SetString(PyExc_TypeError, "Unsupported type, expected numpy default float.");
+            return -1;
+        }
+
     }
 }
 
 
-int min_dim_count(PyArrayObject** arrays, int count){
-    if(count < 1){
+npy_double unwrap_double(PyObject* obj) {
+    if (obj == NULL) {
         return -1;
     }
-    int min_dims = PyArray_NDIM(arrays[0]);
-    for(int i = 1; i < count; ++i){
-        int dims = PyArray_NDIM(arrays[i]);
-	if(dims < min_dims){
-            min_dims = dims;
-	}
+
+    if (PyArray_IsPythonNumber(obj)) {
+        // disambiguate type
+        if (PyFloat_CheckExact(obj)) {
+            npy_double out = PyFloat_AsDouble(obj);
+            return out;
+        }
+
+        else if (PyLong_Check(obj)) {
+            npy_double out = PyLong_AsDouble(obj);
+            return out;
+        }
+
+        else {  // don't coerce any other builtin type
+            PyErr_SetString(PyExc_TypeError, "Unsupported numerical python type for expected type float or np.float32.\n")
+            return -1;
+        }
     }
-    return min_dims;
+
+    else {
+        // Check for exact numpy type
+        if (PyArray_CheckScalar(obj)) {
+            PyArray_Descr* outcode = PyArray_DescrFromType(NPY_DOUBLE);
+            if (descr == NULL) {
+                return -1;  // caught by PyErr_Occurred on return
+            }
+            npy_double out = 0;
+            PyArray_CastScalarToCtype(obj, &out, outcode);
+            DECREF(outcode);
+            return out;
+        }
+
+        else {
+
+            // not an array scalar
+            PyErr_SetString(PyExc_TypeError, "Unsupported type, expected numpy double.");
+            return -1;
+        }
+
+    }
+
 }
 
 
-int can_simple_broadcast(PyArrayObject* left, PyArrayObject* right){
-    if(left == NULL){
+npy_int unwrap_int(PyObject* obj) {
+    if (obj == NULL) {
         return -1;
     }
-    else if (right == NULL){
-        return -1;
+
+    if (PyArray_IsPythonNumber(obj)) {
+        // disambiguate type
+        if (PyFloat_CheckExact(obj)) {
+            npy_int out = (npy_int)PyFloat_AsDouble(obj);
+            return (npy_int) out;
+        }
+
+        else if (PyLong_Check(obj)) {
+            npy_int out = (npy_int)PyLong_AsLong(obj);
+            return out;
+        }
+
+        else {  // don't coerce any other builtin type
+            PyErr_SetString(PyExc_TypeError, "Unsupported numerical python type for expected type float or np.float32.\n")
+            return -1;
+        }
     }
-    int left_ndims = PyArray_NDIM(left);
-    int right_ndims = PyArray_NDIM(right);
-    int lim = left_ndims >= right_ndims ? left_ndims : right_ndims;
-    for(int i = 1; i <= right_ndims; ++i){
-        npy_intp dim_left = PyArray_DIM(left, left_ndims - i);
-        npy_intp dim_right = PyArray_DIM(right, right_ndims - i);
-        assert(dim_left != NULL);
-	assert(dim_right != NULL);
-	if(*dim_left != *dim_right){
-            return 0;
-	}
+
+    else {
+        // Check for exact numpy type
+        if (PyArray_CheckScalar(obj)) {
+            PyArray_Descr* outcode = PyArray_DescrFromType(NPY_INT);
+            if (descr == NULL) {
+                return -1;  // caught by PyErr_Occurred on return
+            }
+            npy_int out = 0;
+            PyArray_CastScalarToCtype(obj, &out, outcode);
+            DECREF(outcode);
+            return out;
+        }
+
+        else {
+            PyErr_SetString(PyExc_TypeError, "Unsupported type, expected numpy int.");
+            return -1;
+        }
+
     }
 }
 
 
-int dims_match_left(PyArrayObject* left, PyArrayObject* right){
-    if(left == NULL || right == NULL){
+npy_longlong unwrap_longlong(PyObject* obj) {
+    if (obj == NULL) {
         return -1;
     }
-    return PyArray_NDIM(left) >= PyArray_NDIM(right);
+
+    if (PyArray_IsPythonNumber(obj)) {
+        // disambiguate type
+        if (PyFloat_CheckExact(obj)) {
+            npy_longlong out = (npy_longlong)PyFloat_AsDouble(obj);
+            return out;
+        }
+
+        else if (PyLong_Check(obj)) {
+            npy_longlong out = (npy_longlong)PyLong_AsDouble(obj);
+            return out;
+        }
+
+        else {  // don't coerce any other builtin type
+            PyErr_SetString(PyExc_TypeError, "Unsupported numerical python type for expected type long long.\n")
+                return -1;
+        }
+    }
+
+    else {
+        // Check for exact numpy type
+        if (PyArray_CheckScalar(obj)) {
+            PyArray_Descr* outcode = PyArray_DescrFromType(NPY_LONGLONG);
+            if (descr == NULL) {
+                return -1;  // caught by PyErr_Occurred on return
+            }
+            npy_double out = 0;
+            PyArray_CastScalarToCtype(obj, &out, outcode);
+            DECREF(outcode);
+            return out;
+        }
+
+        else {
+
+            PyErr_SetString(PyExc_TypeError, "Unsupported type, expected numpy long long.");
+            return -1;
+        }
+
+    }
 }
 
 
-int dims_match_right(PyArrayObject* left, PyArrayObject* right){
-    if(left == NULL || right == NULL){
+npy_bool unwrap_bool(PyObject* obj) {
+    // check PyBool_Check
+    // compare to Py_False and Py_True
+    // to determine what
+    if (obj == NULL) {
         return -1;
     }
-    return PyArray_NDIM(right) >= PyArray_NDIM(left);
-}
 
+    if (PyBool_Check(obj)) {
+        // check if python bool, otherwise fail
+        if (obj == Py_True) {
+            return true;
+        }
+        else {
+            return false;
+        }
+    }
+
+    else {
+        // Check for exact numpy type
+        if (PyArray_CheckScalar(obj)) {
+            PyArray_Descr* outcode = PyArray_DescrFromType(NPY_BOOL);
+            if (descr == NULL) {
+                return False;  // caught by PyErr_Occurred on return
+            }
+            npy_bool out = 0;
+            PyArray_CastScalarToCtype(obj, &out, outcode);
+            DECREF(outcode);
+            return out;
+        }
+        else {
+            PyErr_SetString(PyExc_TypeError, "Unsupported type, expected bool.");
+            return False;
+        }
+    }
+}

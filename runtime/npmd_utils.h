@@ -1,23 +1,26 @@
 #ifndef NPMD_UTILS_H
 #define NPMD_UTILS_H
 
+#include<Python.h>
+#include<numpy/arrayobject.h>
 #include<numpy/ndarraytypes.h>
-#include <stdbool.h>
+#include<stdlib.h>
+#include<stdbool.h>
 
 
-bool dim_counts_match(PyArrayObject** arrs, int count);
 
-bool dims_match(PyArrayObject** arrs, int count);
+PyArrayObject* unwrap_array(PyObject* obj, int typenum, int expected_ndims);
 
-int max_dim_count(PyArrayObject** arrays, int count);
+npy_float unwrap_float(PyObject* obj);
 
-int min_dim_count(PyArrayObject** arrays, int count);
+npy_double unwrap_double(PyObject* obj);
 
-bool can_simple_broadcast(PyArrayObject* left, PyArrayObject* right);
+npy_int unwrap_int(PyObject* obj, int* out);
 
-bool dims_match_left(PyArrayObject* left, PyArrayObject* right);
+npy_longlong unwrap_longlong(PyObject* obj);
 
-bool dims_match_right(PyArrayObject* left, PyArrayObject* right);
+npy_bool unwrap_bool(PyObject* obj);
+
 
 #endif
 

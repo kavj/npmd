@@ -1,8 +1,6 @@
-import itertools
-
 from contextlib import contextmanager
-from collections import Counter, defaultdict, namedtuple
-from functools import singledispatch, singledispatchmethod
+from collections import namedtuple
+from functools import singledispatchmethod
 
 import ir
 

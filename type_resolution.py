@@ -1,4 +1,4 @@
-import itertools
+import numbers
 
 import numpy as np
 
@@ -7,189 +7,96 @@ from functools import singledispatchmethod
 import ir
 
 from errors import CompilerError
-from visitor import ExpressionVisitor
-
-# Todo: At the tree layer, this should be much with fine grained tests moving to dataflow layer.
-#       In particular, just check for bad use of division and truth testing of arrays
+from utils import unpack_iterated
+from visitor import ExpressionVisitor, StmtVisitor
 
 
-Float32 = ir.ScalarType(bits=32, integral=False, boolean=False)
-Float64 = ir.ScalarType(bits=64, integral=False, boolean=False)
-Int32 = ir.ScalarType(bits=32, integral=True, boolean=False)
-Int64 = ir.ScalarType(bits=64, integral=True, boolean=False)
-Predicate32 = ir.ScalarType(bits=32, integral=True, boolean=True)
-Predicate64 = ir.ScalarType(bits=64, integral=True, boolean=True)
-FPredicate32 = ir.ScalarType(bits=32, integral=False, boolean=True)
-FPredicate64 = ir.ScalarType(bits=64, integral=False, boolean=True)
-BoolType = ir.ScalarType(bits=8, integral=True, boolean=True)
+def array_arg_from_spec(ndims, dtype, fixed_dims=()):
+    """
+    Parameterized array type suitable for use as an argument.
+    evol can be None, sliding window, and iterated (just advance iterator by one each time),
+    with any subscript applied to a sliding window being folded into the variable's evolution.
 
-DefaultInt = Int32 if np.int_(0).itemsize == 4 else Int64
+    dims should be a dense map, tuple of key, value pairs
 
-# defaults, can be overridden
-by_input_type = {np.int32: Int32,
-                 np.int64: Int64,
-                 np.float32: Float32,
-                 np.float64: Float64,
-                 bool: BoolType,
-                 np.bool_: BoolType}
-
-by_ir_type = {Int32: np.int32,
-              Int64: np.int64,
-              Float32: np.float32,
-              Float64: np.float64,
-              BoolType: np.bool}
-
-by_input_type_name = {"numpy.int32": Int32,
-                      "numpy.int64": Int64,
-                      "numpy.float32": Float32,
-                      "numpy.float64": Float64,
-                      "numpy.bool": BoolType,
-                      "numpy.bool_": BoolType}
-
-np_func_by_binop = {
-    "+": np.add,
-    "-": np.subtract,
-    "*": np.multiply,
-    "/": np.true_divide,
-    "//": np.floor_divide,
-    "%": np.mod,
-    "**": np.power,
-    "<<": np.left_shift,
-    ">>": np.right_shift,
-    "|": np.bitwise_or,
-    "&": np.bitwise_and,
-    "^": np.bitwise_xor,
-    "~": np.bitwise_not
-}
-
-# initially supported, untyped ints and other ranges require additional
-# work, and they are less commonly used
-scalar_types = {np.int32, np.int64, np.float32, np.float64, np.bool}
-
-binary_ops = {"+", "-", "*", "/", "//", "%", "**", "<<", ">>", "|", "^", "&",
-              "+=", "-=", "*=", "/=", "//=", "%=", "**="}
-
-bitwise_ops = {"<<", ">>", "|", "&", "^", "<<=", ">>=", "|=", "&=", "^="}
-
-matmul_ops = {"@", "@="}
-
-truediv_ops = {"/", "/="}
-
-unary_ops = {"+", "-", "~", "not"}
-
-bool_ops = {"and", "or"}
-
-compare_ops = {"==", "!=", "<", "<=", ">", ">=", "is", "isnot", "in", "notin"}
-
-supported_builtins = {'iter', 'range', 'enumerate', 'zip', 'all', 'any', 'max', 'min', 'abs', 'pow',
-                      'round', 'reversed'}
-
-binops = {"+", "-", "*", "//", "%", "**"}
-binops_inplace = {"+=", "-=", "*=", "//=", "%=", "**="}
-div = {"/"}
-div_inplace = {"/="}
-matmul = {"@"}
-matmul_inplace = {"@="}
-bitwise = {"<<", ">>", "|", "&", "^"}
-bitwise_inplace = {"<<=", ">>=", "|=", "&=", "^="}
-
-inplace_to_ooplace = {
-    "+=": "+",
-    "-=": "-",
-    "*=": "*",
-    "/": "/",
-    "//=": "//",
-    "%=": "%",
-    "**=": "**",
-    "<<=": "<<",
-    ">>=": ">>",
-    "|=": "|",
-    "&=": "&",
-    "^=": "^",
-    "~=": "~"
-}
-
-
-def get_compare_type(a, b):
-    # will be updated
-    bits = max(a.bits, b.bits)
-    integral = a.integral and b.integral
-    if integral and bits == 32:
-        return Predicate32
-    elif integral and bits == 64:
-        return Predicate64
-    elif (not integral) and bits == 32:
-        return FPredicate32
-    elif (not integral) and bits == 64:
-        return FPredicate64
-
-
-def resolve_binop_type(a, b, op):
-    if op in bitwise:
-        # bitwise requires integral or predicate
-        if a.boolean and b.boolean:
-            return get_compare_type(a, b)
-    a_ = by_ir_type[a]
-    b_ = by_ir_type[b]
-    if op == "/":
-        # get numpy
-        a_one = a_(1)
-        b_one = b_(1)
-        c_one = np.divide(a_one, b_one)
-        c_ = type(c_one)
-        c = by_input_type.get(c_)
-        if c is None:
-            msg = f"No op to implement division for types {a_} and {b_}."
+    """
+    if dtype is None:
+        msg = f"Cannot map None to dtype"
+        raise CompilerError(msg)
+    ir_dtype = ir.by_input_dtype.get(dtype)
+    if ir_dtype is None:
+        # check if this is coercible to dtype
+        ir_dtype = ir.by_input_dtype.get(np.dtype(dtype))
+    if ir_dtype is None:
+        msg = f"Unsupported dtype {ir_dtype}."
+        raise CompilerError(msg)
+    # should be a tuple of pairs
+    seen = set()
+    for index, value in fixed_dims:
+        if index in seen:
+            msg = f"index {index} is duplicated."
             raise CompilerError(msg)
-        return c
-    res_ = np.result_type(a_, b_)
-    res = by_input_type[res_]
-    return res
+        seen.add(index)
+        if not isinstance(index, numbers.Integral):
+            msg = f"dims can only be used to specify fixed dimensions, received: {value}."
+            raise CompilerError(msg)
+        elif 0 > value:
+            msg = f"Negative dim {value} specified"
+            raise CompilerError(msg)
+        elif index >= ndims:
+            msg = f"dim {index} specified for array with {ndims} dimensions."
+            raise CompilerError(msg)
+    return ir.ArrayType(ndims, ir_dtype)
 
 
-def type_from_spec(bit_width, is_integral, is_boolean):
-    """
-    Return a type object from interned types.
-    """
-    if bit_width == 8:
-        if is_integral:
-            if is_boolean:
-                return BoolType
-        msg = "The only currently supported 8 bit format is integer boolean."
-        raise ValueError(msg)
-    if bit_width not in (32, 64):
-        msg = "Only 32 and 64 bit numeric data types are supported."
-        raise ValueError(msg)
-    if is_integral:
-        if bit_width == 64:
-            return Predicate64 if is_boolean else Int64
-        else:
-            return Predicate32 if is_boolean else Int32
-    elif bit_width == 64:
-        return FPredicate64 if is_boolean else Float64
+def truth_type_from_type(t):
+    tt = ir.truth_type_table.get(t)
+    if tt is None:
+        msg = f"No truth type corresponds to type {t}."
+        raise CompilerError(msg)
+    return tt
+
+
+def int_from_spec(bits, signed):
+    assert isinstance(bits, int)
+    if signed:
+        t = ir.IntegerType(bits)
     else:
-        return FPredicate32 if is_boolean else Float32
+        t = ir.UnsignedType(bits)
+    if t not in ir.supported_types:
+        msg = f"Integer with parameters signed={signed} bits={bits} does not have a supported type."
+        raise CompilerError(msg)
+    return t
+
+
+def float_from_spec(bits):
+    assert isinstance(bits, int)
+    t = ir.FloatType(bits)
+    if t not in ir.supported_types:
+        msg = f"Integer with parameters bits={bits} does not have a supported type."
+        raise CompilerError(msg)
+    return t
+
+
+def predicate_from_spec(bits):
+    assert isinstance(bits, int)
+    t = ir.PredicateType(bits)
+    if t not in ir.supported_types:
+        msg = f"Predicate type with parameters bits={bits} does not have a supported type."
+        raise CompilerError(msg)
+    return t
 
 
 def merge_truth_types(types):
-    assert len(types) > 0
+    assert len(types) > 0 and all(isinstance(t, ir.PredicateType) for t in types)
     bit_width = 0
-    is_integral = True
     for t in types:
-        if not t.boolean:
-            t = truth_type_from_type(t)
+        if not isinstance(t, ir.PredicateType):
+            # check that each intermediate type is in fact a supported type
+            t = predicate_from_spec(t.bits)
         bit_width = max(bit_width, t.bits)
-        is_integral &= t.is_integral
-    if bit_width == 8:
-        if not is_integral:
-            raise TypeError
-    elif bit_width == 32:
-        return Predicate32 if is_integral else FPredicate32
-    elif bit_width == 64:
-        return Predicate64 if is_integral else FPredicate64
-    else:
-        msg = f"Unsupported bit width {bit_width}."
-        raise CompilerError(msg)
+    t = predicate_from_spec(bit_width)
+    return t
 
 
 class ExprTypeInfer(ExpressionVisitor):
@@ -206,28 +113,68 @@ class ExprTypeInfer(ExpressionVisitor):
     def __init__(self, symbols):
         # types updated externally
         self.symbols = symbols
-        self.expr_types = None
 
-    def __call__(self, expr):
-        assert isinstance(expr, ir.ValueRef)
-        return self.visit(expr)
+    def __call__(self, node):
+        assert isinstance(node, ir.ValueRef)
+        return self.visit(node)
 
     @singledispatchmethod
     def visit(self, node):
         super().visit(node)
 
+    @staticmethod
+    def _infer_compare_type(ltype, rtype):
+        # check for issues
+        bitwidth = max(ltype.bits, rtype.bits)
+        t = predicate_from_spec(bitwidth)
+        return t
+
+    def _infer_divide_type(self, node):
+        # weird one
+        ltype = self.visit(node.left)
+        rtype = self.visit(node.right)
+        if isinstance(ltype, ir.PredicateType) or isinstance(rtype, ir.PredicateType):
+            msg = f"No support for division on boolean or predicate types {ltype}, {rtype}."
+            raise CompilerError(msg)
+        # promote types doesn't work perfectly here
+        np_ltype = ir.by_ir_type[ltype]
+        np_rtype = ir.by_ir_type[rtype]
+        larr = np.ones(1, dtype=np_ltype)
+        rarr = np.ones(1, dtype=np_rtype)
+        repl = larr / rarr
+        repl_type = ir.by_input_dtype.get(repl.dtype)
+        if repl_type is None:
+            msg = f"No supported type for numpy type {repl.dtype}."
+            raise CompilerError(msg)
+        return repl_type
+
+    @visit.register
+    def _(self, node: ir.AffineSeq):
+        return node
+
     @visit.register
     def _(self, node: ir.Subscript):
+        # find number of dims reduced by subscript
+        reduce_by = 0
+        base = node
+        while isinstance(base, ir.Subscript):
+            if isinstance(node.index, ir.Tuple):
+                reduce_by += sum(not isinstance(i, ir.Slice) for i in node.index.subexprs)
+            elif not isinstance(node.index, ir.Slice):
+                # simple index
+                reduce_by += 1
+            base = base.value
+
         array_type = self.visit(node.value)
         if not isinstance(array_type, ir.ArrayType):
             # would be better not to raise here..
             msg = f"Cannot subscript non-array type {array_type}."
             raise CompilerError(msg)
-        if isinstance(node.slice, ir.Slice):
+        if isinstance(node.index, ir.Slice):
             t = array_type
         else:
             # single index
-            ndims = array_type.ndims - 1
+            ndims = array_type.ndims - reduce_by
             if ndims == 0:
                 t = array_type.dtype
             else:
@@ -235,45 +182,181 @@ class ExprTypeInfer(ExpressionVisitor):
         return t
 
     @visit.register
+    def _(self, node: ir.Constant):
+        np_type = type(node.value)
+        dtype = np.dtype(np_type)
+        t = ir.by_input_dtype.get(dtype)
+        return t
+
+    @visit.register
     def _(self, node: ir.NameRef):
-        sym = self.symbols.lookup(node)
-        return sym.type_
+        return self.symbols.check_type(node)
 
     @visit.register
     def _(self, node: ir.BinOp):
-        # no caching since they may change
-        left = self.visit(node.left)
-        right = self.visit(node.right)
-        expr_type = resolve_binop_type(left, right, node.op)
-        if expr_type is None:
-            msg = f"No signature match for operator {node.op} with candidate signatures: ({left}, {right})."
+        ltype = self.visit(node.left)
+        rtype = self.visit(node.right)
+        if rtype is None:
+            rtype = self.visit(node.right)
+        if ((isinstance(ltype, ir.PredicateType) or isinstance(rtype, ir.PredicateType))
+                or (isinstance(node, (ir.LSHIFT, ir.RSHIFT, ir.BITOR, ir.BITAND, ir.BITXOR))
+                    and (not isinstance(ltype, ir.IntegerType) or not isinstance(rtype, ir.IntegerType)))):
+            lname = ltype.type_name
+            rname = rtype.type_name
+            msg = f"No method available to apply {type(node)} for operand types {lname}, {rname}"
             raise CompilerError(msg)
-        return expr_type
+        np_ltype = ir.by_ir_type.get(ltype)
+        np_rtype = ir.by_ir_type.get(rtype)
+        if np_rtype is None:
+            msg = f"rtype: {rtype}"
+            raise CompilerError(msg)
+        # Check numpy type promotion
+        # error message from numpy is uninformative here..
+        try:
+            np_result_type = np.promote_types(np_ltype, np_rtype)
+        except TypeError:
+            msg = f"Unable to deduce binop result type for types {np_ltype} and {np_rtype}."
+            raise CompilerError(msg)
+        # check that we have a supported IR type
+        result_type = ir.by_input_dtype.get(np_result_type)
+        if result_type is None:
+            msg = f"No supported IR type corresponds to {np_result_type}."
+            raise CompilerError(msg)
+        return result_type
 
     @visit.register
-    def _(self, node: ir.UnaryOp):
-        return self.visit(node.operand)
+    def _(self, node: ir.TRUEDIV):
+        return self._infer_divide_type(node)
+
+    @visit.register
+    def _(self, node: ir.MOD):
+        return self._infer_divide_type(node)
+
+    @visit.register
+    def _(self, node: ir.USUB):
+        return node.operand
+
+    @visit.register
+    def _(self, node: ir.UNOT):
+        operand_type = self.visit(node.operand)
+        if operand_type.boolean or not operand_type.integral:
+            # try to get numpy type
+            np_type = ir.by_ir_type.get(operand_type)
+            t = np_type if np_type is not None else operand_type
+            msg = f"No method to invert type {t}."
+            raise CompilerError(msg)
+
+    @visit.register
+    def _(self, node: ir.NOT):
+        base_type = self.visit(node.operand)
+        tt = truth_type_from_type(base_type)
+        return tt
+
+    @visit.register
+    def _(self, node: ir.EQ):
+        ltype = self.visit(node.left)
+        rtype = self.visit(node.right)
+        if isinstance(ltype, ir.PredicateType) != isinstance(rtype, ir.PredicateType):
+            msg = f"Equality comparison is unsupported between boolean and other types, {ltype}, {rtype}."
+            raise CompilerError(msg)
+        return self._infer_compare_type(ltype, rtype)
+
+    @visit.register
+    def _(self, node: ir.NE):
+        ltype = self.visit(node.left)
+        rtype = self.visit(node.right)
+        if isinstance(ltype, ir.PredicateType) != isinstance(rtype, ir.PredicateType):
+            msg = f"Equality comparison is unsupported between boolean and other types, {ltype}, {rtype}."
+            raise CompilerError(msg)
+        return self._infer_compare_type(ltype, rtype)
 
     @visit.register
     def _(self, node: ir.CompareOp):
-        # Todo: currently assumes all scalar types... need to generalize
         ltype = self.visit(node.left)
         rtype = self.visit(node.right)
-        left_dtype = ltype.dtype if isinstance(ltype, ir.ArrayType) else ltype
-        right_dtype = rtype.dtype if isinstance(ltype, ir.ArrayType) else rtype
-        if isinstance(left_dtype, BoolType) and isinstance(right_dtype, BoolType):
-            cmp_type = BoolType
-        else:
-            cmp_type = get_compare_type(left_dtype, right_dtype)
-        return cmp_type
+        for t in (ltype, rtype):
+            if isinstance(t, ir.ArrayType):
+                msg = f"Comparisons are supported for array types: {node}."
+                raise CompilerError(msg)
+            elif t.is_predicate:
+                msg = f"Comparisons other == and != comparisons are unsupported for boolean types."
+                raise CompilerError(msg)
+        # check for floating point types and largest bit width
+        return self._infer_compare_type(ltype, rtype)
 
     @visit.register
     def _(self, node: ir.BoolOp):
-        truth_types = []
-        for operand in node.subexprs:
+        operand_types = []
+        for operand in node.operands:
             type_ = self.visit(operand)
             if isinstance(type_, ir.ArrayType):
                 msg = f"Cannot truth test array type {operand}."
-                return TypeMismatch(msg)
-            truth_types.append(truth_type_from_type(type_))
-        return merge_truth_types(truth_types)
+                raise CompilerError(msg)
+            operand_types.append(type_)
+        bits = 0
+        for t in operand_types:
+            t = predicate_from_spec(t.bits)
+            bits = max(bits, t.bits)
+        t = predicate_from_spec(bits)
+        return t
+
+
+class TypeChecks(StmtVisitor):
+
+    def __init__(self, syms):
+        self.type_check = ExprTypeInfer(syms)
+
+    def __call__(self, entry):
+        self.visit(entry)
+
+    @singledispatchmethod
+    def visit(self, node):
+        super().visit(node)
+
+    @visit.register
+    def _(self, node: ir.Assign):
+        tt = self.type_check(node.target)
+        vt = self.type_check(node.value)
+        # check for match or castable
+        if tt != vt:
+            # check if can cast
+            msg = f"Cannot cast {tt} to {vt}."
+            raise CompilerError(msg)
+
+    @visit.register
+    def _(self, node: ir.SingleExpr):
+        # trigger type faults
+        self.type_check(node.expr)
+
+    @visit.register
+    def _(self, node: ir.IfElse):
+        # node.test check isn't explicitly used
+        # it's needed to ensure that we can process
+        # the corresponding expressions
+        self.type_check(node.test)
+        self.visit(node.if_branch)
+        self.visit(node.else_branch)
+
+    @visit.register
+    def _(self, node: ir.ForLoop):
+        for target, value in unpack_iterated(node.target, node.iterable):
+            tt = self.type_check(target)
+            vt = self.type_check(value)
+            # check that they match
+            if tt != vt:
+                # check if can cast
+                msg = f"Cannot cast {tt} to {vt}."
+                raise CompilerError(msg)
+        self.visit(node.body)
+
+    @visit.register
+    def _(self, node: ir.WhileLoop):
+        self.type_check(node.test)
+        self.visit(node.body)
+
+
+class TypeInfer(StmtVisitor):
+
+    def __init__(self):
+        pass
+

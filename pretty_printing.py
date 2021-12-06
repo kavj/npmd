@@ -1,9 +1,9 @@
+import typing
+
 from functools import singledispatchmethod
 from contextlib import contextmanager
-from itertools import islice
 
 import ir
-import type_resolution as tr
 
 
 #     https://docs.python.org/3/reference/expressions.html#operator-precedence
@@ -11,6 +11,7 @@ import type_resolution as tr
 binop_ordering = {"**": 1, "*": 3, "@": 3, "/": 3, "//": 3, "%": 3, "+": 4, "-": 4, "<<": 5, ">>": 5, "&": 6,
                   "^": 7, "|": 8, "in": 9, "not in": 9, "<": 9, "<=": 9, ">": 9, ">=": 9, "!=": 9,
                   "==": 9}
+
 
 # Todo: Given the boolean refactoring, not should probably derive from BoolOp, similar to TRUTH.
 
@@ -20,13 +21,13 @@ binop_ordering = {"**": 1, "*": 3, "@": 3, "/": 3, "//": 3, "%": 3, "+": 4, "-":
 
 # Note, python docs don't specify truth precedence, but it should match logical "not"
 
-scalar_pretty_types = {tr.Int32: "numpy.int32",
-                       tr.Int64: "numpy.int64",
-                       tr.Float32: "numpy.float32",
-                       tr.Float64: "numpy.float64",
-                       tr.Predicate32: "32_bit_mask",
-                       tr.Predicate64: "64_bit_mask",
-                       tr.BoolType: "numpy.bool_"}
+scalar_pretty_types = {ir.Int32: "numpy.int32",
+                       ir.Int64: "numpy.int64",
+                       ir.Float32: "numpy.float32",
+                       ir.Float64: "numpy.float64",
+                       ir.Predicate32: "32_bit_mask",
+                       ir.Predicate64: "64_bit_mask",
+                       ir.BoolType: "numpy.bool_"}
 
 
 def get_pretty_scalar_type(t):
@@ -68,6 +69,14 @@ class pretty_formatter:
         raise NotImplementedError(msg)
 
     @visit.register
+    def _(self, node: ir.ScalarType):
+        return str(node)
+
+    @visit.register
+    def _(self, node: ir.ArrayType):
+        return str(node)
+
+    @visit.register
     def _(self, node: ir.SingleDimRef):
         expr = self.visit(node.base)
         if node.dim == ir.Zero:
@@ -105,15 +114,15 @@ class pretty_formatter:
         return expr
 
     @visit.register
-    def _(self, node: ir.BoolConst):
+    def _(self, node: ir.Constant):
         return str(node.value)
 
     @visit.register
-    def _(self, node: ir.IntConst):
+    def _(self, node: ir.Constant):
         return str(node.value)
 
     @visit.register
-    def _(self, node: ir.FloatConst):
+    def _(self, node: ir.Constant):
         return str(node.value)
 
     @visit.register
@@ -122,100 +131,50 @@ class pretty_formatter:
 
     @visit.register
     def _(self, node: ir.BinOp):
-        op = node.op
-        if node.in_place:
-            left = self.visit(node.left)
-            right = self.visit(node.right)
-        else:
-            op_ordering = binop_ordering[op]
-            terms = []
-            for term in (node.left, node.right):
-                if isinstance(term, ir.BinOp):
-                    if op_ordering < binop_ordering[term.op]:
-                        term = self.parenthesized(term)
-                    else:
-                        term = self.visit(term)
-                elif isinstance(term, ir.UnaryOp):
-                    if op == "**":
-                        term = self.parenthesized(term)
-                elif isinstance(term, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple)):
+        op = ir.binop_ops[type(node)]
+        op_ordering = binop_ordering[op]
+        terms = []
+        for term in node.subexprs:
+            if isinstance(term, ir.BinOp):
+                if op_ordering < binop_ordering[op]:
                     term = self.parenthesized(term)
                 else:
                     term = self.visit(term)
-                terms.append(term)
-            left, right = terms
+            elif isinstance(term, ir.UnaryOp):
+                if op == "**":
+                    term = self.parenthesized(term)
+            elif isinstance(term, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple)):
+                term = self.parenthesized(term)
+            else:
+                term = self.visit(term)
+            terms.append(term)
+        left, right = terms
         expr = f"{left} {op} {right}"
         return expr
 
     @visit.register
     def _(self, node: ir.CompareOp):
         terms = []
-        for term in (node.left, node.right):
+        op = ir.compare_ops[type(node)]
+        for term in node.subexprs:
             if isinstance(term, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple)):
                 term = self.parenthesized(term)
             else:
                 term = self.visit(term)
             terms.append(term)
         left, right = terms
-        expr = f"{left} {node.op} {right}"
+        expr = f"{left} {op} {right}"
         return expr
 
     @visit.register
     def _(self, node: ir.AND):
         # Todo: move rebalancing to external pass
-        groups = []
-        start = 0
-        count = len(node.operands)
-        assert count > 1
-        while start < count:
-            # group things like a < b < c
-            # whether they arose from ir changes or input source
-            first = node.operands[0]
-            if isinstance(first, ir.CompareOp):
-                cmp_op = first.op
-                group = [first.left, first.right]
-                prev_rhs = first.right
-                for operand in islice(node.operands, start+1, None):
-                    if not (isinstance(operand, ir.CompareOp) and cmp_op == operand.op and operand.left == prev_rhs):
-                        break
-                    group.append(operand.right)
-                    prev_rhs = operand.right
-                groups.append((group, cmp_op))
-                start += len(group) - 1
-            else:
-                # something else, anded
-                cmp_op = None
-                groups.append((first, cmp_op))
-                start += 1
-        operands = []
-        expr = None
-        for group, cmp_op in groups:
-            if cmp_op is not None:
-                op = f" {cmp_op} "
-                chain = op.join(self.visit(suboperand) for suboperand in group)
-                operands.append(chain)
-            else:
-                # single expression
-                assert isinstance(group, ir.ValueRef)
-                if isinstance(group, (ir.AND, ir.OR, ir.Select, ir.Tuple)):
-                    formatted = self.parenthesized(group)
-                else:
-                    formatted = self.visit(group)
-                operands.append(formatted)
-            expr = "and ".join(operand for operand in operands)
-        assert expr is not None
+        expr = " and ".join(self.visit(operand) for operand in node.subexprs)
         return expr
 
     @visit.register
     def _(self, node: ir.OR):
-        operands = []
-        for operand in node.operands:
-            if isinstance(operand, (ir.Select, ir.Tuple)):
-                formatted = self.parenthesized(operand)
-            else:
-                formatted = self.visit(operand)
-            operands.append(formatted)
-        expr = " or ".join(operand for operand in operands)
+        expr = " or ".join(self.visit(operand) for operand in node.subexprs)
         return expr
 
     @visit.register
@@ -230,7 +189,7 @@ class pretty_formatter:
     def _(self, node: ir.TRUTH):
         formatted = self.visit(node.operand)
         if node.constant:
-            if not isinstance(node, ir.BoolConst):
+            if not isinstance(node, ir.Constant):
                 # We don't distinguish between bools and predicates here in
                 # truth testing, since Python doesn't have any notion of
                 # predicate types.
@@ -255,7 +214,12 @@ class pretty_formatter:
 
     @visit.register
     def _(self, node: ir.Subscript):
-        s = f"{self.visit(node.value)}[{self.visit(node.slice)}]"
+        if isinstance(node.index, ir.Subscript):
+            index = ", ".join(self.visit(e) for e in node.index.subexprs)
+        else:
+            index = self.visit(node.index)
+        base = self.visit(node.value)
+        s = f"{base}[{index}]"
         return s
 
     @visit.register
@@ -270,10 +234,10 @@ class pretty_formatter:
     @visit.register
     def _(self, node: ir.Tuple):
         elements = []
-        for e in node.elements:
+        for e in node.subexprs:
             # parenthesize nested tuples, leave everything else
             if isinstance(e, ir.Tuple):
-                expr = self.parenthesized(expr)
+                expr = self.parenthesized(e)
             else:
                 expr = self.visit(e)
             elements.append(expr)
@@ -282,13 +246,14 @@ class pretty_formatter:
 
     @visit.register
     def _(self, node: ir.UnaryOp):
-        op = node.op
-        if isinstance(node.operand, ir.BinOp) and not node.operand.in_place:
-            if node.operand.op != "**":
-                operand = parenthesized(operand)
+        op = ir.unary_ops[type(node)]
+        operand, = node.subexprs
+        if isinstance(operand, ir.BinOp):
+            if not isinstance(operand, ir.POW):
+                operand = self.parenthesized(operand)
             else:
-                operand = self.visit(node.operand)
-        elif isinstance(node.operand, (ir.UnaryOp, ir.BoolOp, ir.Select)):
+                operand = self.visit(operand)
+        elif isinstance(operand, (ir.UnaryOp, ir.BoolOp, ir.Select)):
             # if we have an unfolded double unary expression such as --,
             # '--expr' would be correct but it's visually jarring. Adding
             # unnecessary parentheses makes it '-(-expr)'.
@@ -316,12 +281,23 @@ class pretty_formatter:
             if isinstance(elem, ir.Tuple):
                 # This nesting is unsupported elsewhere, but this
                 # would be a confusing place to throw an error.
-                formatted = parenthesized(formatted)
+                formatted = self.parenthesized(formatted)
             exprs.append(formatted)
         # handle case of enumerate
         expr = ", ".join(e for e in exprs)
         expr = f"zip({expr})"
         return expr
+
+
+def format_error(msg: str, pos: ir.Position,
+                 named: typing.Optional[typing.Dict] = None,
+                 exprs: typing.Optional[typing.Iterable[ir.ValueRef]] = None):
+    pf = pretty_formatter()
+
+    formatted_names = {pf(k): pf(v) for (k,v) in named.items()} if named is not None else ()
+    formatted_exprs = {pf(e) for e in exprs} if exprs is not None else ()
+    combined = "\n".join((str(pos), msg, str(formatted_names), str(formatted_exprs)))
+    return combined
 
 
 class pretty_printer:
@@ -483,21 +459,18 @@ class pretty_printer:
 
     @visit.register
     def _(self, node: ir.Assign):
-        if node.in_place:
-            stmt = self.format(node.value)
-        else:
-            target = node.target
-            formatted_target = self.format(node.target)
-            formatted_value = self.format(node.value)
-            if self.print_annotations and isinstance(target, ir.NameRef):
-                type_ = self.symbols.check_type(target)
-                if type_ is not None:
-                    # This is None if no typed symbol is registered
-                    # This will be an error later.
-                    pretty_type = get_pretty_type(type_)
-                    if pretty_type is not None:
-                        formatted_target = f"{formatted_target}: {pretty_type}"
-            stmt = f"{formatted_target} = {formatted_value}"
+        target = node.target
+        formatted_target = self.format(node.target)
+        formatted_value = self.format(node.value)
+        if self.print_annotations and isinstance(target, ir.NameRef):
+            type_ = self.symbols.check_type(target)
+            if type_ is not None:
+                # This is None if no typed symbol is registered
+                # This will be an error later.
+                pretty_type = get_pretty_type(type_)
+                if pretty_type is not None:
+                    formatted_target = f"{formatted_target}: {pretty_type}"
+        stmt = f"{formatted_target} = {formatted_value}"
         self.print_line(stmt)
 
     @visit.register

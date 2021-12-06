@@ -7,7 +7,7 @@ def blah(a, b):
         # dead code
         print(u)
         print(v)
-        c = a - b
+        c = v - u
     for v in range(53):
         continue
         # dead code

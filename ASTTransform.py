@@ -1,5 +1,4 @@
 import ast
-import itertools
 import sys
 import typing
 import symtable
@@ -13,23 +12,37 @@ import ir
 
 from canonicalize import replace_call
 from errors import CompilerError
+from pretty_printing import pretty_formatter
 from symbol_table import symbol, symbol_table
-from utils import unpack_assignment, unpack_iterated, wrap_input
+from utils import unpack_assignment, unpack_iterated, wrap_constant
 
+binary_op_strs = {ast.Add: "+",
+                  ast.Sub: "-",
+                  ast.Mult: "*",
+                  ast.Div: "/",
+                  ast.FloorDiv: "//",
+                  ast.Mod: "%",
+                  ast.Pow: "**",
+                  ast.LShift: "<<",
+                  ast.RShift: ">>",
+                  ast.BitOr: "|",
+                  ast.BitXor: "^",
+                  ast.BitAnd: "&",
+                  ast.MatMult: "@"}
 
-binary_ops = {ast.Add: "+",
-              ast.Sub: "-",
-              ast.Mult: "*",
-              ast.Div: "/",
-              ast.FloorDiv: "//",
-              ast.Mod: "%",
-              ast.Pow: "**",
-              ast.LShift: "<<",
-              ast.RShift: ">>",
-              ast.BitOr: "|",
-              ast.BitXor: "^",
-              ast.BitAnd: "&",
-              ast.MatMult: "@"}
+binary_ops = {ast.Add: ir.ADD,
+              ast.Sub: ir.SUB,
+              ast.Mult: ir.MULT,
+              ast.Div: ir.TRUEDIV,
+              ast.FloorDiv: ir.FLOORDIV,
+              ast.Mod: ir.MOD,
+              ast.Pow: ir.POW,
+              ast.LShift: ir.LSHIFT,
+              ast.RShift: ir.RSHIFT,
+              ast.BitOr: ir.BITOR,
+              ast.BitXor: ir.BITXOR,
+              ast.BitAnd: ir.BITAND,
+              ast.MatMult: ir.MATMULT}
 
 binary_in_place_ops = {ast.Add: "+=",
                        ast.Sub: "-=",
@@ -45,24 +58,35 @@ binary_in_place_ops = {ast.Add: "+=",
                        ast.BitAnd: "&=",
                        ast.MatMult: "@="}
 
-unary_ops = {ast.UAdd: "+",
-             ast.USub: "-",
-             ast.Invert: "~",
-             ast.Not: "not"}
+unary_ops = {ast.USub: ir.USUB,
+             ast.Invert: ir.UNOT,
+             ast.Not: ir.NOT}
 
-bool_ops = {ast.And: "and",
-            ast.Or: "or"}
+bool_op_strs = {ast.And: "and",
+                ast.Or: "or"}
 
-compare_ops = {ast.Eq: "==",
-               ast.NotEq: "!=",
-               ast.Lt: "<",
-               ast.LtE: "<=",
-               ast.Gt: ">",
-               ast.GtE: ">=",
-               ast.Is: "is",
-               ast.IsNot: "isnot",
-               ast.In: "in",
-               ast.NotIn: "notin"}
+bool_ops = {ast.And: ir.AND,
+            ast.Or: ir.OR}
+
+compare_op_strs = {ast.Eq: "==",
+                   ast.NotEq: "!=",
+                   ast.Lt: "<",
+                   ast.LtE: "<=",
+                   ast.Gt: ">",
+                   ast.GtE: ">=",
+                   ast.Is: "is",
+                   ast.IsNot: "isnot",
+                   ast.In: "in",
+                   ast.NotIn: "notin"}
+
+compare_ops = {ast.Eq: ir.EQ,
+               ast.NotEq: ir.NE,
+               ast.Lt: ir.LT,
+               ast.LtE: ir.LE,
+               ast.Gt: ir.GT,
+               ast.GtE: ir.GE,
+               ast.In: ir.IN,
+               ast.NotIn: ir.NOTIN}
 
 supported_builtins = {"iter", "range", "enumerate", "zip", "all", "any", "max", "min", "abs", "pow",
                       "round", "reversed"}
@@ -151,6 +175,7 @@ class TreeBuilder(ast.NodeVisitor):
         self.body = None
         self.entry = None
         self.enclosing_loop = None
+        self.formatter = pretty_formatter()
 
     @contextmanager
     def function_context(self, symbols):
@@ -170,7 +195,6 @@ class TreeBuilder(ast.NodeVisitor):
 
     @contextmanager
     def loop_region(self, header):
-        stashed = self.body
         outer = self.enclosing_loop
         self.enclosing_loop = header
         with self.flow_region():
@@ -182,17 +206,14 @@ class TreeBuilder(ast.NodeVisitor):
             func = self.visit(entry)
         return func
 
-    def visit_With(self, node: ast.With):
-        pass
-
-    def visit_Attribute(self, node: ast.Attribute) -> ir.NameRef:
-        value = self.visit(node.value)
-        if isinstance(value, ir.NameRef) and value.id == "shape":
-            value = ir.ShapeRef(node.base)
+    def visit_Attribute(self, node: ast.Attribute):
+        v = self.visit(node.value)
+        if isinstance(v, ir.NameRef):
+            return ir.NameRef(f"{v.name}.{node.attr}")
         else:
-            msg = f"The only currently supported attribute is shape for arrays."
+            formatted = self.formatter(node.value)
+            msg = f"Attributes are disallowed on everything except name references. Received: {formatted}."
             raise CompilerError(msg)
-        return value
 
     def visit_Constant(self, node: ast.Constant) -> ir.Constant:
         if is_ellipsis(node.value):
@@ -202,7 +223,7 @@ class TreeBuilder(ast.NodeVisitor):
             # This will check that text is convertible to ascii.
             output = ir.StringConst(node.value)
         else:
-            output = wrap_input(node.value)
+            output = wrap_constant(node.value)
         return output
 
     def visit_Tuple(self, node: ast.Tuple) -> ir.Tuple:
@@ -212,8 +233,7 @@ class TreeBuilder(ast.NodeVisitor):
         # 3.9 removes ext_slice in favor of a tuple of slices
         # need to check a lot of cases for this
         #    raise NotImplementedError
-        elts = tuple(self.visit(elt) for elt in node.elts)
-        return ir.Tuple(elts)
+        return ir.Tuple(*(self.visit(elt) for elt in node.elts))
 
     def visit_Name(self, node: ast.Name):
         return ir.NameRef(node.id)
@@ -223,44 +243,34 @@ class TreeBuilder(ast.NodeVisitor):
         expr = self.visit(node.value)
         pos = extract_positional_info(node)
         # don't append single value references as statements
-        if not isinstance(expr, (ir.Constant, ir.NameRef, ir.Subscript)):
+        if not isinstance(expr, (ir.Constant, ir.NameRef, ir.Subscript, ir.StringConst)):
             self.body.append(ir.SingleExpr(expr, pos))
 
     def visit_UnaryOp(self, node: ast.UnaryOp) -> ir.ValueRef:
-        op = unary_ops.get(type(node.op))
-        operand = self.visit(node.operand)
-        if op == "+":  # This is a weird noop that can be ignored.
-            expr = operand
-        elif op == "not":
-            expr = ir.NOT(operand)
+        if node.op == "+":
+            expr = self.visit(node.operand)
         else:
-            expr = ir.UnaryOp(operand, op)
+            cls = unary_ops.get(type(node.op))
+            operand = self.visit(node.operand)
+            expr = cls(operand)
         return expr
 
     def visit_BinOp(self, node: ast.BinOp) -> ir.BinOp:
-        op = binary_ops.get(type(node.op))
+        cls = binary_ops.get(type(node.op))
         left = self.visit(node.left)
         right = self.visit(node.right)
-        return ir.BinOp(left, right, op)
+        return cls(left, right)
 
-    def visit_BoolOp(self, node: ast.BoolOp) -> typing.Union[ir.BoolConst, ir.AND, ir.OR]:
-        op = bool_ops[node.op]
-        operands = []
-        for value in node.values:
-            value = self.visit(value)
-            operands.append(value)
-        operands = tuple(operands)
-        if op == "and":
-            expr = ir.AND(operands)
-        else:
-            expr = ir.OR(operands)
+    def visit_BoolOp(self, node: ast.BoolOp) -> typing.Union[ir.Constant, ir.AND, ir.OR]:
+        cls = bool_ops.get(node.op)
+        expr = cls(*(self.visit(v) for v in node.values))
         return expr
 
-    def visit_Compare(self, node: ast.Compare) -> typing.Union[ir.BinOp, ir.AND, ir.BoolConst]:
+    def visit_Compare(self, node: ast.Compare) -> typing.Union[ir.BinOp, ir.AND, ir.Constant]:
         left = self.visit(node.left)
         right = self.visit(node.comparators[0])
-        op = compare_ops[type(node.ops[0])]
-        initial_compare = ir.CompareOp(left, right, op)
+        cls = compare_ops[type(node.ops[0])]
+        initial_compare = cls(left, right)
         if len(node.ops) == 1:
             return initial_compare
         compares = [initial_compare]
@@ -268,21 +278,24 @@ class TreeBuilder(ast.NodeVisitor):
             left = right
             right = self.visit(comparator)
             # bad operators will fail at AST construction
-            op = compare_ops[type(ast_op)]
-            cmp = ir.CompareOp(left, right, op)
+            cls = compare_ops[type(ast_op)]
+            cmp = cls(left, right)
             compares.append(cmp)
-        return ir.AND(tuple(compares))
+        return ir.AND(*compares)
 
     def visit_Call(self, node: ast.Call) -> typing.Union[ir.ValueRef, ir.NameRef, ir.Call]:
-        if isinstance(node.func, ast.Name):
-            func_name = ir.NameRef(node.func.id)
-        else:
-            func_name = self.visit(node.func)
-        args = tuple(self.visit(arg) for arg in node.args)
-        keywords = tuple((kw.arg, self.visit(kw.value)) for kw in node.keywords)
-        # replace call should handle folding of casts
-
-        call_ = ir.Call(func_name, args, keywords)
+        if not isinstance(node.func, ast.Name):
+            raise CompilerError("Calls only supported on function names.")
+        func_name = ir.NameRef(node.func.id)
+        if node.keywords:
+            # Todo: add AST positional arguments, since these are available for expressions
+            #  at Python AST level
+            msg = "Keyword arguments are unsupported."
+            raise CompilerError(msg)
+        args = [func_name]
+        for arg in node.args:
+            args.append(self.visit(arg))
+        call_ = ir.Call(*args)
         # Todo: need a way to identify array creation
         repl = replace_call(call_)
         return repl
@@ -294,10 +307,14 @@ class TreeBuilder(ast.NodeVisitor):
         expr = ir.Select(on_true, on_false, predicate)
         return expr
 
-    def visit_Subscript(self, node: ast.Subscript) -> ir.Subscript:
+    def visit_Subscript(self, node: ast.Subscript) -> typing.Union[ir.Subscript, ir.Slice]:
         target = self.visit(node.value)
         s = self.visit(node.slice)
         value = ir.Subscript(target, s)
+        if isinstance(target, ir.Subscript):
+            # this could be done better with pretty printing
+            formatted = self.formatter(value)
+            msg = f"Nested subscripts are not currently supported: {formatted}."
         return value
 
     def visit_Index(self, node: ast.Index) -> typing.Union[ir.ValueRef, ir.NameRef, ir.Constant]:
@@ -318,9 +335,9 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_AugAssign(self, node: ast.AugAssign):
         target = self.visit(node.target)
         operand = self.visit(node.value)
-        op = binary_in_place_ops.get(type(node.op))
+        cls = binary_ops[type(node.op)]
         pos = extract_positional_info(node)
-        assign = ir.Assign(target, ir.BinOp(target, operand, op), pos)
+        assign = ir.Assign(target, cls(target, operand), pos)
         self.body.append(assign)
 
     def visit_Assign(self, node: ast.Assign):
@@ -396,6 +413,10 @@ class TreeBuilder(ast.NodeVisitor):
         # at this point.
         try:
             for target, iterable in unpack_iterated(target_node, iter_node, include_enumerate_indices=True):
+                # check for some things that aren't currently supported
+                if isinstance(target, ir.Subscript):
+                    msg = f"Setting a subscript target in a for loop iterator is currently unsupported: line{pos.line_begin}."
+                    raise CompilerError(msg)
                 targets.add(target)
                 iterables.add(iterable)
         except ValueError:
@@ -463,7 +484,7 @@ class TreeBuilder(ast.NodeVisitor):
 
 def map_functions_by_name(node: ast.Module):
     by_name = {}
-    assert(isinstance(node, ast.Module))
+    assert (isinstance(node, ast.Module))
     for n in node.body:
         if isinstance(n, ast.FunctionDef):
             by_name[n.name] = n
@@ -501,8 +522,13 @@ def populate_func_symbols(func_table, types, ignore_unbound=False):
             type_ = types.get(name)
             if type_ is None:
                 missing.append(name)
-            sym = symbol(name, type_, is_arg, is_source_name=True)
+            sym = symbol(name, type_, is_arg, is_source_name=True, is_local=is_local)
             symbols[name] = sym
+        elif name in types:
+            # if a type is given here but this is not local, raise an error
+            if s.is_referenced():
+                msg = f"Typed name {name} does not match an assignment."
+                raise CompilerError(msg)
     if missing:
         msg = f"No type provided for local variable(s) {', '.join(m for m in missing)} in function {func_name}."
         raise CompilerError(msg)
@@ -510,7 +536,6 @@ def populate_func_symbols(func_table, types, ignore_unbound=False):
 
 
 def populate_symbol_tables(module_name, src, types):
-
     table = symtable.symtable(code=src, filename=module_name, compile_type="exec")
 
     func_names = set()
@@ -548,8 +573,7 @@ def populate_symbol_tables(module_name, src, types):
 def build_module_ir_and_symbols(src_path, types):
     path = Path(src_path)
     module_name = path.name
-    with open(path) as src_stream:
-        src_text = src_stream.read()
+    src_text = path.read_text()
     func_symbol_tables = populate_symbol_tables(module_name, src_text, types)
     mod_ast = ast.parse(src_text, filename=path.name)
     mod_ast = ast.fix_missing_locations(mod_ast)

@@ -1,11 +1,6 @@
 from contextlib import contextmanager
 
 
-# Skeleton
-
-# Should be something like this. This should by default not print the entire compiler stack.
-
-
 class CompilerError(Exception):
     """
     An exception type to specify errors, which are presumed to be semantic errors in input source

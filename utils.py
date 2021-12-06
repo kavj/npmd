@@ -1,19 +1,29 @@
 import builtins
 import itertools
 import keyword
-import numbers
 
 from contextlib import contextmanager
 from functools import singledispatch, singledispatchmethod
 
 import ir
+
 from errors import CompilerError
 from visitor import walk, StmtVisitor
 
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
 
+signed_integer_range = {p: (-(2 ** (p - 1) - 1), 2 ** (p - 1) - 1) for p in (8, 32, 64)}
 
-signed_integer_range = {p: (-(2**(p-1)-1), 2**(p-1)-1) for p in (8, 32, 64)}
+
+def is_numeric_constant(node):
+    """
+    :param node: ir.ValueRef
+    :return: bool
+
+    Checks whether we have a numeric constant, which does not contain any boolean or predicate values.
+
+    """
+    return isinstance(node, ir.Constant) and node.is_integer
 
 
 class ReturnGather(StmtVisitor):
@@ -64,6 +74,16 @@ def _(node: ir.NameRef):
 
 
 @extract_name.register
+def _(node: ir.ArrayRef):
+    return node.name.name
+
+
+@extract_name.register
+def _(node: ir.ScalarRef):
+    return node.name.name
+
+
+@extract_name.register
 def _(node: ir.Function):
     name = node.name
     if isinstance(name, ir.NameRef):
@@ -80,71 +100,9 @@ def _(node: ir.Call):
 
 
 def wrap_constant(c):
-    if isinstance(c, bool):
-        return ir.BoolConst(c)
-    if isinstance(c, numbers.Integral):
-        return ir.IntConst(c)
-    elif isinstance(c, numbers.Real):
-        return ir.FloatConst(c)
-    else:
-        msg = f"Can't construct constant node for unsupported constant type {type(c)}"
-        raise NotImplementedError(msg)
-
-
-@singledispatch
-def wrap_input(value):
-    msg = f"No method to wrap {value} of type {type(value)}."
-    raise NotImplementedError(msg)
-
-
-@wrap_input.register
-def _(value: str):
-    if not is_valid_identifier(value):
-        msg = f"{value} is not a valid variable name."
-        raise ValueError(msg)
-    return ir.NameRef(value)
-
-
-@wrap_input.register
-def _(value: ir.NameRef):
-    return value
-
-
-@wrap_input.register
-def _(value: ir.Constant):
-    return value
-
-
-@wrap_input.register
-def _(value: int):
-    return ir.IntConst(value)
-
-
-@wrap_input.register
-def _(value: bool):
-    return ir.BoolConst(value)
-
-
-@wrap_input.register
-def _(value: numbers.Integral):
-    if value == 0:
-        v = ir.Zero
-    elif value == 1:
-        v = ir.One
-    else:
-        v = ir.IntConst(value)
+    # check if we have a supported type
+    v = ir.StringConst(c) if isinstance(c, str) else ir.Constant(c)
     return v
-
-
-@wrap_input.register
-def _(value: numbers.Real):
-    return ir.FloatConst(value)
-
-
-@wrap_input.register
-def _(value: tuple):
-    elts = tuple(wrap_input(elt) for elt in value)
-    return ir.Tuple(elts)
 
 
 def unpack_assignment(target, value, pos):
@@ -175,26 +133,18 @@ def unpack_iterated(target, iterable, include_enumerate_indices=True):
             raise CompilerError(msg)
     elif isinstance(iterable, ir.Enumerate):
         if isinstance(target, ir.Tuple):
-            if len(target.elements) == 2:
-                first_target, sec_target = target.elements
-                if include_enumerate_indices:
-                    # enumerate is special, because it doesn't add
-                    # constraints
-                    yield first_target, ir.AffineSeq(iterable.start, None, ir.One)
-                yield from unpack_iterated(sec_target, iterable.iterable)
-            else:
-                msg = f"Enumerate must be unpacked to exactly two targets, received {len(target.elements)}."
-                raise CompilerError(msg)
+            first_target, sec_target = target.elements
+            if include_enumerate_indices:
+                # enumerate is special, because it doesn't add
+                # constraints
+                yield first_target, ir.AffineSeq(iterable.start, None, ir.One)
+            yield from unpack_iterated(sec_target, iterable.iterable)
         else:
             msg = f"Only tuples are supported unpacking targets. Received {type(target)}."
             raise CompilerError(msg)
     else:
         # Array or sequence reference, with a single opaque target.
         yield target, iterable
-
-
-def is_pow(expr):
-    return isinstance(expr, ir.BinOp) and expr.op in ("**", "**=")
 
 
 def is_fma_pattern(expr):
@@ -205,41 +155,19 @@ def is_fma_pattern(expr):
 
     """
 
-    if isinstance(expr, ir.BinOp) and expr.op in itertools.chain(ir.add_ops, ir.subtract_ops):
+    if isinstance(expr, (ir.ADD, ir.SUB)):
         left = expr.left
         right = expr.right
         for operand in (left, right):
             if isinstance(operand, ir.BinOp):
-                if operand.op == "*":
+                if isinstance(operand, ir.MULT):
                     return True
             elif isinstance(operand, ir.UnaryOp):
                 # Expression simplifiers should have already folded any multiple
                 # nestings of unary -
-                if (operand.op == "-"
-                        and isinstance(operand.operand, ir.BinOp)
-                        and operand.operand.op == "*"):
+                if isinstance(operand, ir.USUB) and isinstance(operand.operand, ir.MULT):
                     return True
     return False
-
-
-def is_addition(node):
-    return isinstance(node, ir.BinOp) and node.op in ir.add_ops
-
-
-def is_subtraction(node):
-    return isinstance(node, ir.BinOp) and node.op in ir.subtract_ops
-
-
-def is_multiplication(node):
-    return isinstance(node, ir.BinOp) and node.op in ir.multiply_ops
-
-
-def is_bit_shift(node):
-    return isinstance(node, ir.BinOp) and node.op in ir.bit_shift_ops
-
-
-def is_logical_op(node):
-    return isinstance(node, ir.BoolOp)
 
 
 def is_compare(node):
@@ -275,21 +203,27 @@ def is_compare(node):
     return True
 
 
-def is_division(node):
-    return isinstance(node, ir.BinOp) and node.op in ir.divide_ops
-
-
-def is_floor_divide(node):
-    return isinstance(node, ir.BinOp) and node.op in ir.floor_divide_ops
-
-
-def is_true_divide(node):
-    return isinstance(node, ir.BinOp) and node.op in ir.true_divide_ops
-
-
 def is_truth_test(expr):
-    return isinstance(expr, (ir.TRUTH, ir.AND, ir.OR, ir.NOT, ir.BoolConst))
+    return isinstance(expr, (ir.TRUTH, ir.AND, ir.OR, ir.NOT, ir.Constant))
 
 
-def equals_unary_negate(node):
-    return isinstance(node, ir.UnaryOp) and node.op == "-"
+# Todo: stubs
+
+def find_calls(func):
+    pass
+
+
+def test_iter_dep(loop_node):
+    pass
+
+
+def find_loop_escapees(successors):
+    pass
+
+
+def requires_gather(loop_node):
+    pass
+
+
+def is_uniform_cond(predicate):
+    pass

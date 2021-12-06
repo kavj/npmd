@@ -1,4 +1,4 @@
-def both_term(a, b, c, d, e, f):
+def both_term(a, b, c, d, e, f, n):
     if a > b:
         for k in c:
             print(k)
