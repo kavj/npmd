@@ -1,20 +1,19 @@
 import itertools
 
-from contextlib import contextmanager
-from symtable import symtable, Function, Symbol
+from dataclasses import dataclass
+from typing import Dict
 
 import ir
-import type_resolution as tr
 
 from errors import CompilerError
-from utils import extract_name, wrap_input
+from utils import extract_name
 
 
 def reduces_array_dims(ref):
     if isinstance(ref, ir.NameRef):
         return False
     elif isinstance(ref, ir.Subscript):
-        return False if isinstance(ref.slice, ir.Slice) else True
+        return False if isinstance(ref.index, ir.Slice) else True
     else:
         msg = "{ref} does not represent array view creation."
         raise TypeError(msg)
@@ -39,30 +38,18 @@ def map_alias_to_qualified_names(import_nodes):
             raise ValueError
 
 
+@dataclass(frozen=True)
 class symbol:
     """
     variable name symbol class
     These are meant to be interned by the symbol table and not created arbitrarily.
     """
 
-    def __init__(self, name: str, type_, is_arg, is_source_name):
-        self.name = name
-        self.type_ = type_
-        self.is_arg = is_arg
-        self.is_source_name = is_source_name
-
-    def __eq__(self, other):
-        assert isinstance(other, symbol)
-        return (self.name == other.name
-                and self.is_source_name == other.is_source_name)
-
-    def __ne__(self, other):
-        assert isinstance(other, symbol)
-        return (self.name != other.name
-                or self.is_source_name != other.is_source_name)
-
-    def __hash__(self):
-        return hash(self.name)
+    name: str
+    type_: ir.TypeBase
+    is_arg: bool
+    is_source_name: bool
+    is_local: bool
 
 
 class symbol_table:
@@ -70,7 +57,7 @@ class symbol_table:
     Per function symbol table with type information and disambiguation of original source vs implementation names.
     """
 
-    def __init__(self, namespace, symbols):
+    def __init__(self, namespace: str, symbols: Dict[str, symbol]):
         self.namespace = namespace
         self.symbols = symbols
         self.name_manglers = {}
@@ -85,6 +72,12 @@ class symbol_table:
     def source_locals(self):
         for sym in self.symbols.values():
             if sym.is_source_name and not sym.is_arg:
+                yield sym
+
+    @property
+    def all_locals(self):
+        for sym in self.symbols.values():
+            if sym.is_local:
                 yield sym
 
     @property
@@ -115,7 +108,11 @@ class symbol_table:
 
     def check_type(self, name):
         name = extract_name(name)
-        return self.symbols[name].type_
+        t = self.symbols[name].type_
+        if t is None:
+            msg = f"No type declared for symbol '{name}' in namespace '{str(self.namespace)}'."
+            raise CompilerError(msg)
+        return t
 
     def _get_name_mangler(self, prefix: str):
         # splitting by prefix helps avoids appending
@@ -135,30 +132,11 @@ class symbol_table:
             msg = f"Failed to retrieve a type for name {prefix_}."
             raise CompilerError(msg)
         gen = self._get_name_mangler(prefix_)
-        name = f"{prefix_}_{next(gen)}"
+        name = f"{prefix_}"
         while self.declares(name):
             name = f"{prefix_}_{next(gen)}"
-        sym = symbol(name, type_, is_arg=False, is_source_name=False)
+        sym = symbol(name, type_, is_arg=False, is_source_name=False, is_local=True)
         self.symbols[name] = sym
         # The input name may require mangling for uniqueness.
         # Return the name as it is registered.
-        return wrap_input(name)
-
-
-def build_module_symbol_table(src, name):
-    module = module_symbol_table(name)
-    top = symtable(src, name, "exec")
-    # use default int == 64 for now. This could be made platform specific
-    # and overridable here
-    for func in top.get_children():
-        name = func.get_name()
-        if func.is_nested():
-            raise ValueError(f"{name} in file {file_name} appears as a nested scope, which is unsupported.")
-        elif func.has_children():
-            raise ValueError(f"{name} in file {file_name} contains nested scopes, which are unsupported.")
-        elif func.get_type() != "function":
-            raise TypeError(f"{name} in file {file_name} refers to a class rather than a function. This is "
-                            f"unsupported.")
-        func_table = func_symbol_table(func, tr.Int64)
-        module.register_func(func_table)
-    return module
+        return ir.NameRef(name)

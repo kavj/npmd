@@ -1,3 +1,4 @@
+import typing
 from functools import singledispatchmethod
 
 import ir
@@ -45,20 +46,27 @@ class ExpressionTransformer:
 
     """
 
-    def __call__(self, expr):
-        return self.visit(expr)
+    def __call__(self, node):
+        return self.visit(node)
 
-    def visit(self, expr: ir.ValueRef):
-        if isinstance(expr, ir.Expression):
-            cls = type(expr)
-            args = (self.visit(subexpr) for subexpr in expr.subexprs)
-            repl = cls(*args)
-            return repl
-        elif isinstance(expr, ir.ValueRef):
-            return expr
-        else:
-            msg = f"No method to rewrite object of type {type(expr)}."
-            raise NotImplementedError(msg)
+    @singledispatchmethod
+    def visit(self, node):
+        msg = f"No method to visit node of type {type(node)}"
+        raise TypeError(msg)
+
+    @visit.register
+    def _(self, node: ir.ValueRef):
+        return node
+
+    # array initializers use these
+    @visit.register
+    def _(self, node: ir.ScalarType):
+        return node
+
+    @visit.register
+    def _(self, node: ir.Expression):
+        cls = type(node)
+        return cls(*(self.visit(subexpr) for subexpr in node.subexprs))
 
 
 class StmtVisitor:
