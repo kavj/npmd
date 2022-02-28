@@ -14,7 +14,7 @@ from canonicalize import replace_call
 from errors import CompilerError
 from pretty_printing import pretty_formatter
 from symbol_table import symbol, symbol_table
-from utils import unpack_assignment, unpack_iterated, wrap_constant
+from utils import unpack_assignment, unpack_iterated
 
 binary_op_strs = {ast.Add: "+",
                   ast.Sub: "-",
@@ -223,7 +223,7 @@ class TreeBuilder(ast.NodeVisitor):
             # This will check that text is convertible to ascii.
             output = ir.StringConst(node.value)
         else:
-            output = wrap_constant(node.value)
+            output = ir.wrap_constant(node.value)
         return output
 
     def visit_Tuple(self, node: ast.Tuple) -> ir.Tuple:
@@ -337,7 +337,8 @@ class TreeBuilder(ast.NodeVisitor):
         operand = self.visit(node.value)
         cls = binary_ops[type(node.op)]
         pos = extract_positional_info(node)
-        assign = ir.Assign(target, cls(target, operand), pos)
+        expr = cls(target, operand, in_place=True)
+        assign = ir.InPlaceOp(expr, pos)
         self.body.append(assign)
 
     def visit_Assign(self, node: ast.Assign):
@@ -530,7 +531,7 @@ def populate_func_symbols(func_table, types, ignore_unbound=False):
                 msg = f"Typed name {name} does not match an assignment."
                 raise CompilerError(msg)
     if missing:
-        msg = f"No type provided for local variable(s) {', '.join(m for m in missing)} in function {func_name}."
+        msg = f"No type provided for local variable(s): '{', '.join(m for m in missing)}' in function '{func_name}'."
         raise CompilerError(msg)
     return symbol_table(func_name, symbols)
 

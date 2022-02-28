@@ -1,5 +1,7 @@
 import typing
 
+import numpy as np
+
 from functools import singledispatchmethod
 from contextlib import contextmanager
 
@@ -20,29 +22,6 @@ binop_ordering = {"**": 1, "*": 3, "@": 3, "/": 3, "//": 3, "%": 3, "+": 4, "-":
 #       I'll also need to check for differences in operator precedence.
 
 # Note, python docs don't specify truth precedence, but it should match logical "not"
-
-scalar_pretty_types = {ir.Int32: "numpy.int32",
-                       ir.Int64: "numpy.int64",
-                       ir.Float32: "numpy.float32",
-                       ir.Float64: "numpy.float64",
-                       ir.Predicate32: "32_bit_mask",
-                       ir.Predicate64: "64_bit_mask",
-                       ir.BoolType: "numpy.bool_"}
-
-
-def get_pretty_scalar_type(t):
-    scalar_type = scalar_pretty_types.get(t)
-    return scalar_type
-
-
-def get_pretty_type(t):
-    if isinstance(t, ir.ArrayType):
-        scalar_type = get_pretty_scalar_type(t.dtype)
-        assert scalar_type is not None
-        pt = f"numpy.ndarray[{scalar_type}]"
-    else:
-        pt = get_pretty_scalar_type(t)
-    return pt
 
 
 class pretty_formatter:
@@ -69,7 +48,7 @@ class pretty_formatter:
         raise NotImplementedError(msg)
 
     @visit.register
-    def _(self, node: ir.ScalarType):
+    def _(self, node: np.dtype):
         return str(node)
 
     @visit.register
@@ -467,11 +446,13 @@ class pretty_printer:
             if type_ is not None:
                 # This is None if no typed symbol is registered
                 # This will be an error later.
-                pretty_type = get_pretty_type(type_)
-                if pretty_type is not None:
-                    formatted_target = f"{formatted_target}: {pretty_type}"
+                formatted_target = f"{formatted_target}: {type_}"
         stmt = f"{formatted_target} = {formatted_value}"
         self.print_line(stmt)
+
+    @visit.register
+    def _(self, node: ir.InPlaceOp):
+        expr = self.format(node.expr)
 
     @visit.register
     def _(self, node: ir.Continue):

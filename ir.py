@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import numbers
 import operator
 import typing
@@ -10,10 +9,17 @@ import numpy as np
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+import ir
 from errors import CompilerError
 
 supported_builtins = frozenset({'iter', 'range', 'enumerate', 'zip', 'all', 'any', 'max', 'min', 'abs', 'pow',
                                 'round', 'reversed'})
+
+int32 = np.dtype('int32')
+int64 = np.dtype('int64')
+float32 = np.dtype('float32')
+float64 = np.dtype('float64')
+bool_type = np.dtype('bool')
 
 
 @dataclass(frozen=True)
@@ -34,30 +40,6 @@ class TypeBase:
 @dataclass(frozen=True)
 class CObjectType(TypeBase):
     is_array: bool
-
-
-class ScalarType(TypeBase):
-    pass
-
-
-@dataclass(frozen=True)
-class IntegerType(ScalarType):
-    bits: int
-
-
-@dataclass(frozen=True)
-class UnsignedType(ScalarType):
-    bits: int
-
-
-@dataclass(frozen=True)
-class FloatType(ScalarType):
-    bits: int
-
-
-@dataclass(frozen=True)
-class PredicateType(ScalarType):
-    bits: int
 
 
 class StmtBase:
@@ -122,56 +104,27 @@ class Expression(ValueRef):
     def subexprs(self):
         raise NotImplementedError
 
+    @classmethod
+    def reconstruct(cls, *args):
+        """
+        positional argument only method to reconstruct expression
+        :param args:
+        :return:
+        """
+        return cls(*args)
 
+
+@dataclass(frozen=True)
 class Constant(ValueRef):
     """
-    Base class for anything that can be the target of an assignment. 
-
+    ir type for numeric constant
     """
-    value: clscond = None
+    value: np.number
     constant: clscond = True
 
-    def __init__(self, value):
-        if isinstance(value, (bool, np.bool_)):
-            value = np.bool_(value)
-        elif isinstance(value, numbers.Integral):
-            # check if this fits a default integer
-            info = np.iinfo(np.int_)
-            if info.min <= value <= info.max:
-                value = np.int_(value)
-            else:
-                info = np.iinfo(np.int64)
-                if info.min <= value <= info.max:
-                    value = np.int64(value)
-                else:
-                    msg = f"No available fixed width type can hold constant {value}."
-                    raise CompilerError(msg)
-        elif isinstance(value, numbers.Real):
-            if np.isnan(value):
-                object.__setattr__(self, 'value', np.nan)
-                return
-            info = np.finfo(np.float_)
-            if info.min <= value <= info.max:
-                value = np.float_(value)
-            else:
-                info = np.finfo(np.float64)
-                if info.min <= value <= info.max:
-                    value = np.float64(value)
-                else:
-                    msg = f"No available fixed width type can hold constant {value}."
-                    raise CompilerError(msg)
-        else:
-            msg = f"Only real valued numbers are currently supported, received constant {value}."
-            raise CompilerError(msg)
-        object.__setattr__(self, 'value', value)
-
     @property
-    def is_predicate(self):
-        return isinstance(self.value, np.bool_)
-
-    @property
-    def is_integer(self):
-        return not self.is_predicate and isinstance(self.value, numbers.Integral)
+    def dtype(self):
+        return self.value.dtype
 
     def __bool__(self):
         return operator.truth(self.value)
@@ -188,18 +141,32 @@ class StringConst:
                   f"to facilitate simple printing support at some point."
             raise CompilerError(msg)
 
+    def __bool__(self):
+        return operator.truth(self.value)
+
+
+def wrap_constant(c):
+    # check if we have a supported type
+    if isinstance(c, str):
+        value = StringConst(c)
+    else:
+        raw_value = np.min_scalar_type(c).type(c)
+        value = Constant(raw_value)
+    return value
+
 
 # commonly used
-
-Zero = Constant(0)
-One = Constant(1)
-Neg_One = Constant(-1)
-NAN = Constant(math.nan)
-TRUE = Constant(True)
-FALSE = Constant(False)
+Half = wrap_constant(0.5)
+Two = wrap_constant(2)
+One = wrap_constant(1)
+Zero = wrap_constant(0)
+TRUE = wrap_constant(True)
+FALSE = wrap_constant(False)
+NAN = wrap_constant(np.nan)
 
 
 # Top Level
+
 
 # Todo: add typing to these to avoid needing constant access to symbol table
 @dataclass(frozen=True)
@@ -226,17 +193,17 @@ class NameRef(ValueRef):
 @dataclass(frozen=True)
 class ArrayType(TypeBase):
     ndims: int
-    dtype: ScalarType
+    dtype: np.dtype
 
     def __post_init__(self):
         assert isinstance(self.ndims, int)
         assert self.ndims > 0
-        assert isinstance(self.dtype, ScalarType)
+        assert isinstance(self.dtype, np.dtype)
 
 
 class ArrayInitializer(Expression):
     shape: Tuple
-    dtype: ScalarType
+    dtype: np.dtype
 
     @property
     def subexprs(self):
@@ -247,11 +214,11 @@ class ArrayInitializer(Expression):
 @dataclass(frozen=True)
 class Ones(ArrayInitializer):
     shape: Tuple
-    dtype: ScalarType
+    dtype: np.dtype
 
     def __post_init__(self):
         assert self.shape is None or isinstance(self.shape, tuple)
-        assert isinstance(self.dtype, ScalarType)
+        assert isinstance(self.dtype, np.dtype)
         if len(self.shape) > 4:
             msg = f"Arrays with more than 4 dims are unsupported here"
             raise CompilerError(msg)
@@ -260,11 +227,11 @@ class Ones(ArrayInitializer):
 @dataclass(frozen=True)
 class Zeros(ArrayInitializer):
     shape: Tuple
-    dtype: ScalarType
+    dtype: np.dtype
 
     def __post_init__(self):
         assert self.shape is None or isinstance(self.shape, tuple)
-        assert isinstance(self.dtype, ScalarType)
+        assert isinstance(self.dtype, np.dtype)
         if len(self.shape) > 4:
             msg = f"Arrays with more than 4 dims are unsupported here"
             raise CompilerError(msg)
@@ -273,11 +240,11 @@ class Zeros(ArrayInitializer):
 @dataclass(frozen=True)
 class Empty(ArrayInitializer):
     shape: Tuple
-    dtype: ScalarType
+    dtype: np.dtype
 
     def __post_init__(self):
         assert self.shape is None or isinstance(self.shape, tuple)
-        assert isinstance(self.dtype, ScalarType)
+        assert isinstance(self.dtype, np.dtype)
         if len(self.shape) > 4:
             msg = f"Arrays with more than 4 dims are unsupported here"
             raise CompilerError(msg)
@@ -286,7 +253,7 @@ class Empty(ArrayInitializer):
 @dataclass(frozen=True)
 class ArrayArg(Expression):
     ndims: Constant
-    dtype: ScalarType
+    dtype: np.dtype
 
     @property
     def subexprs(self):
@@ -308,7 +275,7 @@ class ArrayRef(ValueRef):
 @dataclass(frozen=True)
 class ScalarRef(ValueRef):
     name: NameRef
-    type: ScalarType
+    type: np.dtype
 
 
 @dataclass(frozen=True)
@@ -317,7 +284,7 @@ class SingleDimRef(Expression):
     dim: Constant
 
     def __post_init__(self):
-        if not isinstance(self.dim, Constant) or not self.dim.is_integer:
+        if not isinstance(self.dim, Constant) or not isinstance(self.dim.value, numbers.Integral):
             msg = f"Expected integer constant, received {self.dim} of type {type(self.dim)}."
             raise TypeError(msg)
 
@@ -391,8 +358,12 @@ class Min(Expression):
     right: ValueRef
 
     def __init__(self, left, right):
-        assert isinstance(left, ValueRef)
-        assert isinstance(right, ValueRef)
+        if not isinstance(left, ValueRef):
+            msg = f"{left} is not a value reference."
+            raise TypeError(msg)
+        if not isinstance(right, ValueRef):
+            msg = f"{right} is not a value reference"
+            raise TypeError(msg)
         object.__setattr__(self, "left", left)
         object.__setattr__(self, "right", right)
 
@@ -404,10 +375,11 @@ class Min(Expression):
 
 @dataclass(frozen=True)
 class MinReduction(Expression):
-    values: typing.Any
+    values: frozenset
 
     def __init__(self, *values):
         object.__setattr__(self, "values", frozenset(values))
+        assert len(self.values) > 0
 
     @property
     def subexprs(self):
@@ -434,10 +406,11 @@ class Max(Expression):
 
 @dataclass(frozen=True)
 class MaxReduction(Expression):
-    values: typing.Any
+    values: frozenset
 
     def __init__(self, *values):
         object.__setattr__(self, "values", frozenset(values))
+        assert len(self.values) > 0
 
     @property
     def subexprs(self):
@@ -533,6 +506,8 @@ class BinOp(Expression):
 
     left: ValueRef
     right: ValueRef
+    in_place: bool
+    op: typing.ClassVar[str] = "NOT_IMPLEMENTED"
 
     def __init__(self, left, right):
         raise NotImplementedError("Binops cannot be instantiated.")
@@ -547,78 +522,104 @@ class BinOp(Expression):
 class ADD(BinOp):
     left: ValueRef
     right: ValueRef
+    in_place: typing.Optional[bool] = False
+    op: typing.ClassVar[str] = "+"
 
 
 @dataclass(frozen=True)
 class SUB(BinOp):
     left: ValueRef
     right: ValueRef
+    in_place: typing.Optional[bool] = False
+    op: typing.ClassVar[str] = "-"
 
 
 @dataclass(frozen=True)
 class MULT(BinOp):
     left: ValueRef
     right: ValueRef
+    in_place: typing.Optional[bool] = False
+    op: typing.ClassVar[str] = "*"
 
 
 @dataclass(frozen=True)
 class TRUEDIV(BinOp):
     left: ValueRef
     right: ValueRef
+    in_place: typing.Optional[bool] = False
+    op: typing.ClassVar[str] = "/"
 
 
 @dataclass(frozen=True)
 class FLOORDIV(BinOp):
     left: ValueRef
     right: ValueRef
+    in_place: typing.Optional[bool] = False
+    op: typing.ClassVar[str] = "//"
 
 
 @dataclass(frozen=True)
 class MOD(BinOp):
     left: ValueRef
     right: ValueRef
+    in_place: typing.Optional[bool] = False
+    op: typing.ClassVar[str] = "%"
 
 
 @dataclass(frozen=True)
 class POW(BinOp):
     left: ValueRef
     right: ValueRef
+    in_place: typing.Optional[bool] = False
+    op: typing.ClassVar[str] = "**"
 
 
 @dataclass(frozen=True)
 class LSHIFT(BinOp):
     left: ValueRef
     right: ValueRef
+    in_place: typing.Optional[bool] = False
+    op: typing.ClassVar[str] = "<<"
 
 
 @dataclass(frozen=True)
 class RSHIFT(BinOp):
     left: ValueRef
     right: ValueRef
+    in_place: typing.Optional[bool] = False
+    op: typing.ClassVar[str] = ">>"
 
 
 @dataclass(frozen=True)
 class BITOR(BinOp):
     left: ValueRef
     right: ValueRef
+    in_place: typing.Optional[bool] = False
+    op: typing.ClassVar[str] = "|"
 
 
 @dataclass(frozen=True)
 class BITXOR(BinOp):
     left: ValueRef
     right: ValueRef
+    in_place: typing.Optional[bool] = False
+    op: typing.ClassVar[str] = "^"
 
 
 @dataclass(frozen=True)
 class BITAND(BinOp):
     left: ValueRef
     right: ValueRef
+    in_place: typing.Optional[bool] = False
+    op: typing.ClassVar[str] = "&"
 
 
 @dataclass(frozen=True)
 class MATMULT(BinOp):
     left: ValueRef
     right: ValueRef
+    in_place: typing.Optional[bool] = False
+    op: typing.ClassVar[str] = "@"
 
 
 @dataclass(frozen=True)
@@ -637,6 +638,7 @@ class Length(Expression):
 class CompareOp(Expression):
     left: ValueRef
     right: ValueRef
+    op: typing.ClassVar[str] = "NOT_IMPLEMENTED"
 
     @property
     def subexprs(self):
@@ -648,46 +650,58 @@ class CompareOp(Expression):
 class EQ(CompareOp):
     left: ValueRef
     right: ValueRef
+    op: typing.ClassVar[str] = "=="
 
 
 @dataclass(frozen=True)
 class NE(CompareOp):
     left: ValueRef
     right: ValueRef
+    op: typing.ClassVar[str] = "!="
 
 
 @dataclass(frozen=True)
 class LT(CompareOp):
     left: ValueRef
     right: ValueRef
+    op: typing.ClassVar[str] = "<"
 
 
 @dataclass(frozen=True)
 class LE(CompareOp):
     left: ValueRef
     right: ValueRef
+    op: typing.ClassVar[str] = "<="
 
 
 @dataclass(frozen=True)
 class GT(CompareOp):
     left: ValueRef
     right: ValueRef
+    op: typing.ClassVar[str] = ">"
 
 
 @dataclass(frozen=True)
 class GE(CompareOp):
     left: ValueRef
     right: ValueRef
+    op: typing.ClassVar[str] = ">="
 
+
+# Todo: These two are not correct. Fix..
 
 @dataclass(frozen=True)
 class IN(CompareOp):
     operand: ValueRef
+    target: ValueRef
+    op: typing.ClassVar[str] = "in"
 
 
 @dataclass(frozen=True)
 class NOTIN(CompareOp):
     operand: ValueRef
+    target: ValueRef
+    op: typing.ClassVar[str] = "not in"
 
 
 class BoolOp(Expression):
@@ -697,6 +711,8 @@ class BoolOp(Expression):
 
     """
     operands: typing.Iterable[ValueRef, ...]
+    op: typing.ClassVar[str] = "NOT_IMPLEMENTED"
+    c_op: typing.ClassVar[str] = "NOT_IMPLEMENTED"
 
     @property
     def subexprs(self):
@@ -710,6 +726,7 @@ class OR(BoolOp):
     Boolean OR
     """
     operands: typing.Iterable[ValueRef, ...]
+    op: typing.ClassVar[str] = "or"
 
     def __init__(self, *operands):
         object.__setattr__(self, 'operands', frozenset(operands))
@@ -721,6 +738,7 @@ class AND(BoolOp):
     Boolean AND
     """
     operands: typing.Tuple[ValueRef, ...]
+    op: typing.ClassVar[str] = "and"
 
     def __init__(self, *operands):
         object.__setattr__(self, 'operands', operands)
@@ -732,6 +750,7 @@ class XOR(BoolOp):
     Boolean XOR
     """
     operands: typing.Tuple[ValueRef, ...]
+    op: typing.ClassVar[str] = "NOT_IMPLEMENTED" # there is no direct python equivalent
 
     def __init__(self, *operands):
         object.__setattr__(self, 'operands', frozenset(operands))
@@ -770,6 +789,7 @@ class TRUTH(BoolOp):
 
     """
     operand: ValueRef
+    op: typing.ClassVar[str] = ""
 
     def __post_init__(self):
         assert isinstance(self.operand, ValueRef)
@@ -786,6 +806,7 @@ class NOT(BoolOp):
     """
 
     operand: ValueRef
+    op: typing.ClassVar[str] = "not"
 
     def __post_init__(self):
         assert isinstance(self.operand, ValueRef)
@@ -830,9 +851,15 @@ class AffineSeq(Expression):
     step: ValueRef
 
     def __post_init__(self):
-        assert isinstance(self.start, ValueRef)
-        assert self.stop is None or isinstance(self.stop, ValueRef)
-        assert isinstance(self.step, ValueRef)
+        if not isinstance(self.start, ValueRef):
+            msg = f"Start param of affine sequence must be a value reference. Received: {self.start}."
+            raise ValueError(msg)
+        if self.stop is not None and not isinstance(self.stop, ir.ValueRef):
+            msg = f"Stop param of affine sequence must be a value reference. Received: {self.stop}."
+            raise ValueError(msg)
+        if not isinstance(self.step, ir.ValueRef):
+            msg = f"Step param of affine sequence must be a value reference. Received: {self.step}."
+            raise ValueError(msg)
 
     @property
     def reversed(self):
@@ -917,7 +944,7 @@ class Enumerate(Expression):
         nargs = len(args)
         if nargs == 1:
             iterable, = args
-            start = Zero
+            start = wrap_constant(0)
         elif nargs == 2:
             iterable, start = args
             pass
@@ -949,6 +976,23 @@ class Zip(Expression):
             yield e
 
 
+@dataclass(frozen=True)
+class InPlaceOp(StmtBase):
+    expr: BinOp
+    pos: Position
+
+    def __post_init__(self):
+        assert isinstance(self.expr, BinOp) and self.expr.in_place
+
+    @property
+    def target(self):
+        return self.expr.left
+
+    @property
+    def value(self):
+        return self.expr.right
+
+
 @dataclass
 class Assign(StmtBase):
     """
@@ -963,6 +1007,8 @@ class Assign(StmtBase):
     def __post_init__(self):
         assert isinstance(self.target, ValueRef)
         assert isinstance(self.value, ValueRef)
+        if isinstance(self.value, BinOp):
+            assert not self.value.in_place
 
 
 @dataclass
@@ -971,8 +1017,6 @@ class SingleExpr(StmtBase):
     pos: Position
 
     def __post_init__(self):
-        if not isinstance(self.expr, ValueRef):
-            print("something")
         assert isinstance(self.expr, ValueRef)
 
 
@@ -1070,17 +1114,6 @@ class WhileLoop(StmtBase):
         assert isinstance(self.test, ValueRef)
 
 
-@dataclass(frozen=True)
-class gather(Expression):
-    array: ValueRef
-    stride: ValueRef
-    count: Constant
-
-    def subexprs(self):
-        yield self.array
-        yield self.stride
-
-
 compare_ops = {EQ: "==",
                NE: "!=",
                LT: "<",
@@ -1088,43 +1121,29 @@ compare_ops = {EQ: "==",
                GT: ">",
                GE: ">=",
                IN: "in",
-               NOTIN: "not in"}
+               NOTIN: "not in"
+               }
 
 binop_ops = {ADD: "+",
              SUB: "-",
              MULT: "*",
              TRUEDIV: "/",
              FLOORDIV: "//",
-             POW: "**"}
+             POW: "**",
+             }
+
+inplace_binops = {ADD: "+=",
+                  SUB: "-=",
+                  MULT: "*=",
+                  TRUEDIV: "/=",
+                  FLOORDIV: "//=",
+                  POW: "**="
+                  }
 
 unary_ops = {
     USUB: "-",
     UNOT: "~"
 }
-
-# partial interning of supported types
-
-Float32 = FloatType(bits=32)
-Float64 = FloatType(bits=64)
-UInt32 = UnsignedType(bits=32)
-UInt64 = UnsignedType(bits=64)
-Int32 = IntegerType(bits=32)
-Int64 = IntegerType(bits=64)
-Predicate32 = PredicateType(bits=32)
-Predicate64 = PredicateType(bits=64)
-# awkward exception here due to the canonical "bool" type being castable to a signed char
-BoolType = PredicateType(bits=8)
-
-supported_types = {Float32, Float64, UInt32, UInt64, Predicate32, Predicate64, BoolType}
-
-# dtypes are returned by promote_types and other parts of the numpy interface
-# so we need to include them
-
-by_input_dtype = {np.dtype(np.int32): Int32,
-                  np.dtype(np.int64): Int64,
-                  np.dtype(np.float32): Float32,
-                  np.dtype(np.float64): Float64,
-                  np.dtype(np.bool_): BoolType}
 
 # constructable
 
@@ -1135,15 +1154,6 @@ constr_by_dtype = {
     np.dtype(np.float64): np.float64,
     np.dtype(np.bool_): np.bool_
 }
-
-default_int_dtype = by_input_dtype[np.dtype(np.int_)]
-default_float_dtype = by_input_dtype[np.dtype(np.float_)]
-
-by_ir_type = {Int32: np.dtype(np.int32),
-              Int64: np.dtype(np.int64),
-              Float32: np.dtype(np.int64),
-              Float64: np.dtype(np.int64),
-              BoolType: np.bool_}
 
 np_func_by_binop = {
     ADD: np.add,
@@ -1159,14 +1169,4 @@ np_func_by_binop = {
     BITAND: np.bitwise_and,
     BITXOR: np.bitwise_xor,
     UNOT: np.bitwise_not
-}
-
-truth_type_table = {
-    Int32: Predicate32,
-    Int64: Predicate64,
-    Float32: Predicate32,
-    Float64: Predicate64,
-    BoolType: BoolType,
-    Predicate32: Predicate32,
-    Predicate64: Predicate64
 }

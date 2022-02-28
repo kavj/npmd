@@ -1,3 +1,6 @@
+import itertools
+import math
+import numbers
 import operator
 import typing
 
@@ -6,67 +9,14 @@ from collections import defaultdict
 from functools import singledispatchmethod, singledispatch
 
 import ir
-import type_resolution as tr
 from errors import CompilerError
+from type_checks import TypeHelper
 from pretty_printing import pretty_formatter
+from reductions import ExpressionMapper
 from symbol_table import symbol_table
-from utils import is_truth_test, wrap_constant, unpack_iterated, is_numeric_constant
-from visitor import ExpressionVisitor, ExpressionTransformer, StmtTransformer, walk
+from utils import unpack_iterated
+from visitor import StmtVisitor, StmtTransformer, walk
 
-unaryops = {ir.USUB: operator.neg,
-            ir.UNOT: operator.inv,
-            }
-
-binops = {ir.ADD: operator.add,
-          ir.SUB: operator.sub,
-          ir.MULT: operator.mul,
-          ir.TRUEDIV: operator.truediv,
-          ir.FLOORDIV: operator.floordiv,
-          ir.MOD: operator.mod,
-          ir.POW: operator.pow,
-          ir.MATMULT: operator.matmul,
-          ir.EQ: operator.eq,
-          ir.NE: operator.ne,
-          ir.LT: operator.lt,
-          ir.LE: operator.le,
-          ir.GT: operator.gt,
-          ir.GE: operator.ge,
-          ir.LSHIFT: operator.lshift,
-          ir.RSHIFT: operator.rshift,
-          ir.BITAND: operator.and_,
-          ir.BITOR: operator.or_,
-          ir.BITXOR: operator.xor,
-          }
-
-
-const_folders = {
-    ir.ADD: np.add,
-    ir.SUB: np.subtract,
-    ir.MULT: np.multiply,
-    ir.TRUEDIV: np.true_divide,
-    ir.FLOORDIV: np.floor_divide,
-    ir.MOD: np.mod,
-    ir.POW: np.power,
-    ir.LSHIFT: np.left_shift,
-    ir.RSHIFT: np.right_shift,
-    ir.BITOR: np.bitwise_or,
-    ir.BITAND: np.bitwise_and,
-    ir.BITXOR: np.bitwise_xor,
-    ir.UNOT: np.bitwise_not
-}
-
-
-def fold_constant_binop(node: ir.BinOp):
-    if isinstance(node.left, ir.Constant) and isinstance(node.right, ir.Constant):
-        assert not isinstance(node.left.value, np.bool_)
-        assert not isinstance(node.left.value, np.bool_)
-        if isinstance(node, (ir.TRUEDIV, ir.FLOORDIV)):
-            if node.right == ir.Zero:
-                msg = f"Divide by zero error {node}."
-                raise CompilerError(msg)
-        folder = const_folders[type(node)]
-        return ir.Constant(folder(node.left.value, node.right.value))
-    return node
 
 
 @singledispatch
@@ -78,351 +28,413 @@ def is_constant_expr(expr):
     return all(isinstance(c, ir.Constant) for c in walk(expr))
 
 
-def serialize_reduction(reduc: typing.Union[ir.MinReduction, ir.MaxReduction], syms: symbol_table, pos: ir.Position):
-    """
-    Turn a reduction into a series of single statement pairwise operations.
-
-    :param reduc: initial reduction
-    :syms: Symbol table for generating intermediates
-    :return:  statements and final expression
-    """
-
-    op = ir.Min if isinstance(reduc, ir.MinReduction) else ir.Max
-    values = set(reduc.subexprs)
-    stmts = []
-
-    if len(values) == 1:
-        return values, stmts
-
-    type_infer = tr.ExprTypeInfer(syms)
-    tail = values.pop() if len(values) % 2 else None
-
-    while len(values) > 2:
-        value_iter = iter(values)
-        repl_values = []
-        for left, right in zip(value_iter, value_iter):
-            expr = op(left, right)
-            t = type_infer(expr)
-            name = syms.make_unique_name_like(name="tmp", type_=t)
-            assign = ir.Assign(target=name, value=expr, pos=pos)
-            stmts.append(assign)
-        values = repl_values
-
-    out_expr = op(*values)
-
-    if tail is not None:
-        out_expr = op(out_expr, tail)
-
-    return out_expr, stmts
+def has_nan(node: ir.Expression):
+    for subexpr in node.subexprs:
+        if isinstance(subexpr, ir.Constant):
+            if np.isnan(subexpr.value):
+                return True
 
 
-class MinMaxSimplifier(ExpressionTransformer):
+def is_constant(node: ir.Expression):
+    return all(isinstance(subexpr, ir.Constant) for subexpr in node.subexprs)
 
-    def __init__(self, syms):
-        self.syms = syms
+
+def fold_arithmetic_binop(folder, node):
+    if has_nan(node):
+        return ir.NAN
+    if is_constant(node):
+        return folder(node.left.value, node.right.value)
+    return node
+
+
+def fold_compare_op(folder, node, on_nan):
+    if has_nan(node):
+        return on_nan
+    if is_constant(node):
+        return folder(node.left.value, node.right.value)
+
+
+def fold_bit_op(folder, node):
+    if is_constant(node):
+        for subexpr in node.subexprs:
+            if not isinstance(subexpr.value, numbers.Integral):
+                msg = f"Unsupported operand '{subexpr.value}' for bit field operator {type(node)}."
+                raise CompilerError(msg)
+        return np.folder(node.left.value, node.right.value)
+
+
+@singledispatch
+def fold_op(node):
+    raise NotImplementedError
+
+
+@fold_op.register
+def _(node: ir.ValueRef):
+    return node
+
+
+@fold_op.register
+def _(node: ir.ADD):
+    return fold_arithmetic_binop(np.add, node)
+
+
+@fold_op.register
+def _(node: ir.SUB):
+    return fold_arithmetic_binop(np.sub, node)
+
+
+@fold_op.register
+def _(node: ir.MULT):
+    return fold_arithmetic_binop(np.multiply, node)
+
+
+@fold_op.register
+def _(node: ir.TRUEDIV):
+    return fold_arithmetic_binop(np.true_divide, node)
+
+
+@fold_op.register
+def _(node: ir.FLOORDIV):
+    return fold_arithmetic_binop(np.floor_divide, node)
+
+
+@fold_op.register
+def _(node: ir.MOD):
+    return fold_arithmetic_binop(np.mod, node)
+
+
+@fold_op.register
+def _(node: ir.POW):
+    # Todo: This needs cast nodes, so that something like a**2 comes out as np.float64(a * a)
+    if is_constant(node):
+        return np.power(node.left, node.right)
+    base, exponent = node.subexprs
+    if exponent == ir.Zero:
+        # numpy has this taking precedence
+        if isinstance(exponent.value, numbers.Integral):
+            # only fold if no unsafe stuff
+            return ir.One
+    elif has_nan(node):
+        return ir.NAN
+    elif base == 0:
+        if isinstance(exponent.value, numbers.Integral):
+            return ir.Zero
+    elif exponent == ir.Half:
+        return ir.Sqrt(base)
+    elif exponent == ir.One:
+        return base
+    elif exponent == ir.Two:
+        return ir.MULT(base, base)
+    return node
+
+
+@fold_op.register
+def _(node: ir.MATMULT):
+    return node
+
+
+@fold_op.register
+def _(node: ir.EQ):
+    return fold_compare_op(np.equal, node, ir.FALSE)
+
+
+@fold_op.register
+def _(node: ir.NE):
+    return fold_compare_op(np.not_equal, node, ir.TRUE)
+
+
+@fold_op.register
+def _(node: ir.LT):
+    return fold_compare_op(np.less, node, ir.FALSE)
+
+
+@fold_op.register
+def _(node: ir.LE):
+    return fold_compare_op(np.less_equal, node, ir.FALSE)
+
+
+@fold_op.register
+def _(node: ir.GT):
+    return fold_compare_op(np.greater, node, ir.FALSE)
+
+
+@fold_op.register
+def _(node: ir.GE):
+    return fold_compare_op(np.greater_equal, node, ir.FALSE)
+
+
+@fold_op.register
+def _(node: ir.AND):
+    subexprs = []
+    for subexpr in node.subexprs:
+        if isinstance(node, ir.Constant):
+            if node.value == 0:
+                return ir.FALSE
+        else:
+            # only add non-constant exprs
+            subexprs.append(subexpr)
+    if len(subexprs) == 0:
+        # all True constants
+        return ir.TRUE
+    return ir.AND(*subexprs)
+
+
+@fold_op.register
+def _(node: ir.OR):
+    subexpr = []
+    for subexpr in node.subexprs:
+        if isinstance(node, ir.Constant):
+            if node.value != 0:
+                return ir.TRUE
+        else:
+            subexprs.append(subexpr)
+    if len(subexprs) == 0:
+        # all False constants
+        return ir.FALSE
+
+
+@fold_op.register
+def _(node: ir.XOR):
+    if is_constant(node):
+        accum = node.operands[0]
+        for term in itertools.islice(node.operands, 1):
+            accum = operator.xor(accum, term)
+        return accum
+    return node
+
+
+@fold_op.register
+def _(node: ir.LSHIFT):
+    return fold_bit_op(np.left_shift, node)
+
+
+@fold_op.register
+def _(node: ir.RSHIFT):
+    return fold_bit_op(np.right_shift, node)
+
+
+@fold_op.register
+def _(node: ir.BITOR):
+    return fold_bit_op(np.bitwise_or, node)
+
+
+@fold_op.register
+def _(node: ir.BITAND):
+    return fold_bit_op(np.bitwise_and, node)
+
+
+@fold_op.register
+def _(node: ir.BITXOR):
+    return fold_bit_op(np.bitwise_xor, node)
+
+
+@fold_op.register
+def _(node: ir.UNOT):
+    if is_constant(node):
+        return ir.TRUE if node.operand == ir.Zero else ir.FALSE
+    return node
+
+
+@fold_op.register
+def _(node: ir.USUB):
+    if is_constant(node):
+        return np.negative(node.operand.value)
+    return node
+
+
+@fold_op.register
+def _(self, node: ir.TRUTH):
+    # This will leave truth casts on constant integers
+    # and floats, since the only gain there is a loss
+    # of clarity.
+    if isinstance(node, ir.Constant):
+        if node.value == 0:
+            return ir.FALSE
+        else:
+            return ir.TRUE
+    return node
+
+
+@fold_op.register
+def _(self, node: ir.Select):
+    if isinstance(node.predicate, ir.Constant):
+        # partial fold if constant predicate
+        if node.predicate.value:
+            return node.on_true
+        else:
+            return node.on_false
+    return node
+    if is_constant(node):
+        if node.predicate.value:
+            return node.on_true
+        else:
+            return node.on_false
+    # predicate is non-const. Check if coercible to Min or max
+    if isinstance(predicate, (ir.LT, ir.LE)):
+        left, right = predicate.subexprs
+        if on_true == left and on_false == right:
+            return ir.Min(on_true, on_false)
+        elif on_false == right and on_true == left:
+            # This is almost negated. The issue is if in the destination assembly:
+            #
+            #     min(a,b) is implemented as a if a <= b else b
+            #     max(a,b) is implemented as a if a >= b else b
+            #
+            #  which is common, we reverse operand order to properly catch unordered cases
+            #  This does not follow Python's min/max conventions, which are too error prone.
+            #  Those can arbitrarily propagate or suppress nans as a side effect of
+            #  determining type from the leading operand.
+            return ir.Max(on_false, on_true)
+    elif isinstance(predicate, (ir.GT, ir.GE)):
+        if on_true == predicate.left and on_false == predicate.right:
+            return ir.Max(on_true, on_false)
+        elif on_true == predicate.right and on_false == predicate.left:
+            # right if left < right else left
+            return ir.Min(on_false, on_true)
+    return node
+
+
+def simplify_expr(node: ir.Expression):
+    rewritten = {}
+    for subexpr in walk(node):
+        if isinstance(subexpr, ir.Expression):
+            # find any previously simplified
+            rewrite = subexpr.reconstruct(*(rewritten.get(s, s) for s in subexpr.subexprs))
+            # Now try to simplify the resulting expression
+            rewritten[subexpr] = fold_op(rewrite)
+    return rewritten.get(node, node)
+
+
+class TargetCollector(StmtVisitor):
+
+    def __init__(self):
+        self.targets = defaultdict(list)
+
+    @classmethod
+    def run(cls, node):
+        obj = cls()
+        obj.visit(node)
+        return obj.targets
 
     @singledispatchmethod
     def visit(self, node):
-        return super().visit(node)
+        super().visit(node)
 
     @visit.register
-    def _(self, node: ir.MaxReduction):
-        numeric = set()
-        symbolic = set()
-        for subexpr in node.subexprs:
-            subexpr = self.visit(subexpr)
-            if isinstance(subexpr, ir.Constant):
-                numeric.add(subexpr.value)
-            else:
-                symbolic.add(subexpr)
-        if numeric:
-            numeric = wrap_constant(np.max(tuple(numeric)))
-            if numeric == ir.NAN or not symbolic:
-                return numeric
-            symbolic.add(numeric)
-        return ir.MaxReduction(symbolic)
+    def _(self, node: ir.Assign):
+        self.targets[node.target].append(node.value)
 
     @visit.register
-    def _(self, node: ir.MinReduction):
-        numeric = set()
-        symbolic = set()
-        for subexpr in node.subexprs:
-            subexpr = self.visit(subexpr)
-            if isinstance(subexpr, ir.Constant):
-                numeric.add(subexpr.value)
-            else:
-                symbolic.add(subexpr)
-        if numeric:
-            numeric = wrap_constant(np.min(tuple(numeric)))
-            if numeric == ir.NAN or not symbolic:
-                return numeric
-            symbolic.add(numeric)
-        return ir.MinReduction(*symbolic)
-
-    @visit.register
-    def _(self, node: ir.Min):
-        left = self.visit(node.left)
-        right = self.visit(node.right)
-        if left == right:
-            return left
-        elif ir.NAN in (left, right):
-            # follow numpy rules
-            return ir.NAN
-        return ir.Min(left, right)
-
-    @visit.register
-    def _(self, node: ir.Max):
-        left = self.visit(node.left)
-        right = self.visit(node.right)
-        if left == right:
-            return left
-        elif ir.NAN in (left, right):
-            return ir.NAN
-        return ir.Max(left, right)
+    def _(self, node: ir.ForLoop):
+        for target, iterable in unpack_iterated(node):
+            self.targets[target].append(iterable)
 
 
-# Todo: A lot of this can't be done consistently without type information. Some folding of constants
-#       is actually useful in determining the types that can hold a constant, but they shouldn't be
-#       completely folded until we have type info. Otherwise we can end up using overflowing values
-#       in a way that may differ from compiler sanitization flags.
+def collect_views(node, typer: TypeHelper):
+    targets = TargetCollector.run(node)
+    views = {}
+    others = {}
+    for target, values in targets.items():
+        t = typer.check_type(target)
+        if isinstance(t, ir.ArrayType):
+            if len(values) != 1:
+                pf = pretty_formatter()
+                msg = f"Sub-array views must be uniquely defined, received: {pf(target)} {values}."
+                raise CompilerError(msg)
+            views[target] = vales.pop()
+        else:
+            others[target] = values
+    return views, others
 
 
-def is_numeric_const_expr(expr):
-    if isinstance(expr, ir.Expression):
-        return all(isinstance(s, ir.Constant) and not s.is_predicate for s in expr.subexprs)
-    elif is_numeric_constant(expr):
-        return True
-    return False
+def find_subscripts(expr: ir.Expression):
+    return {e for e in walk(expr) if isinstance(e, ir.Subscript)}
 
 
-def unwrap_truth_tested(expr):
-    """
-    Extract truth tested operands. This helps limit isinstance checks for cases
-    where an enclosing expression will refer to the truth test of expr, with or
-    without an explicit TRUTH node wrapper.
-    """
-    if isinstance(expr, ir.TRUTH):
-        expr = expr.operand
-    return expr
+def name_indices(target: ir.ValueRef, iterable: ir.ValueRef, clobbers: typing.Dict[ir.ValueRef, ir.ValueRef]):
+    # Todo: debating ditching sub-array views in this manner
+    if not isinstance(target, ir.NameRef):
+        pf = pretty_formatter()
+        ft = pf(target)
+        fi = pf(iterable)
+        msg = f"Binding subscripts in loop headers is unsupported: {ft} from {fi}."
+        raise CompilerError(msg)
+    if iterable in clobbers:
+        pass
 
 
-class arithmetic_folding(ExpressionTransformer):
-    """
-    Non-recursive visitor for folding identity ops
+class IndexFreezer(StmtTransformer):
+    def __init__(self, views: typing.Dict[ir.ValueRef, ir.ValueRef],
+                 clobbers: typing.Dict[ir.ValueRef, ir.ValueRef],
+                 typer: TypeHelper):
+        self.views = views
+        self.view_to_index_name = {}
+        self.clobbers = clobbers
+        self.typer = typer
 
-    This does not respect unordered operands such as nans. It's primarily intended for integer
-    arithmetic.
-
-    """
-
-    def __init__(self, syms):
-        self.typing = tr.ExprTypeInfer(syms)
+    @classmethod
+    def freeze(cls, node, views, clobbers, typer):
+        visitor = cls()
 
     @singledispatchmethod
-    def visit(self, expr):
-        return super().visit(expr)
+    def visit(self, node):
+        super().visit(node)
 
     @visit.register
-    def _(self, node: ir.POW):
-        repl = ir.POW(self.visit(node.left), self.visit(node.right))
-        repl = fold_constant_binop(repl)
-        if isinstance(repl, ir.Constant):
-            return repl
-        t = self.typing.visit(repl)
-        cls = ir.by_ir_type[t]
-        if repl.right == ir.Zero:
-            # forward type information through cast
-            # wrap constant should handle this explicitly
-            return cls(1)
-        elif repl.left == ir.Zero:
-            # only fold this case if it's provably safe
-            if isinstance(repl.right, ir.Constant) and repl.right.value > 0:
-                # get type from left
-                return cls(0)
-        elif repl.right == ir.One:
-            # this needs to deal with casting
-            return repl.left
-        elif repl.right == ir.Constant(2):
-            # again, have to deal with the implied cast
-            return ir.MULT(repl.left, repl.right)
-        elif repl.right == ir.Constant(0.5):
-            # check for square root
-            return ir.Sqrt(repl.left)
-        return ir.POW(repl.left, repl.right)
-
-    @visit.register
-    def _(self, node: ir.ADD):
-        left = self.visit(node.left)
-        right = self.visit(node.right)
-        if right == ir.Zero:
-            return left
-        elif isinstance(right, ir.USUB):
-            return ir.SUB(left, right.operand)
-        elif isinstance(left, ir.USUB):
-            return ir.SUB(right, left.operand)
-        return ir.ADD(left, right)
-
-    @visit.register
-    def _(self, node: ir.SUB):
-        left = self.visit(node.left)
-        right = self.visit(node.right)
-        if left == ir.Zero:
-            if isinstance(right, ir.USUB):
-                return right.operand
+    def _(self, node: list):
+        stmts = []
+        for stmt in node:
+            repl = self.visit(stmt)
+            if isinstance(repl, list):
+                stmts.extend(repl)
             else:
-                return ir.USUB(right)
-        elif isinstance(right, ir.USUB):
-            return ir.ADD(left, right.operand)
-        elif right == ir.Zero:
-            return left
-        return ir.SUB(left, right)
+                stmts.append(repl)
 
     @visit.register
-    def _(self, node: ir.MULT):
-        left = self.visit(node.left)
-        right = self.visit(node.right)
-        negative_one = ir.Constant(-1)
-        if left == ir.Zero or right == ir.Zero:
-            return ir.Zero
-        elif left == ir.One:
-            return right
-        elif right == ir.One:
-            return left
-        elif left == negative_one:
-            if isinstance(right, ir.USUB):
-                return right.operand
-            else:
-                return ir.USUB(right)
-        elif right == negative_one:
-            if isinstance(left, ir.USUB):
-                return left.operand
-            else:
-                return ir.USUB(left)
-        return ir.MULT(left, right)
+    def _(self, node: ir.ForLoop):
+        for target, iterable in unpack_iterated(node.target, node.iterable):
+            t = self.typer.check_type(target)
+            if isinstance(t, ir.ArrayType):
+                assert isinstance(target, ir.NameRef)
+                index_name = self.typer.declare_like(target, prefix='i')
+                if target in self.view_to_index_name:
+                    msg = f"Target array view {target} is not uniquely bound."
+                    raise CompilerError(msg)
+                self.view_to_index_name[target] = index_name
+
+class LoopLower(StmtTransformer):
+
+    def __init__(self, views: typing.Dict[ir.ValueRef, ir.ValueRef],
+                 clobbers: typing.Dict[ir.ValueRef, ir.ValueRef],
+                 typer: TypeHelper):
+        self.views = views
+        self.view_to_index = {}
+        self.clobbers = clobbers
+        self.typer = typer
+
+    @singledispatchmethod
+    def visit(self, node):
+        super().visit(node)
 
     @visit.register
-    def _(self, node: ir.FLOORDIV):
-        left = self.visit(node.left)
-        right = self.visit(node.right)
-        if right == ir.Zero:
-            msg = f"Divide by zero error in expression {node}."
-            raise CompilerError(msg)
-        elif left == ir.Zero or right == ir.One:
-            # cast appropriately
-            return left
-        return ir.FLOORDIV(left, right)
-
-    @visit.register
-    def _(self, node: ir.TRUEDIV):
-        left = self.visit(node.left)
-        right = self.visit(node.right)
-        if right == ir.Zero:
-            msg = f"Divide by zero error in expression {node}."
-            raise CompilerError(msg)
-        elif right == ir.One:
-            # need to ensure this is cast to float
-
-            pass
-        return ir.TRUEDIV(left, right)
-
-    @visit.register
-    def _(self, node: ir.UnaryOp):
-        if isinstance(node.operand, ir.UnaryOp) and isinstance(node.operand, type(node)):
-            return node.operand.operand
-        return node
-
-    @visit.register
-    def _(self, node: ir.AND):
-        seen = set()
-        operands = []
-        for operand in node.operands:
-            # constant folding should be separate
-            # as it causes too many issues here
-            assert not operand.constant
-            operand = unwrap_truth_tested(operand)
-            if operand not in seen:
-                seen.add(operand)
-                operands.append(operand)
-        if len(operands) > 1:
-            return ir.AND(tuple(operands))
-        else:
-            operand, = operands
-            return ir.TRUTH(operand)
-
-    @visit.register
-    def _(self, node: ir.OR):
-        seen = set()
-        operands = []
-        for operand in node.operands:
-            assert not operand.constant
-            operand = unwrap_truth_tested(operand)
-            if operand not in seen:
-                operands.append(operand)
-        if len(operands) > 1:
-            return ir.OR(tuple(operands))
-        else:
-            operand, = operands
-            return ir.TRUTH(operand)
-
-    @visit.register
-    def _(self, node: ir.NOT):
-        operand, = node.subexprs
-        operand = self.visit(operand)
-        if isinstance(operand, ir.NOT):
-            operand, = operand.subexprs
-            return operand
-        elif isinstance(operand, ir.EQ):
-            return ir.NE(*operand.subexprs)
-        elif isinstance(operand, ir.NE):
-            return ir.EQ(*operand.subexprs)
-        # other operators are only safe with integer type operands
-        return ir.NOT(operand)
-
-    @visit.register
-    def _(self, node: ir.TRUTH):
-        # This will leave truth casts on constant integers
-        # and floats, since the only gain there is a loss
-        # of clarity.
-        if is_truth_test(node.operand):
-            node = node.operand
-        return node
-
-    @visit.register
-    def _(self, node: ir.Select):
-        if node.on_true == node.on_false:
-            return node.on_true
-        elif node.predicate.constant:
-            return node.on_true if operator.truth(node.predicate) else node.on_false
-        predicate, on_true, on_false = node.subexprs
-        if on_true == on_false:
-            return on_true
-        elif predicate.constant:
-            return on_true if operator.truth(predicate) else on_false
-        if isinstance(predicate, (ir.LT, ir.LE)):
-            left, right = predicate.subexprs
-            if on_true == left and on_false == right:
-                return ir.Min(on_true, on_false)
-            elif on_false == right and on_true == left:
-                # This is almost negated. The issue is if in the destination assembly:
-                #
-                #     min(a,b) is implemented as a if a <= b else b
-                #     max(a,b) is implemented as a if a >= b else b
-                #
-                #  which is common, we reverse operand order to properly catch unordered cases
-                #  This does not follow Python's min/max conventions, which are too error prone.
-                #  Those can arbitrarily propagate or suppress nans as a side effect of
-                #  determining type from the leading operand.
-                return ir.Max(on_false, on_true)
-        elif isinstance(predicate, (ir.GT, ir.GE)):
-            if on_true == predicate.left and on_false == predicate.right:
-                return ir.Max(on_true, on_false)
-            elif on_true == predicate.right and on_false == predicate.left:
-                # right if left < right else left
-                return ir.Min(on_false, on_true)
-        return node
+    def _(self, node: ir.Assign):
+        if node.target in self.views:
+            if isinstance(node.value, ir.Subscript):
+                # Ensure we can propagate
+                index = node.value.index
+                if any(subexpr in self.clobbers for subexpr in walk(index)):
+                    repl_index = self.typer.declare_like(index)
+                    index_assign = ir.Assign(repl_index, node.vale.value, node.pos)
+                    repl_subscript = ir.Subscript(node.value.value, repl_index)
+                    index_assign = ir.Assign(s, node.target, node.value)
 
 
-class IntervalBuilder(ExpressionVisitor):
+def lower_loops(node, symbols: symbol_table):
+    typer = TypeHelper(symbols)
+    views = collect_views(node, typer)
+
+
+class IntervalBuilder:
 
     @singledispatchmethod
     def visit(self, iterable):
@@ -482,6 +494,55 @@ def _find_range_intersection(by_step):
     return initial
 
 
+def serialize_reduction(reduc: typing.Union[ir.MinReduction, ir.MaxReduction], syms: symbol_table, pos: ir.Position):
+    """
+    Turn a reduction into a series of single statement pairwise operations.
+
+    :param reduc: initial reduction
+    :syms: Symbol table for generating intermediates
+    :return:  statements and final expression
+    """
+
+    op = ir.Min if isinstance(reduc, ir.MinReduction) else ir.Max
+    values = set(reduc.subexprs)
+    stmts = []
+
+    if len(values) == 1:
+        return values, stmts
+
+    type_infer = TypeHelper(syms)
+    tail = values.pop() if len(values) % 2 else None
+
+    while len(values) > 2:
+        value_iter = iter(values)
+        repl_values = []
+        for left, right in zip(value_iter, value_iter):
+            expr = op(left, right)
+            t = type_infer.check_type(expr)
+            name = syms.make_unique_name_like(name="tmp", type_=t)
+            assign = ir.Assign(target=name, value=expr, pos=pos)
+            stmts.append(assign)
+        values = repl_values
+
+    out_expr = op(*values)
+
+    if tail is not None:
+        out_expr = op(out_expr, tail)
+
+    return out_expr, stmts
+
+
+def unwrap_truth_tested(expr):
+    """
+    Extract truth tested operands. This helps limit isinstance checks for cases
+    where an enclosing expression will refer to the truth test of expr, with or
+    without an explicit TRUTH node wrapper.
+    """
+    if isinstance(expr, ir.TRUTH):
+        expr = expr.operand
+    return expr
+
+
 def _find_shared_interval(intervals, syms):
     starts = set()
     stops = set()
@@ -493,8 +554,7 @@ def _find_shared_interval(intervals, syms):
 
     # enumerate doesn't declare a bound, so it shows up as None
     stops.discard(None)
-    simplify_min_max = MinMaxSimplifier(syms)
-    simplify_expr = arithmetic_folding(syms)
+    # simplify_min_max = MinMaxSimplifier(syms)
 
     if len(steps) == 1:
         # If there's only one step size, we can
@@ -508,7 +568,7 @@ def _find_shared_interval(intervals, syms):
                 simplify_expr(stop)
             else:
                 stop = ir.MinReduction(*(simplify_expr(s) for s in stops))
-                stop = simplify_min_max(stop)
+                # stop = simplify_min_max.visit(stop)
             return start, stop, step
         elif len(stops) == 1:
             stop = stops.pop()
@@ -585,17 +645,19 @@ def make_single_index_loop(header: ir.ForLoop, symbols):
     intervals = set()
     interval_from_iterable = IntervalBuilder()
     for _, iterable in unpack_iterated(header.target, header.iterable):
-        interval = interval_from_iterable(iterable)
+        interval = interval_from_iterable.visit(iterable)
         by_iterable[iterable] = interval
         intervals.add(interval)
 
-    loop_start, loop_stop, loop_step = _find_shared_interval(intervals, symbols)
+    interval = _find_shared_interval(intervals, symbols)
+    loop_start, loop_stop, loop_step = interval
+    # find reductions
+    seen = {}
     loop_expr = ir.AffineSeq(loop_start, loop_stop, loop_step)
     # Todo: would be good to find a default index type
-    loop_counter = symbols.make_unique_name_like("i", type_=ir.Int64)
+    loop_counter = symbols.make_unique_name_like("i", type_=ir.int64)
     body = []
     pos = header.pos
-    simplify_expr = arithmetic_folding(symbols)
 
     for target, iterable in unpack_iterated(header.target, header.iterable):
         (start, _, step) = by_iterable[iterable]
@@ -626,13 +688,10 @@ def make_single_index_loop(header: ir.ForLoop, symbols):
     return repl
 
 
-class loop_lowering(StmtTransformer):
+class LoopLowering(StmtTransformer):
 
-    def __init__(self, symbols):
+    def __init__(self, symbols: symbol_table):
         self.symbols = symbols
-
-    def __call__(self, node):
-        return self.visit(node)
 
     @singledispatchmethod
     def visit(self, node):
@@ -640,118 +699,10 @@ class loop_lowering(StmtTransformer):
 
     @visit.register
     def _(self, node: ir.ForLoop):
-        interm = make_single_index_loop(node, self.symbols)
-        body = self.visit(interm.body)
-        repl = ir.ForLoop(interm.target, interm.iterable, body, node.pos)
+        # make this loop into a single index
+        body = self.visit(node.body)
+        rewrite = make_single_index_loop(node, self.symbols)
+        if not isinstance(rewrite.iterable, ir.AffineSeq):
+            raise ValueError(msg)
+        repl = ir.ForLoop(rewrite.target, rewrite.iterable, body, rewrite.pos)
         return repl
-
-
-class remove_subarray_refs(StmtTransformer):
-
-    def __init__(self, syms):
-        self.infer_type = tr.ExprTypeInfer(syms)
-
-    def __call__(self, node):
-        return self.visit(node)
-
-    @singledispatchmethod
-    def visit(self, node):
-        return super().visit(node)
-
-    @visit.register
-    def _(self, node: ir.Assign):
-        target = node.target
-        value = node.value
-        target_type = self.infer_type(node.target)
-        if isinstance(target_type, ir.ArrayType) and isinstance(value, (ir.NameRef, ir.Subscript)):
-            # remove simple view creation
-            return
-        return node
-
-    @visit.register
-    def _(self, node: list):
-        stmts = []
-        for stmt in node:
-            repl = self.visit(stmt)
-            if repl is not None:
-                if isinstance(repl, list):
-                    pf = pretty_formatter()
-                    print([pf(r) for r in repl])
-                stmts.append(repl)
-        return stmts
-
-
-class array_offset_maker(StmtTransformer):
-    """
-    Transforms subviews of arrays into offsets with respect to base.
-    This should be making an offset variable for anything that doesn't subscript
-    down to a scalar for now.
-    """
-
-    def _find_view_hierarchy(self, target):
-        if isinstance(target, ir.Subscript):
-            if isinstance(target.value, ir.Subscript):
-                pf = pretty_formatter()
-                msg = f"Unsupported nested subscripting {pf(target)}."
-                raise CompilerError(msg)
-            if isinstance(target.index, ir.Tuple):
-                indices = [offset for offset in target.index.subexprs]
-                indices.reverse()
-            else:
-                indices = [target.index]
-            target = target.value
-        else:
-            indices = []
-        # Now, find the parent array that name that yielded this
-        base = target
-        parent = self.expr_to_parent.get(target)
-        #
-        while parent is not None:
-            indices.append(self.offsets[base])
-            base = parent
-            parent = self.expr_to_parent.get(parent)
-        indices.reverse()
-        # make expanded subscript from base ref to corresponding scalar
-        if len(indices) == 1:
-            indices = indices.pop()
-        else:
-            indices = ir.Tuple(*indices)
-        return ir.Subscript(base, indices)
-
-    def __init__(self, syms, expr_to_parent, offsets):
-        self.infer_type = tr.ExprTypeInfer(syms)
-        self.expr_to_parent = expr_to_parent
-        self.offsets = offsets
-        self.pf = pretty_formatter()
-
-    def __call__(self, node):
-        node = self.visit(node)
-        return node
-
-    @singledispatchmethod
-    def visit(self, node):
-        return super().visit(node)
-
-    @visit.register
-    def _(self, node: ir.Assign):
-        if isinstance(node.value, ir.Subscript):
-            # index = node.value.index
-            lhs_type = self.infer_type(node.target)
-            rhs_type = self.infer_type(node.value)
-            # check basic compatibility
-            if isinstance(lhs_type, ir.ArrayType) and isinstance(rhs_type, ir.ArrayType):
-                if lhs_type != rhs_type:
-                    msg = f"Mismatched array refs ({self.pf(node.target)}, {self.pf(lhs_type)}) and ({self.pf(node.value)}, {self.pf(rhs_type)}) line: {node.pos.line_begin}."
-                    raise CompilerError(msg)
-            elif isinstance(lhs_type, ir.ScalarType) and isinstance(rhs_type, ir.ScalarType):
-                if isinstance(node.value, ir.Subscript):
-                    # this is an array to scalar subscript
-                    full_subscript = self._find_view_hierarchy(node.value)
-                    repl = ir.Assign(node.target, full_subscript, node.pos)
-                    return repl
-            else:
-                # mixed
-                msg = f"Incompatible assignment '{self.pf(node.target)}' of " \
-                      f"'{self.pf(lhs_type)}' from '{self.pf(node.value)}' of type '{self.pf(rhs_type)}'."
-                raise CompilerError(msg)
-        return node

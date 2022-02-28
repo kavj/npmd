@@ -1,72 +1,60 @@
-import typing
+from collections import deque
 from functools import singledispatchmethod
+from typing import Optional, Set
 
 import ir
 
 
-def walk(node):
+def walk(node: ir.ValueRef):
     """
-    walk an expression depth first in post order, yielding everything but the original node
+    yields all distinct sub-expressions and the base expression
+    It was changed to include the base expression so that it's safe
+    to walk without the need for explicit dispatch mechanics in higher level
+    functions on Expression to disambiguate Expression vs non-Expression value
+    references.
+
+    :param node:
+    :param seen:
+    :return:
     """
-    if hasattr(node, "subexprs"):
-        for subexpr in node.subexprs:
-            yield from walk(subexpr)
-            yield subexpr
 
-
-def walk_unique(node):
+    assert isinstance(node, ir.ValueRef)
     seen = set()
-    for subexpr in walk(node):
-        if subexpr not in seen:
-            yield subexpr
-            seen.add(subexpr)
+    enqueued = []
+    enqueued.append(node)
+    if isinstance(node, ir.Expression):
+        # reverse subexpressions
+        for subexpr in reversed(tuple(node.subexprs)):
+            if subexpr not in seen:
+                enqueued.append(subexpr)
+    while enqueued:
+        next_expr = enqueued.pop()
+        if next_expr in seen:
+            # this was already extended
+            yield next_expr
+        else:
+            seen.add(next_expr)
+            if isinstance(next_expr, ir.Expression):
+                # if this is a not yet seen expression, first yield its unseen sub-expressions
+                enqueued.append(next_expr)
+                for subexpr in reversed(tuple(next_expr.subexprs)):
+                    if subexpr not in seen:
+                        enqueued.append(subexpr)
+            else:
+                # no subexpressions, so we can yield this now
+                yield next_expr
 
 
-class ExpressionVisitor:
+def match_type(node: ir.ValueRef, types):
     """
-    Base class for an expression visitor for cases that do not reconstruct their arguments.
-
+    filtering version of walk
+    :param node:
+    :param types:
+    :return:
     """
-
-    def __call__(self, expr):
-        return self.visit(expr)
-
-    def visit(self, expr):
-        if isinstance(expr, ir.Expression):
-            for subexpr in expr.subexprs:
-                self.visit(subexpr)
-        elif not isinstance(expr, ir.ValueRef):
-            msg = f"No method to rewrite object of type {type(expr)}."
-            raise NotImplementedError(msg)
-
-
-class ExpressionTransformer:
-    """
-    Base class for an expression visitor that reconstructs an argument expression from sub-expressions.
-
-    """
-
-    def __call__(self, node):
-        return self.visit(node)
-
-    @singledispatchmethod
-    def visit(self, node):
-        msg = f"No method to visit node of type {type(node)}"
-        raise TypeError(msg)
-
-    @visit.register
-    def _(self, node: ir.ValueRef):
-        return node
-
-    # array initializers use these
-    @visit.register
-    def _(self, node: ir.ScalarType):
-        return node
-
-    @visit.register
-    def _(self, node: ir.Expression):
-        cls = type(node)
-        return cls(*(self.visit(subexpr) for subexpr in node.subexprs))
+    for value in walk(node):
+        if isinstance(value, types):
+            yield value
 
 
 class StmtVisitor:

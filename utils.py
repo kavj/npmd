@@ -2,56 +2,61 @@ import builtins
 import itertools
 import keyword
 
-from contextlib import contextmanager
-from functools import singledispatch, singledispatchmethod
+from functools import singledispatch
+from typing import Any, List, Tuple
 
 import ir
 
 from errors import CompilerError
-from visitor import walk, StmtVisitor
+from visitor import walk
 
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
 
-signed_integer_range = {p: (-(2 ** (p - 1) - 1), 2 ** (p - 1) - 1) for p in (8, 32, 64)}
+
+def contains_stmt_types(stmts: List[ir.StmtBase], stmt_types: Tuple[Any, ...]):
+    for stmt in stmts:
+        if any(isinstance(stmt, stmt_type) for stmt_type in stmt_types):
+            return True
+        elif isinstance(stmt, (ir.ForLoop, ir.WhileLoop)):
+            if contains_stmt_types(stmt.body, stmt_types):
+                return True
+    return False
 
 
-def is_numeric_constant(node):
-    """
-    :param node: ir.ValueRef
-    :return: bool
+def get_stmt_types(stmts: List[ir.StmtBase], stmt_types: Tuple[Any, ...]):
+    retrievals = []
+    for stmt in stmts:
+        if any(isinstance(stmt, stmt_type) for stmt_type in stmt_types):
+            retrievals.append(stmt)
+        if isinstance(stmt, (ir.ForLoop, ir.WhileLoop)):
+            retrievals.extend(get_stmt_types(stmt.body, stmt_types))
+        elif isinstance(stmt, ir.IfElse):
+            retrievals.extend(get_stmt_types(stmt.if_branch, stmt_types))
+            retrievals.extend(get_stmt_types(stmt.else_branch, stmt_types))
+    return retrievals
 
-    Checks whether we have a numeric constant, which does not contain any boolean or predicate values.
 
-    """
-    return isinstance(node, ir.Constant) and node.is_integer
+def contains_loops(stmts: List[ir.StmtBase]):
+    return contains_stmt_types(stmts, (ir.ForLoop, ir.WhileLoop))
 
 
-class ReturnGather(StmtVisitor):
+def contains_break_or_return(stmts: List[ir.StmtBase]):
+    return contains_stmt_types(stmts, (ir.Break, ir.Return))
 
-    @contextmanager
-    def tracking(self):
-        self.exprs = set()
 
-    def __call__(self, entry):
-        with self.tracking():
-            self.visit(entry)
-            exprs = self.exprs
-        return exprs
+def diverges(stmts: List[ir.StmtBase]):
+    return contains_stmt_types(stmts, (ir.ForLoop, ir.WhileLoop, ir.IfElse, ir.Break, ir.Return, ir.Continue))
 
-    @singledispatchmethod
-    def visit(self, node):
-        super().visit(node)
 
-    @visit.register
-    def _(self, node: ir.Return):
-        self.exprs.add(node.value)
+def contains_branches(stmts: List[ir.StmtBase]):
+    return contains_stmt_types(stmts, (ir.IfElse,))
 
 
 def get_expr_parameters(expr):
     return {subexpr for subexpr in walk(expr) if isinstance(subexpr, ir.NameRef)}
 
 
-def is_valid_identifier(name):
+def is_allowed_identifier(name):
     if isinstance(name, ir.NameRef):
         name = name.name
     return isinstance(name, str) and name.isidentifier() and (name not in reserved_names)
@@ -97,12 +102,6 @@ def _(node: ir.Call):
     if isinstance(name, ir.NameRef):
         name = name.name
     return name
-
-
-def wrap_constant(c):
-    # check if we have a supported type
-    v = ir.StringConst(c) if isinstance(c, str) else ir.Constant(c)
-    return v
 
 
 def unpack_assignment(target, value, pos):
@@ -205,25 +204,3 @@ def is_compare(node):
 
 def is_truth_test(expr):
     return isinstance(expr, (ir.TRUTH, ir.AND, ir.OR, ir.NOT, ir.Constant))
-
-
-# Todo: stubs
-
-def find_calls(func):
-    pass
-
-
-def test_iter_dep(loop_node):
-    pass
-
-
-def find_loop_escapees(successors):
-    pass
-
-
-def requires_gather(loop_node):
-    pass
-
-
-def is_uniform_cond(predicate):
-    pass

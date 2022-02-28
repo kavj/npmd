@@ -3,18 +3,15 @@ import sys
 
 from pathlib import Path
 
-import ir
+from pbgen import gen_module, gen_setup, Emitter
 
 from ASTTransform import build_module_ir_and_symbols
-from array_utils import find_array_view_parents
-from ccodegen import codegen, Emitter
-from canonicalize import NormalizePaths
+from canonicalize import NormalizePaths, patch_return
 from errors import CompilerError
-from lowering import loop_lowering, array_offset_maker, remove_subarray_refs
+from lowering import LoopLowering
 from pretty_printing import pretty_formatter
+from pprint import pformat
 from reaching_check import ReachingCheck
-from utils import extract_name
-
 
 version = sys.version_info
 # Python 2 can't parse a significant
@@ -27,26 +24,18 @@ def make_setup_module(exts, path):
     emitter = Emitter(path.joinpath("setup.py"))
 
     with emitter.flush_on_exit():
+        # Todo: standardize this with nodes rather than ad hoc printing
+        emitter.print_line("from setuptools import setup")
+        emitter.print_line("from make_extensions import make_extensions")
         emitter.print_line("from pathlib import Path")
-        emitter.print_line("from setuptools import setup, Extension")
-        ext_strs = []
-        for ext_name, file_name in exts.items():
-            e = f"Extension('{ext_name}', [{file_name}]), "
-            ext_strs.append(e)
-        ext_strs = ", ".join(e for e in ext_strs)
-        setup_str = f"setup(ext_modules=[{ext_strs}]):"
+        emitter.print_line("import numpy")
+        emitter.print_line(line=f"exts={pformat(exts)}")
+        emitter.print_line(line=f"processed_exts=make_extensions(exts)")
+        # temporary measure
+        utils_include = str((Path.cwd().joinpath("runtime")))
+
+        setup_str = f'setup(name="{path.name}", ext_modules=processed_exts, include_dirs=[numpy.get_include(), \"{utils_include}\"])'
         emitter.print_line(setup_str)
-
-
-def resolve_types(types):
-    internal_types = {}
-    for name, type_ in types.items():
-        internal_type = ir.by_input_dtype.get(type_)
-        if internal_type is None:
-            msg = f"No internal type matches type {type_}."
-            raise CompilerError(msg)
-        internal_types[name] = type_
-    return internal_types
 
 
 def name_and_source_from_path(file_path):
@@ -54,14 +43,6 @@ def name_and_source_from_path(file_path):
         src = src_stream.read()
     file_name = os.path.basename(file_path)
     return file_name, src
-
-
-# stub for now, since we may need to remake typed passes later
-# per function or incorporate context management
-def build_function_pipeline():
-    pipeline = [NormalizePaths(),
-                ReachingCheck()]
-    return pipeline
 
 
 # Todo: Add explicit entry points
@@ -86,11 +67,8 @@ def compile_module(file_path, types,  out_dir, verbose=False, print_result=True,
     norm_paths = NormalizePaths()
     rc = ReachingCheck()
     for func in mod_ir.functions:
-        s = symbols.get(func.name)
-        ll = loop_lowering(s)
-        view_to_parents, offsets = find_array_view_parents(func, symbols[extract_name(func)])
-        make_offsets = array_offset_maker(s, view_to_parents, offsets)
-        remove_subarrays = remove_subarray_refs(s)
+        func_symbols = symbols.get(func.name)
+        loop_lowering = LoopLowering(func_symbols)
         func = norm_paths(func)
         if check_unbound:
             maybe_unbound = rc(func)
@@ -100,16 +78,14 @@ def compile_module(file_path, types,  out_dir, verbose=False, print_result=True,
                 msg = f"The following variables are unbound along some paths. This is unsupported " \
                       f"to avoid tracking or ignoring UnboundLocal errors at runtime: {mub}."
                 raise CompilerError(msg)
-        func = ll(func)
-        func = make_offsets(func)
-        func = remove_subarrays(func)
+        func = loop_lowering.visit(func)
+        func = patch_return(func, func_symbols)
+
         funcs.append(func)
         if print_result:
             from pretty_printing import pretty_printer
             pp = pretty_printer()
-            pp(func, s)
+            pp(func, func_symbols)
 
-    file_path = Path(out_dir).joinpath(f"{modname}Module.c")
-    make_setup_module(exts={modname: file_path}, path=out_dir)
-    codegen(out_dir, funcs, symbols, modname)
-
+    gen_module(out_dir, modname, funcs, symbols)
+    gen_setup(out_dir)

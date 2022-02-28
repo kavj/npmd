@@ -1,33 +1,14 @@
-import numpy
 import operator
 
 from functools import singledispatchmethod
-from pretty_printing import pretty_formatter
 
 import ir
 from errors import CompilerError
+from pretty_printing import pretty_formatter
+from symbol_table import symbol_table
+from type_checks import TypeHelper, check_return_type
 from utils import extract_name
-from visitor import StmtTransformer
-
-
-def type_from_numpy_type(t: type):
-    if t == numpy.int32:
-        return ir.Int32
-    elif t == numpy.int64:
-        return ir.Int64
-    elif t == numpy.bool_:
-        return ir.BoolType
-    elif t == bool:
-        return ir.BoolType
-    elif t == numpy.float32:
-        return ir.Float32
-    elif t == numpy.float64:
-        return ir.Float64
-    elif t in (ir.Int32, ir.Int64, ir.Float32, ir.Float64):
-        return t
-    else:
-        msg = f"{t} is not a currently supported type."
-        raise CompilerError(msg)
+from visitor import StmtVisitor, StmtTransformer
 
 
 def find_unterminated_path(stmts):
@@ -195,4 +176,82 @@ def replace_call(node: ir.Call):
             raise CompilerError(msg)
     elif func_name == "len":
         node = ir.Length(*node.args)
+    return node
+
+
+class CheckReturnStructure(StmtVisitor):
+    """
+    This needs to check return type
+
+    """
+
+    def __call__(self, node):
+        terminated = self.visit(node)
+        return terminated
+
+    @singledispatchmethod
+    def visit(self, node):
+        return super().visit(node)
+
+    @visit.register
+    def _(self, node: ir.Function):
+        return self.visit(node.body)
+
+    @visit.register
+    def _(self, node: ir.StmtBase):
+        return False
+
+    @visit.register
+    def _(self, node: ir.ForLoop):
+        return False
+
+    @visit.register
+    def _(self, node: ir.WhileLoop):
+        # ignoring the case of while True: .. return ..
+        # which basically works if return is the only way out
+        return False
+
+    @visit.register
+    def _(self, node: ir.Return):
+        return True
+
+    @visit.register
+    def _(self, node: list):
+        for stmt in reversed(node):
+            if self.visit(stmt):
+                return True
+        return False
+
+    @visit.register
+    def _(self, node: ir.IfElse):
+        if isinstance(node.test, ir.Constant):
+            if operator.truth(node.test):
+                return self.visit(node.if_branch)
+            else:
+                return self.visit(node.else_branch)
+        else:
+            return self.visit(node.if_branch) and self.visit(node.else_branch)
+
+
+def patch_return(node: ir.Function, symbols: symbol_table):
+    return_checker = CheckReturnStructure()
+    always_terminated = return_checker(node)
+    if not always_terminated:
+        return_type = check_return_type(node, symbols)
+        if return_type is None:
+            if node.body:
+                last_pos = node.body[-1].pos
+                pos = ir.Position(last_pos.line_end + 1, last_pos.line_end + 2, col_begin=1, col_end=74)
+            else:
+                # Todo: not quite right but will revisit
+                pos = ir.Position(1, 1, 1, 74)
+            body = node.body.copy()
+            body.append(ir.Return(value=None, pos=pos))
+            repl = ir.Function(name=node.name, args=node.args, body=body)
+            return repl
+        else:
+            # If return type is anything other than None and we don't explicitly return along
+            # all paths, then this is unsafe
+            msg = f"Function {node.name} does not return a value along all paths."
+            raise CompilerError(msg)
     return node

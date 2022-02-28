@@ -114,6 +114,12 @@ class symbol_table:
             raise CompilerError(msg)
         return t
 
+    def check_dtype(self, name):
+        base_type = self.check_type(name)
+        if isinstance(base_type, ir.ArrayType):
+            base_type = base_type.dtype
+        return base_type
+
     def _get_name_mangler(self, prefix: str):
         # splitting by prefix helps avoids appending
         # large numbers in most cases
@@ -140,3 +146,7 @@ class symbol_table:
         # The input name may require mangling for uniqueness.
         # Return the name as it is registered.
         return ir.NameRef(name)
+
+    def make_alias(self, name):
+        var_type = self.check_type(name)
+        return self.make_unique_name_like(name, var_type)

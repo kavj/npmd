@@ -7,7 +7,7 @@ def nested(a, b, c, d):
             print(a)
             if b > c:
                 if a != c:
-                    print("should remain in branch")
+                    s = "should remain in branch"
                 else:
                     break
-                print("should be appended to true condition")
+                s = "should be appended to true condition"
