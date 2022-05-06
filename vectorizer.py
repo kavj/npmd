@@ -23,6 +23,21 @@ from visitor import walk, StmtVisitor
 
 # find escaping, eg arrays which are either arguments modified in place or return values
 
+def analyze_branch(branch_node: ir.IfElse):
+    pass
+
+# These are tricky. We have to check branch forms.
+# In all cases, ignore anything with loop inside a branch.
+# we need to test for several cases
+# 1. neither side contains subscripted writes
+# 2. only one branch is non-empty
+# 3. both branches contain the same subscript targets, appearing at the end of each branch
+
+# After that there's the issue of whether we have uniform value out, reducible to min max
+# or something that requires a blend/select op.
+
+# Lastly there's the issue of break statements..
+
 
 class AssignCollector(StmtVisitor):
     """
@@ -287,17 +302,58 @@ class ValueLedger:
         return node.reconstruct(*(renamed[subexpr] for subexpr in node.subexprs))
 
 
-class uniformity_checker:
+class VaryingCheck:
+    def __init__(self, initial_varying: Set[ir.ValueRef]):
+        self.varying = initial_varying
+
+    def mark(self, node: ir.ValueRef):
+        if isinstance(node, ir.NameRef):
+            self.varying.add(node)
+
+    def check_varying(self, node: ir.ValueRef):
+        for term in walk(node):
+            if isinstance(term, ir.Expression):
+                if any(s in self.varying for s in term.subexprs):
+                    self.varying.add(term)
+        return node in self.varying
+
+
+class VaryingChecker(StmtVisitor):
     """
     This is used to determine whether expressions may vary across iteratioins of a loop
     with known clobbers.
+
+    This has to be run until convergence
     """
 
-    def __init__(self, clobbers):
-        self.clobbers = clobbers
+    def __init__(self, initial_varying: Set[ir.ValueRef]):
+        self.varying_marker = VaryingCheck(initial_varying)
 
-    def is_uniform(self, node: ir.ValueRef):
-        return self.clobbers.isdisjoint(walk(node))
+    @singledispatchmethod
+    def visit(self, node):
+        raise NotImplementedError
+
+    @visit.register
+    def _(self, node: ir.Assign):
+        if self.varying_marker.check_varying(node.value):
+            self.varying_marker.mark(node.target)
+
+    @visit.register
+    def _(self, node: ir.InPlaceOp):
+        if self.varying_marker.check_varying(node.value):
+            self.varying_marker.mark(node.target)
+
+    @visit.register
+    def _(self, node: ir.IfElse):
+        pass
+
+    @visit.register
+    def _(self, node: ir.WhileLoop):
+        pass
+
+    @visit.register
+    def _(self, node: ir.ForLoop):
+        pass
 
 
 def contains_subscript(expr: ir.Expression):

@@ -76,6 +76,10 @@ class ReachingCheck(StmtVisitor):
         self.register_expr_reference(node.expr, node)
 
     @visit.register
+    def _(self, node: ir.InPlaceOp):
+        self.register_expr_reference(node.expr, node)
+
+    @visit.register
     def _(self, node: ir.Assign):
         self.register_expr_reference(node.value, node)
         self.mark_assigned(node.target)

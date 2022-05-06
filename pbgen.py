@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Set
 import ir
 
 from errors import CompilerError
-from reductions import simple_serialize_min, simple_serialize_max
+from reductions import simple_serialize_min_max
 from symbol_table import symbol_table
 from type_checks import TypeHelper, check_return_type
 from utils import extract_name
@@ -161,14 +161,14 @@ def _(node: ir.StringConst):
 
 @render.register
 def _(node: ir.MaxReduction):
-    expr = simple_serialize_max(node)
+    expr = simple_serialize_min_max(node)
     rendered = render(expr)
     return rendered
 
 
 @render.register
 def _(node: ir.MinReduction):
-    expr = simple_serialize_min(node)
+    expr = simple_serialize_min_max(node)
     rendered = render(expr)
     return rendered
 
@@ -202,13 +202,13 @@ def _(node: ir.POW):
 
 @render.register
 def _(node: ir.MaxReduction):
-    serialized = simple_serialize_max(node)
+    serialized = simple_serialize_min_max(node)
     return render(serialized)
 
 
 @render.register
 def _(node: ir.MinReduction):
-    serialized = simple_serialize_min(node)
+    serialized = simple_serialize_min_max(node)
     return render(serialized)
 
 

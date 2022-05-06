@@ -700,9 +700,9 @@ class LoopLowering(StmtTransformer):
     @visit.register
     def _(self, node: ir.ForLoop):
         # make this loop into a single index
-        body = self.visit(node.body)
         rewrite = make_single_index_loop(node, self.symbols)
         if not isinstance(rewrite.iterable, ir.AffineSeq):
             raise ValueError(msg)
+        body = self.visit(rewrite.body)
         repl = ir.ForLoop(rewrite.target, rewrite.iterable, body, rewrite.pos)
         return repl
