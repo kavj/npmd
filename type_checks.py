@@ -1,18 +1,24 @@
 import numpy as np
 
 from functools import singledispatchmethod
+from typing import Optional
 
 import ir
 
 from errors import CompilerError
-from symbol_table import symbol_table
+from symbol_table import SymbolTable
 from utils import extract_name, get_stmt_types
 
 
-def check_return_type(node: ir.Function, symbols: symbol_table):
+def check_return_type(node: ir.Function, symbols: SymbolTable):
     stmts = get_stmt_types(node.body, (ir.Return,))
     typer = TypeHelper(symbols)
-    return_types = {typer.check_type(stmt.value) for stmt in stmts if stmt.value is not None}
+    return_types = set()
+    for stmt in stmts:
+        if stmt.value is None:
+            return_types.add(None)
+        else:
+            return_types.add(typer.check_type(stmt.value))
     # should check if all paths terminate..
     # eg either ends in a return statement or every branch has a return statement
     if len(return_types) > 1:
@@ -40,8 +46,10 @@ def check_binop_dtype(left: np.dtype, right: np.dtype, op: ir.BinOp):
 
 
 class TypeHelper:
-    def __init__(self, syms: symbol_table):
+    def __init__(self, syms: SymbolTable, default_prefix: Optional[str] = None):
         self.symbols = syms
+        self.default_prefix = default_prefix if default_prefix is not None else "i"
+        self._cached = {}
 
     @singledispatchmethod
     def check_type(self, expr):
@@ -50,7 +58,12 @@ class TypeHelper:
 
     @check_type.register
     def _(self, expr: ir.NameRef):
-        return self.symbols.check_type(expr)
+        if expr in self._cached:
+            # don't use get here, as it won't catch invalid Nones
+            return self._cached[expr]
+        t = self.symbols.check_type(expr)
+        self._cached[expr] = t
+        return t
 
     @check_type.register
     def _(self, expr: ir.AffineSeq):
@@ -67,11 +80,13 @@ class TypeHelper:
         return ir.bool_type
 
     @check_type.register
-    def _(self, expr: ir.Constant):
+    def _(self, expr: ir.CONSTANT):
         return expr.dtype
 
     @check_type.register
     def _(self, expr: ir.BinOp):
+        if expr in self._cached:
+            return self._cached[expr]
         left, right = expr.subexprs
         left_type = self.check_type(left)
         right_type = self.check_type(right)
@@ -90,16 +105,19 @@ class TypeHelper:
             result_type = ir.ArrayType(right_type.ndims, result_dtype)
         else:
             result_type = check_binop_dtype(left_type, right_type, expr)
+        self._cached[expr] = result_type
         return result_type
 
     @check_type.register
     def _(self, expr: ir.Subscript):
+        if expr in self._cached:
+            return self._cached[expr]
         value, index = expr.subexprs
         value_type = self.check_type(value)
         if not isinstance(value_type, ir.ArrayType):
             msg = f"Cannot subscript non-array type {value_type}."
             raise CompilerError(msg)
-        if isinstance(index, ir.Tuple):
+        if isinstance(index, ir.TUPLE):
             # check that all integer types
             subtypes = [self.check_type(subexpr) for subexpr in index.subexprs]
             if any(t not in (np.int32, np.int64) for t in subtypes):
@@ -111,19 +129,26 @@ class TypeHelper:
             ndims_removed = 1
             subtype = self.check_type(index)
             if subtype not in (np.int32, np.int64):
-                msg =  f"Non integer index, type: {subtype}."
+                msg = f"Non integer index, type: {subtype}."
                 raise CompilerError(msg)
         if value_type.ndims < ndims_removed:
             msg = f"Over subscripted array {expr}."
             raise CompilerError(msg)
         if ndims_removed == value_type.ndims:
+            self._cached[expr] = value_type.dtype
             return value_type.dtype
         else:
-            return ir.ArrayType(ndims=value_type.ndims-ndims_removed, dtype=value_type.dtype)
+            arrtype = ir.ArrayType(ndims=value_type.ndims - ndims_removed, dtype=value_type.dtype)
+            self._cached[expr] = arrtype
+            return arrtype
 
     @check_type.register
     def _(self, expr: ir.UnaryOp):
-        return self.check_type(expr.operand)
+        if expr in self._cached:
+            return self._cached[expr]
+        t = self.check_type(expr.operand)
+        self._cached[expr] = t
+        return t
 
     def check_dtype(self, expr: ir.ValueRef):
         t = self.check_type(expr)
@@ -140,7 +165,7 @@ class TypeHelper:
         return self.check_dtype(expr) == ir.bool_type
 
     @is_predicate.register
-    def _(self, expr: ir.Constant):
+    def _(self, expr: ir.CONSTANT):
         return expr.dtype == ir.bool_type
 
     @is_predicate.register
@@ -156,6 +181,11 @@ class TypeHelper:
     def _(self, expr: ir.BoolOp):
         return True
 
+    def declare_typed(self, type_, prefix: Optional[str] = None):
+        if prefix is None:
+            prefix = self.default_prefix
+        return self.symbols.make_unique_name_like(prefix, type_)
+
     def declare_like(self, like_expr, prefix=None):
         """
         Returns a name that like_expr can safely bind to
@@ -167,7 +197,7 @@ class TypeHelper:
             if isinstance(like_expr, ir.NameRef):
                 prefix = like_expr
             else:
-                prefix = 'i'
+                prefix = self.default_prefix
         t = self.check_type(like_expr)
         s = self.symbols.make_unique_name_like(prefix, t)
         return s

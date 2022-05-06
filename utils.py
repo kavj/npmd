@@ -1,6 +1,7 @@
 import builtins
-import itertools
 import keyword
+
+import numpy as np
 
 from functools import singledispatch
 from typing import Any, List, Tuple
@@ -8,9 +9,23 @@ from typing import Any, List, Tuple
 import ir
 
 from errors import CompilerError
-from visitor import walk
 
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
+
+
+def is_assignment(node: ir.StmtBase):
+    return isinstance(node, (ir.Assign, ir.InPlaceOp))
+
+
+def is_entry_point(stmt: ir.StmtBase):
+    return isinstance(stmt, (ir.IfElse, ir.ForLoop, ir.WhileLoop))
+
+
+def has_nan(node: ir.Expression):
+    for subexpr in node.subexprs:
+        if isinstance(subexpr, ir.CONSTANT):
+            if np.isnan(subexpr.value):
+                return True
 
 
 def contains_stmt_types(stmts: List[ir.StmtBase], stmt_types: Tuple[Any, ...]):
@@ -18,7 +33,14 @@ def contains_stmt_types(stmts: List[ir.StmtBase], stmt_types: Tuple[Any, ...]):
         if any(isinstance(stmt, stmt_type) for stmt_type in stmt_types):
             return True
         elif isinstance(stmt, (ir.ForLoop, ir.WhileLoop)):
-            if contains_stmt_types(stmt.body, stmt_types):
+            if type(stmt) in stmt_types:
+                return True
+            elif contains_stmt_types(stmt.body, stmt_types):
+                return True
+        elif isinstance(stmt, ir.IfElse):
+            if ir.IfElse in stmt_types:
+                return True
+            elif contains_stmt_types(stmt.if_branch, stmt_types) or contains_stmt_types(stmt.else_branch, stmt_types):
                 return True
     return False
 
@@ -34,26 +56,6 @@ def get_stmt_types(stmts: List[ir.StmtBase], stmt_types: Tuple[Any, ...]):
             retrievals.extend(get_stmt_types(stmt.if_branch, stmt_types))
             retrievals.extend(get_stmt_types(stmt.else_branch, stmt_types))
     return retrievals
-
-
-def contains_loops(stmts: List[ir.StmtBase]):
-    return contains_stmt_types(stmts, (ir.ForLoop, ir.WhileLoop))
-
-
-def contains_break_or_return(stmts: List[ir.StmtBase]):
-    return contains_stmt_types(stmts, (ir.Break, ir.Return))
-
-
-def diverges(stmts: List[ir.StmtBase]):
-    return contains_stmt_types(stmts, (ir.ForLoop, ir.WhileLoop, ir.IfElse, ir.Break, ir.Return, ir.Continue))
-
-
-def contains_branches(stmts: List[ir.StmtBase]):
-    return contains_stmt_types(stmts, (ir.IfElse,))
-
-
-def get_expr_parameters(expr):
-    return {subexpr for subexpr in walk(expr) if isinstance(subexpr, ir.NameRef)}
 
 
 def is_allowed_identifier(name):
@@ -79,16 +81,6 @@ def _(node: ir.NameRef):
 
 
 @extract_name.register
-def _(node: ir.ArrayRef):
-    return node.name.name
-
-
-@extract_name.register
-def _(node: ir.ScalarRef):
-    return node.name.name
-
-
-@extract_name.register
 def _(node: ir.Function):
     name = node.name
     if isinstance(name, ir.NameRef):
@@ -105,7 +97,7 @@ def _(node: ir.Call):
 
 
 def unpack_assignment(target, value, pos):
-    if isinstance(target, ir.Tuple) and isinstance(value, ir.Tuple):
+    if isinstance(target, ir.TUPLE) and isinstance(value, ir.TUPLE):
         if target.length != value.length:
             msg = f"Cannot unpack {value} with {value.length} elements using {target} with {target.length} elements: " \
                   f"line {pos.line_begin}."
@@ -119,7 +111,7 @@ def unpack_assignment(target, value, pos):
 def unpack_iterated(target, iterable, include_enumerate_indices=True):
     if isinstance(iterable, ir.Zip):
         # must unpack
-        if isinstance(target, ir.Tuple):
+        if isinstance(target, ir.TUPLE):
             if len(target.elements) == len(iterable.elements):
                 for t, v in zip(target.elements, iterable.elements):
                     yield from unpack_iterated(t, v)
@@ -131,7 +123,7 @@ def unpack_iterated(target, iterable, include_enumerate_indices=True):
             msg = f"Zip construct {iterable} requires a tuple for unpacking."
             raise CompilerError(msg)
     elif isinstance(iterable, ir.Enumerate):
-        if isinstance(target, ir.Tuple):
+        if isinstance(target, ir.TUPLE):
             first_target, sec_target = target.elements
             if include_enumerate_indices:
                 # enumerate is special, because it doesn't add
@@ -144,29 +136,6 @@ def unpack_iterated(target, iterable, include_enumerate_indices=True):
     else:
         # Array or sequence reference, with a single opaque target.
         yield target, iterable
-
-
-def is_fma_pattern(expr):
-    """
-    This ignores safety issues, which may be addressed later for anything
-    that looks like a * b - c * d.
-
-
-    """
-
-    if isinstance(expr, (ir.ADD, ir.SUB)):
-        left = expr.left
-        right = expr.right
-        for operand in (left, right):
-            if isinstance(operand, ir.BinOp):
-                if isinstance(operand, ir.MULT):
-                    return True
-            elif isinstance(operand, ir.UnaryOp):
-                # Expression simplifiers should have already folded any multiple
-                # nestings of unary -
-                if isinstance(operand, ir.USUB) and isinstance(operand.operand, ir.MULT):
-                    return True
-    return False
 
 
 def is_compare(node):
@@ -188,11 +157,12 @@ def is_compare(node):
         return True
 
     elif isinstance(node, ir.AND):
-        first = node.operands[0]
+        operand_iter = iter(node.operands)
+        first = next(operand_iter)
         if not isinstance(first, ir.CompareOp):
             return False
         prev_rhs = first.right
-        for operand in itertools.islice(node.operands, 1, None):
+        for operand in operand_iter:
             if not isinstance(operand, ir.CompareOp) or prev_rhs != operand.left:
                 return False
 
@@ -200,7 +170,3 @@ def is_compare(node):
         return False
 
     return True
-
-
-def is_truth_test(expr):
-    return isinstance(expr, (ir.TRUTH, ir.AND, ir.OR, ir.NOT, ir.Constant))

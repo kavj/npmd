@@ -12,8 +12,8 @@ import ir
 
 from canonicalize import replace_call
 from errors import CompilerError
-from pretty_printing import pretty_formatter
-from symbol_table import symbol, symbol_table
+from pretty_printing import PrettyFormatter
+from symbol_table import symbol, SymbolTable
 from utils import unpack_assignment, unpack_iterated
 
 binary_op_strs = {ast.Add: "+",
@@ -59,7 +59,7 @@ binary_in_place_ops = {ast.Add: "+=",
                        ast.MatMult: "@="}
 
 unary_ops = {ast.USub: ir.USUB,
-             ast.Invert: ir.UNOT,
+             ast.Invert: ir.UINVERT,
              ast.Not: ir.NOT}
 
 bool_op_strs = {ast.And: "and",
@@ -175,7 +175,7 @@ class TreeBuilder(ast.NodeVisitor):
         self.body = None
         self.entry = None
         self.enclosing_loop = None
-        self.formatter = pretty_formatter()
+        self.formatter = PrettyFormatter()
 
     @contextmanager
     def function_context(self, symbols):
@@ -201,7 +201,7 @@ class TreeBuilder(ast.NodeVisitor):
             yield
             self.enclosing_loop = outer
 
-    def __call__(self, entry: ast.FunctionDef, symbols: symbol_table):
+    def __call__(self, entry: ast.FunctionDef, symbols: SymbolTable):
         with self.function_context(symbols):
             func = self.visit(entry)
         return func
@@ -215,7 +215,7 @@ class TreeBuilder(ast.NodeVisitor):
             msg = f"Attributes are disallowed on everything except name references. Received: {formatted}."
             raise CompilerError(msg)
 
-    def visit_Constant(self, node: ast.Constant) -> ir.Constant:
+    def visit_Constant(self, node: ast.Constant) -> ir.CONSTANT:
         if is_ellipsis(node.value):
             msg = "Ellipses are not supported."
             raise TypeError(msg)
@@ -226,14 +226,14 @@ class TreeBuilder(ast.NodeVisitor):
             output = ir.wrap_constant(node.value)
         return output
 
-    def visit_Tuple(self, node: ast.Tuple) -> ir.Tuple:
+    def visit_Tuple(self, node: ast.Tuple) -> ir.TUPLE:
         # refactor seems to have gone wrong here..
         # version = sys.version_info
         # if (3, 9) <= (version.major, version.minor):
         # 3.9 removes ext_slice in favor of a tuple of slices
         # need to check a lot of cases for this
         #    raise NotImplementedError
-        return ir.Tuple(*(self.visit(elt) for elt in node.elts))
+        return ir.TUPLE(*(self.visit(elt) for elt in node.elts))
 
     def visit_Name(self, node: ast.Name):
         return ir.NameRef(node.id)
@@ -243,7 +243,7 @@ class TreeBuilder(ast.NodeVisitor):
         expr = self.visit(node.value)
         pos = extract_positional_info(node)
         # don't append single value references as statements
-        if not isinstance(expr, (ir.Constant, ir.NameRef, ir.Subscript, ir.StringConst)):
+        if not isinstance(expr, (ir.CONSTANT, ir.NameRef, ir.Subscript, ir.StringConst)):
             self.body.append(ir.SingleExpr(expr, pos))
 
     def visit_UnaryOp(self, node: ast.UnaryOp) -> ir.ValueRef:
@@ -261,12 +261,12 @@ class TreeBuilder(ast.NodeVisitor):
         right = self.visit(node.right)
         return cls(left, right)
 
-    def visit_BoolOp(self, node: ast.BoolOp) -> typing.Union[ir.Constant, ir.AND, ir.OR]:
+    def visit_BoolOp(self, node: ast.BoolOp) -> typing.Union[ir.CONSTANT, ir.AND, ir.OR]:
         cls = bool_ops.get(node.op)
         expr = cls(*(self.visit(v) for v in node.values))
         return expr
 
-    def visit_Compare(self, node: ast.Compare) -> typing.Union[ir.BinOp, ir.AND, ir.Constant]:
+    def visit_Compare(self, node: ast.Compare) -> typing.Union[ir.BinOp, ir.AND, ir.CONSTANT]:
         left = self.visit(node.left)
         right = self.visit(node.comparators[0])
         cls = compare_ops[type(node.ops[0])]
@@ -304,7 +304,7 @@ class TreeBuilder(ast.NodeVisitor):
         predicate = self.visit(node.test)
         on_true = self.visit(node.body)
         on_false = self.visit(node.orelse)
-        expr = ir.Select(on_true, on_false, predicate)
+        expr = ir.SELECT(on_true, on_false, predicate)
         return expr
 
     def visit_Subscript(self, node: ast.Subscript) -> typing.Union[ir.Subscript, ir.Slice]:
@@ -317,7 +317,7 @@ class TreeBuilder(ast.NodeVisitor):
             msg = f"Nested subscripts are not currently supported: {formatted}."
         return value
 
-    def visit_Index(self, node: ast.Index) -> typing.Union[ir.ValueRef, ir.NameRef, ir.Constant]:
+    def visit_Index(self, node: ast.Index) -> typing.Union[ir.ValueRef, ir.NameRef, ir.CONSTANT]:
         return self.visit(node.value)
 
     def visit_Slice(self, node: ast.Slice) -> ir.Slice:
@@ -337,8 +337,8 @@ class TreeBuilder(ast.NodeVisitor):
         operand = self.visit(node.value)
         cls = binary_ops[type(node.op)]
         pos = extract_positional_info(node)
-        expr = cls(target, operand, in_place=True)
-        assign = ir.InPlaceOp(expr, pos)
+        expr = cls(target, operand)
+        assign = ir.InPlaceOp(target, expr, pos)
         self.body.append(assign)
 
     def visit_Assign(self, node: ast.Assign):
@@ -533,7 +533,7 @@ def populate_func_symbols(func_table, types, ignore_unbound=False):
     if missing:
         msg = f"No type provided for local variable(s): '{', '.join(m for m in missing)}' in function '{func_name}'."
         raise CompilerError(msg)
-    return symbol_table(func_name, symbols)
+    return SymbolTable(func_name, symbols)
 
 
 def populate_symbol_tables(module_name, src, types):

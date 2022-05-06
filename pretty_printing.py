@@ -15,6 +15,31 @@ binop_ordering = {"**": 1, "*": 3, "@": 3, "/": 3, "//": 3, "%": 3, "+": 4, "-":
                   "==": 9}
 
 
+compare_ops = {ir.EQ: "==",
+               ir.NE: "!=",
+               ir.LT: "<",
+               ir.LE: "<=",
+               ir.GT: ">",
+               ir.GE: ">=",
+               ir.IN: "in",
+               ir.NOTIN: "not in"
+               }
+
+binop_ops = {ir.ADD: "+",
+             ir.SUB: "-",
+             ir.MULT: "*",
+             ir.TRUEDIV: "/",
+             ir.FLOORDIV: "//",
+             ir.POW: "**",
+             }
+
+
+unary_ops = {
+    ir.USUB: "-",
+    ir.UINVERT: "~"
+}
+
+
 # Todo: Given the boolean refactoring, not should probably derive from BoolOp, similar to TRUTH.
 
 # Todo: Pretty printer should provide most of the infrastructure for C code gen. For plain C, most of the statement
@@ -24,7 +49,7 @@ binop_ordering = {"**": 1, "*": 3, "@": 3, "/": 3, "//": 3, "%": 3, "+": 4, "-":
 # Note, python docs don't specify truth precedence, but it should match logical "not"
 
 
-class pretty_formatter:
+class PrettyFormatter:
     """
     The pretty printer is intended as a way to show the state of the IR in a way that resembles a
     typical source representation.
@@ -70,7 +95,7 @@ class pretty_formatter:
         return f"max({args})"
 
     @visit.register
-    def _(self, node: ir.Max):
+    def _(self, node: ir.MAX):
         args = ", ".join(self.visit(arg) for arg in node.subexprs)
         return f"max({args})"
 
@@ -80,28 +105,28 @@ class pretty_formatter:
         return f"min({args})"
 
     @visit.register
-    def _(self, node: ir.Min):
+    def _(self, node: ir.MIN):
         args = ", ".join(self.visit(arg) for arg in node.subexprs)
         return f"min({args})"
 
     @visit.register
-    def _(self, node: ir.Select):
+    def _(self, node: ir.SELECT):
         (predicate, on_true, on_false) = (self.parenthesized(term)
-                                          if isinstance(term, (ir.Select, ir.Tuple)) else self.visit(term)
+                                          if isinstance(term, (ir.SELECT, ir.TUPLE)) else self.visit(term)
                                           for term in (node.predicate, node.on_true, node.on_false))
         expr = f"{on_true} if {predicate} else {on_false}"
         return expr
 
     @visit.register
-    def _(self, node: ir.Constant):
+    def _(self, node: ir.CONSTANT):
         return str(node.value)
 
     @visit.register
-    def _(self, node: ir.Constant):
+    def _(self, node: ir.CONSTANT):
         return str(node.value)
 
     @visit.register
-    def _(self, node: ir.Constant):
+    def _(self, node: ir.CONSTANT):
         return str(node.value)
 
     @visit.register
@@ -110,7 +135,7 @@ class pretty_formatter:
 
     @visit.register
     def _(self, node: ir.BinOp):
-        op = ir.binop_ops[type(node)]
+        op = binop_ops[type(node)]
         op_ordering = binop_ordering[op]
         terms = []
         for term in node.subexprs:
@@ -122,7 +147,7 @@ class pretty_formatter:
             elif isinstance(term, ir.UnaryOp):
                 if op == "**":
                     term = self.parenthesized(term)
-            elif isinstance(term, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple)):
+            elif isinstance(term, (ir.BoolOp, ir.CompareOp, ir.SELECT, ir.TUPLE)):
                 term = self.parenthesized(term)
             else:
                 term = self.visit(term)
@@ -134,9 +159,9 @@ class pretty_formatter:
     @visit.register
     def _(self, node: ir.CompareOp):
         terms = []
-        op = ir.compare_ops[type(node)]
+        op = compare_ops[type(node)]
         for term in node.subexprs:
-            if isinstance(term, (ir.BoolOp, ir.CompareOp, ir.Select, ir.Tuple)):
+            if isinstance(term, (ir.BoolOp, ir.CompareOp, ir.SELECT, ir.TUPLE)):
                 term = self.parenthesized(term)
             else:
                 term = self.visit(term)
@@ -159,7 +184,7 @@ class pretty_formatter:
     @visit.register
     def _(self, node: ir.NOT):
         formatted = self.visit(node.operand)
-        if isinstance(node.operand, (ir.AND, ir.OR, ir.Select)):
+        if isinstance(node.operand, (ir.AND, ir.OR, ir.SELECT)):
             formatted = self.parenthesized(formatted)
         expr = f"not {formatted}"
         return expr
@@ -168,7 +193,7 @@ class pretty_formatter:
     def _(self, node: ir.TRUTH):
         formatted = self.visit(node.operand)
         if node.constant:
-            if not isinstance(node, ir.Constant):
+            if not isinstance(node, ir.CONSTANT):
                 # We don't distinguish between bools and predicates here in
                 # truth testing, since Python doesn't have any notion of
                 # predicate types.
@@ -211,11 +236,11 @@ class pretty_formatter:
         return f"range({start}, {stop}, {step})"
 
     @visit.register
-    def _(self, node: ir.Tuple):
+    def _(self, node: ir.TUPLE):
         elements = []
         for e in node.subexprs:
             # parenthesize nested tuples, leave everything else
-            if isinstance(e, ir.Tuple):
+            if isinstance(e, ir.TUPLE):
                 expr = self.parenthesized(e)
             else:
                 expr = self.visit(e)
@@ -225,14 +250,14 @@ class pretty_formatter:
 
     @visit.register
     def _(self, node: ir.UnaryOp):
-        op = ir.unary_ops[type(node)]
+        op = unary_ops[type(node)]
         operand, = node.subexprs
         if isinstance(operand, ir.BinOp):
             if not isinstance(operand, ir.POW):
                 operand = self.parenthesized(operand)
             else:
                 operand = self.visit(operand)
-        elif isinstance(operand, (ir.UnaryOp, ir.BoolOp, ir.Select)):
+        elif isinstance(operand, (ir.UnaryOp, ir.BoolOp, ir.SELECT)):
             # if we have an unfolded double unary expression such as --,
             # '--expr' would be correct but it's visually jarring. Adding
             # unnecessary parentheses makes it '-(-expr)'.
@@ -257,7 +282,7 @@ class pretty_formatter:
         exprs = []
         for elem in node.elements:
             formatted = self.visit(elem)
-            if isinstance(elem, ir.Tuple):
+            if isinstance(elem, ir.TUPLE):
                 # This nesting is unsupported elsewhere, but this
                 # would be a confusing place to throw an error.
                 formatted = self.parenthesized(formatted)
@@ -271,7 +296,7 @@ class pretty_formatter:
 def format_error(msg: str, pos: ir.Position,
                  named: typing.Optional[typing.Dict] = None,
                  exprs: typing.Optional[typing.Iterable[ir.ValueRef]] = None):
-    pf = pretty_formatter()
+    pf = PrettyFormatter()
 
     formatted_names = {pf(k): pf(v) for (k,v) in named.items()} if named is not None else ()
     formatted_exprs = {pf(e) for e in exprs} if exprs is not None else ()
@@ -279,7 +304,7 @@ def format_error(msg: str, pos: ir.Position,
     return combined
 
 
-class pretty_printer:
+class PrettyPrinter:
     """
     Pretty prints tree. 
     Inserts pass on empty if statements or for/while loops.
@@ -291,7 +316,7 @@ class pretty_printer:
         self._increment = len(single_indent)
         self._single_indent = single_indent
         self.print_annotations = print_annotations
-        self.format = pretty_formatter()
+        self.format = PrettyFormatter()
         self.symbols = None
 
     def __call__(self, tree, symbols):
@@ -452,7 +477,9 @@ class pretty_printer:
 
     @visit.register
     def _(self, node: ir.InPlaceOp):
-        expr = self.format(node.expr)
+        expr = self.format(node.value)
+        # Todo: needs update
+        self.print_line(expr)
 
     @visit.register
     def _(self, node: ir.Continue):
@@ -464,5 +491,5 @@ class pretty_printer:
 
     @visit.register
     def _(self, node: ir.SingleExpr):
-        expr = self.format(node.expr)
+        expr = self.format(node.value)
         self.print_line(expr)

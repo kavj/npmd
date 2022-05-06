@@ -6,7 +6,7 @@ from typing import Dict
 import ir
 
 from errors import CompilerError
-from utils import extract_name
+from utils import extract_name, is_allowed_identifier
 
 
 def reduces_array_dims(ref):
@@ -52,7 +52,7 @@ class symbol:
     is_local: bool
 
 
-class symbol_table:
+class SymbolTable:
     """
     Per function symbol table with type information and disambiguation of original source vs implementation names.
     """
@@ -135,12 +135,15 @@ class symbol_table:
         """
         prefix_ = extract_name(name)
         if type_ is None:
-            msg = f"Failed to retrieve a type for name {prefix_}."
+            msg = f'Failed to retrieve a type for name {prefix_}.'
+            raise CompilerError(msg)
+        elif not is_allowed_identifier(prefix_):
+            msg = f'Cannot form name from disallowed prefix "{prefix_}"'
             raise CompilerError(msg)
         gen = self._get_name_mangler(prefix_)
-        name = f"{prefix_}"
+        name = f'{prefix_}'
         while self.declares(name):
-            name = f"{prefix_}_{next(gen)}"
+            name = f'{prefix_}_{next(gen)}'
         sym = symbol(name, type_, is_arg=False, is_source_name=False, is_local=True)
         self.symbols[name] = sym
         # The input name may require mangling for uniqueness.

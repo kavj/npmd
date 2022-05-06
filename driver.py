@@ -3,20 +3,21 @@ import sys
 
 from pathlib import Path
 
-from pbgen import gen_module, gen_setup, Emitter
+import ir
+from pybind_gen import gen_module, gen_setup, Emitter
 
-from ASTTransform import build_module_ir_and_symbols
-from canonicalize import NormalizePaths, patch_return
+from analysis import ReachingCheck
+from ast_transform import build_module_ir_and_symbols
+from canonicalize import patch_return
 from errors import CompilerError
-from lowering import LoopLowering
-from pretty_printing import pretty_formatter
+from lvn import run_local_value_numbering
+from loop_simplify import LoopLowering, NormalizePaths
+from pretty_printing import PrettyFormatter
 from pprint import pformat
-from reaching_check import ReachingCheck
+
 
 version = sys.version_info
-# Python 2 can't parse a significant
-# amount of this code, so error messages ignore it.
-if sys.version_info.minor < 8:
+if sys.version_info.major != 3 or sys.version_info.minor < 8:
     raise RuntimeError(f"Python 3.8 or above is required.")
 
 
@@ -73,19 +74,23 @@ def compile_module(file_path, types,  out_dir, verbose=False, print_result=True,
         if check_unbound:
             maybe_unbound = rc(func)
             if maybe_unbound:
-                pf = pretty_formatter()
-                mub = ", ".join(pf(m) for m in maybe_unbound)
-                msg = f"The following variables are unbound along some paths. This is unsupported " \
-                      f"to avoid tracking or ignoring UnboundLocal errors at runtime: {mub}."
+                pf = PrettyFormatter()
+                mub = ', '.join(pf(m) for m in maybe_unbound)
+                msg = f'The following variables are unbound along some paths. This is unsupported ' \
+                      f'to avoid tracking or ignoring UnboundLocal errors at runtime: "{mub}".'
                 raise CompilerError(msg)
         func = loop_lowering.visit(func)
         func = patch_return(func, func_symbols)
 
-        funcs.append(func)
         if print_result:
-            from pretty_printing import pretty_printer
-            pp = pretty_printer()
+            from pretty_printing import PrettyPrinter
+            pp = PrettyPrinter()
             pp(func, func_symbols)
+        name = func.name
+        args = func.args
+        body = run_local_value_numbering(func.body, func_symbols)
+        func = ir.Function(name, args, body)
+        funcs.append(func)
 
     gen_module(out_dir, modname, funcs, symbols)
-    gen_setup(out_dir)
+    gen_setup(out_dir, modname)
