@@ -88,4 +88,4 @@ def compile_module(file_path, types,  out_dir, verbose=False, print_result=True,
             pp(func, func_symbols)
 
     gen_module(out_dir, modname, funcs, symbols)
-    gen_setup(out_dir)
+    gen_setup(out_dir, modname)

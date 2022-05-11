@@ -3,6 +3,7 @@ import textwrap
 
 import numpy as np
 
+from collections import defaultdict
 from contextlib import contextmanager
 from functools import singledispatch, singledispatchmethod
 from typing import Dict, List, Optional, Set
@@ -97,7 +98,9 @@ class Emitter:
         yield
         self.flush()
 
-    def print_line(self, line):
+    def print_line(self, line, terminate=False):
+        if terminate:
+            line += ";"
         lines = textwrap.wrap(initial_indent=self._indent, subsequent_indent=self._indent, break_long_words=False,
                               text=line)
         self.line_buffer.extend(lines)
@@ -110,21 +113,22 @@ class Emitter:
             self.line_buffer.clear()
 
 
-def gen_setup(out_dir: pathlib.Path):
+def gen_setup(out_dir: pathlib.Path, modname):
     emitter = Emitter(out_dir.joinpath("setup.py"))
     with emitter.flush_on_exit():
         emitter.print_line("from glob import glob")
         emitter.print_line("from setuptools import setup")
         emitter.print_line("from pybind11.setup_helpers import Pybind11Extension")
         emitter.blank_lines(count=2)
-        emitter.print_line("ext_modules = [Pybind11Extension(sorted(glob('*.cpp')))]")
+        ext = f'ext_modules = [Pybind11Extension("{modname}", sorted(glob("*.cpp")))]'
+        emitter.print_line(ext)
         emitter.print_line("setup(ext_modules=ext_modules)")
         emitter.blank_lines(count=1)
 
 
 def get_c_array_type(array_type: ir.ArrayType):
     c_dtype = npy_map[array_type.dtype]
-    return f"py::array<{c_dtype}>"
+    return f"py::array<{c_dtype}, py::array::c_style | py::array::forcecast>"
 
 
 @singledispatch
@@ -324,7 +328,7 @@ def get_c_type_name(type_):
     if isinstance(type_, ir.ArrayType):
         dtype = c_type_codes.get(type_.dtype)
         if dtype is not None:
-            return f"py::array_t<{dtype}>"
+            return f"py::array_t<{dtype}, py::array::c_style | py::array::forcecast>"
     else:
         dtype = c_type_codes.get(type_)
         if dtype is not None:
@@ -356,7 +360,6 @@ class FuncWriter:
     # too dangerous to inherit here.. as it'll just leave a blank on unsupported
     def __init__(self, emitter: Emitter, symbols: symbol_table, mangled_name: Optional[str] = None):
         self.emitter = emitter
-        self.declared = set()
         self.cached_exprs = {}
         self.mangled_name = mangled_name
         self.symbols = symbols
@@ -365,6 +368,33 @@ class FuncWriter:
     def __call__(self, node: ir.Function):
         assert isinstance(node, ir.Function)
         self.visit(node)
+
+    def format_target(self, name: ir.ValueRef):
+        if isinstance(name, ir.NameRef):
+            name_str = extract_name(name)
+            if self.symbols.is_source_name(name):
+                # these are declared at the start of a scope
+                return name_str
+            else:
+                # added symbol, must declare in place
+                target_type = self.symbols.check_type(name_str)
+                c_target_type = get_c_type_name(target_type)
+                return f"{c_target_type} {name_str}"
+        else:
+            return self.render_expr(name)
+
+    def format_cast(self, expr: ir.ValueRef, src_type, target_type):
+        cast_required = src_type != target_type
+        # allow writing scalar to scalar reference arising from subscripting
+        static_cast_allowed = not isinstance(target_type, ir.ArrayType)
+        if cast_required and not static_cast_allowed:
+            msg = f"Casts from {target_type} to {src_type} are unsupported."
+            raise CompilerError(msg)
+        expr_str = self.render_expr(expr)
+        if cast_required:
+            c_target_type = get_c_type_name(target_type)
+            expr_str = f"static_cast<{c_target_type}>({expr_str})"
+        return expr_str
 
     def render_expr(self, expr: ir.ValueRef):
         return render_expr(expr, self.type_helper, self.cached_exprs)
@@ -388,20 +418,31 @@ class FuncWriter:
         func_name = self.get_output_func_name(node)
         header = get_function_header(node, self.symbols, func_name)
         with self.emitter.curly_braces(line=header, semicolon=False):
+            # decl everything local, group by type
+            decls = defaultdict(list)
+            for sym in self.symbols.source_locals:
+                target_type = self.symbols.check_type(sym.name)
+                decls[target_type].append(sym.name)
+            for target_type, names in decls.items():
+                c_target_type = get_c_type_name(target_type)
+                name_decls = ", ".join(names)
+                decl_str = f"{c_target_type} {name_decls};"
+                self.emitter.print_line(decl_str)
             self.visit(node.body)
 
     @visit.register
     def _(self, node: ir.InPlaceOp):
+        # no declaration
         assert isinstance(node.expr, ir.BinOp)
         if isinstance(node.expr, ir.POW):
-            expr = render(node.expr)
-            target = render(node.target)
+            expr = self.render_expr(node.expr)
+            target = self.render_expr(node.target)
             stmt = f"{target} = {expr};"
         else:
             op = f"{node.expr.op}="
-            target = render(node.target)
-            value = render(node.value)
-            stmt = f"{target} {op} {value}"
+            target = self.render_expr(node.target)
+            value = self.render_expr(node.value)
+            stmt = f"{target} {op} {value};"
         self.emitter.print_line(stmt)
 
     @visit.register
@@ -423,12 +464,8 @@ class FuncWriter:
             raise ValueError(msg)
         start, stop, step = node.iterable.subexprs
         start_value_str = self.render_expr(start)
-        if node.target in self.declared:
-            start_str = f"{node.target.name} = {start_value_str}"
-        else:
-            target_type = self.symbols.check_type(node.target)
-            c_target_type = get_c_type_name(target_type)
-            start_str = f"{c_target_type} {node.target.name} = {start_value_str}"
+        target = self.format_target(node.target)
+        start_str = f"{target} = {start_value_str}"
         stop_value_str = self.render_expr(stop)
         stop_str = f"{node.target.name} < {stop_value_str}"
         step_value_str = self.render_expr(step)
@@ -443,8 +480,7 @@ class FuncWriter:
     @visit.register
     def _(self, node: ir.SingleExpr):
         rendered = render(node.expr)
-        rendered = f"{rendered};"
-        self.emitter.print_line(rendered)
+        self.emitter.print_line(rendered, terminate=True)
 
     @visit.register
     def _(self, node: ir.WhileLoop):
@@ -457,25 +493,13 @@ class FuncWriter:
     def _(self, node: ir.Assign):
         # Todo: This needs a render bind and render write for cases where these operations require specialized syntax
         # check if declared
-        decl_required = isinstance(node.target, ir.NameRef) and node.target not in self.declared
         # check if types compatible
+        target_str = self.format_target(node.target)
         target_type = self.type_helper.check_type(node.target)
         value_type = self.type_helper.check_type(node.value)
-        cast_required = target_type != value_type
-        # allow writing scalar to scalar reference arising from subscripting
-        static_cast_allowed = not isinstance(target_type, ir.ArrayType)
-        if cast_required and not static_cast_allowed:
-            msg = f"Casts from {target_type} to {value_type} are unsupported."
-            raise CompilerError(msg)
-        value_str = self.render_expr(node.value)
-        target_str = self.render_expr(node.target)
-        c_target_type = get_c_type_name(target_type)
-        if cast_required:
-            value_str = f"static_cast<{c_target_type}>({value_str})"
-        if decl_required:
-            target_str = f"{c_target_type} {target_str}"
-        stmt_str = f"{target_str} = {value_str};"
-        self.emitter.print_line(stmt_str)
+        value_str = self.format_cast(node.value, value_type, target_type)
+        stmt = f"{target_str} = {value_str};"
+        return stmt
 
     @visit.register
     def _(self, node: ir.Break):
@@ -490,27 +514,28 @@ class FuncWriter:
 
 
 def gen_module_def(emitter: Emitter, module_name: str, func_names: Set[str], docs: Optional[str] = None):
-    with emitter.curly_braces(line=f"PYBIND11_MODULE({module_name}, m)"):
+    module_name_no_ext = pathlib.Path(module_name).stem
+    with emitter.curly_braces(line=f"PYBIND11_MODULE({module_name_no_ext}, m)"):
         if docs is not None:
             emitter.print_line(line=f"m.doc() = {docs};")
         for func_name in func_names:
-            emitter.print_line(f'm.def({func_name}, &{func_name}, "");')
+            emitter.print_line(f'm.def("{func_name}", &{func_name}, "");')
 
 
 def gen_module(path: pathlib.Path, module_name: str, funcs: List[ir.Function], symbol_tables: Dict[str, symbol_table],
                docs: Optional[str] = None):
 
     if not module_name.endswith(".cpp"):
-        module_name = f"{module_name}.cpp"
+        module_name += ".cpp"
     emitter = Emitter(path.joinpath(module_name))
     func_names = {func.name for func in funcs}
 
     # Todo: don't write if exception occurs
     with emitter.flush_on_exit():
         # boilerplate
-        emitter.print_line(line="#include <algorithm>")
         emitter.print_line(line="#include <pybind11/pybind11.h>")
         emitter.print_line(line="#include <pybind11/numpy.h>")
+        emitter.print_line(line="#include <algorithm>")
         emitter.blank_lines(count=1)
         emitter.print_line(line="namespace py = pybind11;")
         emitter.blank_lines(count=2)
