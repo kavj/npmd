@@ -131,183 +131,6 @@ def get_c_array_type(array_type: ir.ArrayType):
     return f"py::array<{c_dtype}, py::array::c_style | py::array::forcecast>"
 
 
-@singledispatch
-def render(node):
-    # some compound stuff has to be broken up if we don't have a replacement
-    # (possibly inlinable) sub-routine
-    msg = f"No method implemented to render type: {type(node)}."
-    raise NotImplementedError(msg)
-
-
-@render.register
-def _(node: ir.AND):
-    expr = " && ".join(render(subexpr) for subexpr in node.subexprs)
-    return expr
-
-
-@render.register
-def _(node: ir.OR):
-    expr = " || ".join(render(subexpr) for subexpr in node.subexprs)
-    return expr
-
-
-@render.register
-def _(node: ir.NOT):
-    expr = render(node.operand)
-    return f"!{expr}"
-
-
-@render.register
-def _(node: ir.StringConst):
-    # Todo: need to think about unicode cases
-    return f"std::string({node.value})"
-
-
-@render.register
-def _(node: ir.MaxReduction):
-    expr = simple_serialize_min_max(node)
-    rendered = render(expr)
-    return rendered
-
-
-@render.register
-def _(node: ir.MinReduction):
-    expr = simple_serialize_min_max(node)
-    rendered = render(expr)
-    return rendered
-
-
-@render.register
-def _(node: ir.CompareOp):
-    left, right = node.subexprs
-    left = render(left)
-    right = render(right)
-    rendered = f"{left} {node.op} {right}"
-    return rendered
-
-
-@render.register
-def _(node: ir.BinOp):
-    left, right = node.subexprs
-    left = render(left)
-    right = render(right)
-    rendered = f"{left} {node.op} {right}"
-    return rendered
-
-
-@render.register
-def _(node: ir.POW):
-    left, right = node.subexprs
-    left = render(left)
-    right = render(right)
-    rendered = f"pow({left}, {right})"
-    return rendered
-
-
-@render.register
-def _(node: ir.MaxReduction):
-    serialized = simple_serialize_min_max(node)
-    return render(serialized)
-
-
-@render.register
-def _(node: ir.MinReduction):
-    serialized = simple_serialize_min_max(node)
-    return render(serialized)
-
-
-@render.register
-def _(node: ir.Min):
-    left, right = node.subexprs
-    left = render(left)
-    right = render(right)
-    rendered = f"std::min({left}, {right})"
-    return rendered
-
-
-@render.register
-def _(node: ir.SingleDimRef):
-    dim = render(node.dim)
-    base = render(node.base)
-    rendered = f"{base}.shape({dim})"
-    return rendered
-
-
-@render.register
-def _(node: ir.NameRef):
-    return node.name
-
-
-@render.register
-def _(node: ir.Constant):
-    if isinstance(node.value, (bool, np.bool_)):
-        # c casing..
-        value = "true" if node.value is True else "false"
-    else:
-        value = str(node.value)
-    return value
-
-
-@render.register
-def _(node: ir.Call):
-    func_name = extract_name(node)
-    # Todo: correct func replacement
-    if func_name == "print":
-        # quick temporary hack
-        func_name = "py::print"
-    args = ", ".join(render(arg) for arg in node.args)
-    rendered = f"{func_name}({args})"
-    return rendered
-
-
-@render.register
-def _(node: ir.Slice):
-    params = ", ".join(render(subexpr) for subexpr in node.subexprs)
-    rendered = f"py::slice({params})"
-    return rendered
-
-
-@render.register
-def _(node: ir.Tuple):
-    params = ", ".join(render(subexpr) for subexpr in node.subexprs)
-    rendered = f"py::make_tuple({params})"
-    return rendered
-
-
-@render.register
-def _(node: ir.Subscript):
-    index = render(node.index)
-    base = render(node.value)
-    rendered = f"{base}[{index}]"
-    return rendered
-
-
-def render_expr(expr: ir.ValueRef,
-                type_helper: TypeHelper,
-                call_templates: Optional[Dict] = None,
-                render_cache: Optional[Dict[ir.Expression, str]] = None):
-    if render_cache is None:
-        render_cache = {}
-    if call_templates is None:
-        call_templates = {}
-    for site in walk(expr):
-        cached = render_cache.get(site)
-        if cached is None:
-            # first time seen in post order
-            if isinstance(site, ir.Call):
-                # before rendering, check that we have a corresponding call template
-                template_types = tuple(type_helper.check_type(arg) for arg in site.args)
-                template = call_templates.get(template_types)
-                if template is None:
-                    func_name = extract_name(site)
-                    msg = f"No call template for call to {func_name} with arguments {template}."
-                    raise CompilerError(msg)
-                render_cache[site] = render(site)
-            else:
-                render_cache[site] = render(site)
-    return render_cache[expr]
-
-
 # Todo: pybind11 source shows examples using these types internally. See how this interacts with numpy..
 
 c_type_codes = {
@@ -319,9 +142,6 @@ c_type_codes = {
     np.dtype("float32"): "float",
     np.dtype("float64"): "double",
 }
-
-# These are used for array initialization
-npy_dtype_codes = {}
 
 
 def get_c_type_name(type_):
@@ -356,6 +176,175 @@ def get_function_header(func: ir.Function, symbols: symbol_table, mangled_name: 
     return func_str
 
 
+class ExprFormatter:
+    def __init__(self, symbols: symbol_table):
+        self.type_helper = TypeHelper(symbols)
+
+    @singledispatchmethod
+    def render(self, node):
+        # some compound stuff has to be broken up if we don't have a replacement
+        # (possibly inlinable) sub-routine
+        msg = f"No method implemented to render type: {type(node)}."
+        raise NotImplementedError(msg)
+
+    @render.register
+    def _(self, node: ir.Constant):
+        return str(node.value)
+
+    @render.register
+    def _(self, node: ir.AND):
+        expr = " && ".join(self.render(subexpr) for subexpr in node.subexprs)
+        return expr
+
+    @render.register
+    def _(self, node: ir.OR):
+        expr = " || ".join(self.render(subexpr) for subexpr in node.subexprs)
+        return expr
+
+    @render.register
+    def _(self, node: ir.NOT):
+        expr = self.render(node.operand)
+        return f"!{expr}"
+
+    @render.register
+    def _(self, node: ir.StringConst):
+        # Todo: need to think about unicode cases
+        return f"std::string({node.value})"
+
+    @render.register
+    def _(self, node: ir.MaxReduction):
+        expr = simple_serialize_min_max(node)
+        rendered = self.render(expr)
+        return rendered
+
+    @render.register
+    def _(self, node: ir.MinReduction):
+        expr = simple_serialize_min_max(node)
+        rendered = self.render(expr)
+        return rendered
+
+    @render.register
+    def _(self, node: ir.CompareOp):
+        left, right = node.subexprs
+        left = self.render(left)
+        right = self.render(right)
+        rendered = f"{left} {node.op} {right}"
+        return rendered
+
+    @render.register
+    def _(self, node: ir.TRUEDIV):
+        left, right = node.subexprs
+        # need casts here for consistency
+        left_type = self.type_helper.check_type(left)
+        f64 = np.dtype('float64')
+        left = self.render(left)
+        if left_type == f64:
+            left = f'static_cast<double>({left})'
+        right_type = self.type_helper.check_type(right)
+        right = self.render(right)
+        if right_type == f64:
+            # Todo: an earlier pass should instrument cast nodes..
+            right = f'static_cast<double>({right})'
+        rendered = f'{left} / {right}'
+        return rendered
+
+    @render.register
+    def _(self, node: ir.FLOORDIV):
+        left, right = node.subexprs
+        left = self.render(left)
+        right = self.render(right)
+        rendered = f'{left} / {right}'
+        return rendered
+
+    @render.register
+    def _(self, node: ir.BinOp):
+        left, right = node.subexprs
+        left = self.render(left)
+        right = self.render(right)
+        rendered = f"{left} {node.op} {right}"
+        return rendered
+
+    @render.register
+    def _(self, node: ir.POW):
+        left, right = node.subexprs
+        left = self.render(left)
+        right = self.render(right)
+        rendered = f"pow({left}, {right})"
+        return rendered
+
+    @render.register
+    def _(self, node: ir.MaxReduction):
+        serialized = simple_serialize_min_max(node)
+        return self.render(serialized)
+
+    @render.register
+    def _(self, node: ir.MinReduction):
+        serialized = simple_serialize_min_max(node)
+        return self.render(serialized)
+
+    @render.register
+    def _(self, node: ir.Min):
+        left, right = node.subexprs
+        left = self.render(left)
+        right = self.render(right)
+        rendered = f"std::min({left}, {right})"
+        return rendered
+
+    @render.register
+    def _(self, node: ir.SingleDimRef):
+        dim = self.render(node.dim)
+        base = self.render(node.base)
+        rendered = f"{base}.shape({dim})"
+        return rendered
+
+    @render.register
+    def _(self, node: ir.NameRef):
+        return node.name
+
+    @render.register
+    def _(self, node: ir.Constant):
+        if isinstance(node.value, (bool, np.bool_)):
+            # c casing..
+            value = 'true' if node.value is True else 'false'
+        else:
+            value = str(node.value)
+        return value
+
+    @render.register
+    def _(self, node: ir.StringConst):
+        return f'"{node.value}"'
+
+    @render.register
+    def _(self, node: ir.Call):
+        func_name = extract_name(node)
+        # Todo: correct func replacement
+        if func_name == 'print':
+            # quick temporary hack
+            func_name = 'py::print'
+        args = ", ".join(self.render(arg) for arg in node.args)
+        rendered = f'{func_name}({args})'
+        return rendered
+
+    @render.register
+    def _(self, node: ir.Slice):
+        params = ", ".join(self.render(subexpr) for subexpr in node.subexprs)
+        rendered = f"py::slice({params})"
+        return rendered
+
+    @render.register
+    def _(self, node: ir.Tuple):
+        params = ", ".join(self.render(subexpr) for subexpr in node.subexprs)
+        rendered = f"py::make_tuple({params})"
+        return rendered
+
+    @render.register
+    def _(self, node: ir.Subscript):
+        index = self.render(node.index)
+        base = self.render(node.value)
+        rendered = f"{base}[{index}]"
+        return rendered
+
+
 class FuncWriter:
     # too dangerous to inherit here.. as it'll just leave a blank on unsupported
     def __init__(self, emitter: Emitter, symbols: symbol_table, mangled_name: Optional[str] = None):
@@ -364,6 +353,7 @@ class FuncWriter:
         self.mangled_name = mangled_name
         self.symbols = symbols
         self.type_helper = TypeHelper(symbols)
+        self.formatter = ExprFormatter(self.symbols)
 
     def __call__(self, node: ir.Function):
         assert isinstance(node, ir.Function)
@@ -381,7 +371,7 @@ class FuncWriter:
                 c_target_type = get_c_type_name(target_type)
                 return f"{c_target_type} {name_str}"
         else:
-            return self.render_expr(name)
+            return self.render(name)
 
     def format_cast(self, expr: ir.ValueRef, src_type, target_type):
         cast_required = src_type != target_type
@@ -390,14 +380,14 @@ class FuncWriter:
         if cast_required and not static_cast_allowed:
             msg = f"Casts from {target_type} to {src_type} are unsupported."
             raise CompilerError(msg)
-        expr_str = self.render_expr(expr)
+        expr_str = self.render(expr)
         if cast_required:
             c_target_type = get_c_type_name(target_type)
             expr_str = f"static_cast<{c_target_type}>({expr_str})"
         return expr_str
 
-    def render_expr(self, expr: ir.ValueRef):
-        return render_expr(expr, self.type_helper, self.cached_exprs)
+    def render(self, expr):
+        return self.formatter.render(expr)
 
     def get_output_func_name(self, node: ir.Function):
         assert isinstance(node, ir.Function)
@@ -435,20 +425,20 @@ class FuncWriter:
         # no declaration
         assert isinstance(node.expr, ir.BinOp)
         if isinstance(node.expr, ir.POW):
-            expr = self.render_expr(node.expr)
-            target = self.render_expr(node.target)
+            expr = self.render(node.expr)
+            target = self.render(node.target)
             stmt = f"{target} = {expr};"
         else:
             op = f"{node.expr.op}="
-            target = self.render_expr(node.target)
-            value = self.render_expr(node.value)
+            target = self.render(node.target)
+            value = self.render(node.value)
             stmt = f"{target} {op} {value};"
         self.emitter.print_line(stmt)
 
     @visit.register
     def _(self, node: ir.IfElse):
         # render test
-        test_str = self.render_expr(node.test)
+        test_str = self.render(node.test)
         header = f"if({test_str})"
         with self.emitter.curly_braces(line=header, semicolon=False):
             self.visit(node.if_branch)
@@ -463,12 +453,12 @@ class FuncWriter:
             msg = f"Unsupported for loop {node}"
             raise ValueError(msg)
         start, stop, step = node.iterable.subexprs
-        start_value_str = self.render_expr(start)
+        start_value_str = self.render(start)
         target = self.format_target(node.target)
         start_str = f"{target} = {start_value_str}"
-        stop_value_str = self.render_expr(stop)
+        stop_value_str = self.render(stop)
         stop_str = f"{node.target.name} < {stop_value_str}"
-        step_value_str = self.render_expr(step)
+        step_value_str = self.render(step)
         if step == ir.One:
             step_str = f"++{node.target.name}"
         else:
@@ -479,12 +469,12 @@ class FuncWriter:
 
     @visit.register
     def _(self, node: ir.SingleExpr):
-        rendered = render(node.expr)
+        rendered = self.render(node.expr)
         self.emitter.print_line(rendered, terminate=True)
 
     @visit.register
     def _(self, node: ir.WhileLoop):
-        test = self.render_expr(node.test)
+        test = self.render(node.test)
         header = f"while({test})"
         with self.emitter.curly_braces(line=header, semicolon=False):
             self.visit(node.body)
@@ -510,7 +500,7 @@ class FuncWriter:
         if node.value is None:
             self.emitter.print_line("return py::none();")
         else:
-            self.emitter.print_line(f"return {render(node.value)};")
+            self.emitter.print_line(f"return {self.render(node.value)};")
 
 
 def gen_module_def(emitter: Emitter, module_name: str, func_names: Set[str], docs: Optional[str] = None):
