@@ -12,7 +12,12 @@ from utils import extract_name, get_stmt_types
 def check_return_type(node: ir.Function, symbols: symbol_table):
     stmts = get_stmt_types(node.body, (ir.Return,))
     typer = TypeHelper(symbols)
-    return_types = {typer.check_type(stmt.value) for stmt in stmts if stmt.value is not None}
+    return_types = set()
+    for stmt in stmts:
+        if stmt.value is None:
+            return_types.add(None)
+        else:
+            return_types.add(typer.check_type(stmt.value))
     # should check if all paths terminate..
     # eg either ends in a return statement or every branch has a return statement
     if len(return_types) > 1:

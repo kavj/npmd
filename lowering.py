@@ -9,7 +9,9 @@ from collections import defaultdict
 from functools import singledispatchmethod, singledispatch
 
 import ir
+
 from errors import CompilerError
+from expression_optimizers import simplify_expr
 from type_checks import TypeHelper
 from pretty_printing import pretty_formatter
 from reductions import ExpressionMapper
@@ -24,285 +26,8 @@ def is_unsafe_arithmetic(node):
     raise NotImplementedError
 
 
-def is_constant_expr(expr):
-    return all(isinstance(c, ir.Constant) for c in walk(expr))
-
-
-def has_nan(node: ir.Expression):
-    for subexpr in node.subexprs:
-        if isinstance(subexpr, ir.Constant):
-            if np.isnan(subexpr.value):
-                return True
-
-
 def is_constant(node: ir.Expression):
     return all(isinstance(subexpr, ir.Constant) for subexpr in node.subexprs)
-
-
-def fold_arithmetic_binop(folder, node):
-    if has_nan(node):
-        return ir.NAN
-    if is_constant(node):
-        return folder(node.left.value, node.right.value)
-    return node
-
-
-def fold_compare_op(folder, node, on_nan):
-    if has_nan(node):
-        return on_nan
-    if is_constant(node):
-        return folder(node.left.value, node.right.value)
-
-
-def fold_bit_op(folder, node):
-    if is_constant(node):
-        for subexpr in node.subexprs:
-            if not isinstance(subexpr.value, numbers.Integral):
-                msg = f"Unsupported operand '{subexpr.value}' for bit field operator {type(node)}."
-                raise CompilerError(msg)
-        return np.folder(node.left.value, node.right.value)
-
-
-@singledispatch
-def fold_op(node):
-    raise NotImplementedError
-
-
-@fold_op.register
-def _(node: ir.ValueRef):
-    return node
-
-
-@fold_op.register
-def _(node: ir.ADD):
-    return fold_arithmetic_binop(np.add, node)
-
-
-@fold_op.register
-def _(node: ir.SUB):
-    return fold_arithmetic_binop(np.sub, node)
-
-
-@fold_op.register
-def _(node: ir.MULT):
-    return fold_arithmetic_binop(np.multiply, node)
-
-
-@fold_op.register
-def _(node: ir.TRUEDIV):
-    return fold_arithmetic_binop(np.true_divide, node)
-
-
-@fold_op.register
-def _(node: ir.FLOORDIV):
-    return fold_arithmetic_binop(np.floor_divide, node)
-
-
-@fold_op.register
-def _(node: ir.MOD):
-    return fold_arithmetic_binop(np.mod, node)
-
-
-@fold_op.register
-def _(node: ir.POW):
-    # Todo: This needs cast nodes, so that something like a**2 comes out as np.float64(a * a)
-    if is_constant(node):
-        return np.power(node.left, node.right)
-    base, exponent = node.subexprs
-    if exponent == ir.Zero:
-        # numpy has this taking precedence
-        if isinstance(exponent.value, numbers.Integral):
-            # only fold if no unsafe stuff
-            return ir.One
-    elif has_nan(node):
-        return ir.NAN
-    elif base == 0:
-        if isinstance(exponent.value, numbers.Integral):
-            return ir.Zero
-    elif exponent == ir.Half:
-        return ir.Sqrt(base)
-    elif exponent == ir.One:
-        return base
-    elif exponent == ir.Two:
-        return ir.MULT(base, base)
-    return node
-
-
-@fold_op.register
-def _(node: ir.MATMULT):
-    return node
-
-
-@fold_op.register
-def _(node: ir.EQ):
-    return fold_compare_op(np.equal, node, ir.FALSE)
-
-
-@fold_op.register
-def _(node: ir.NE):
-    return fold_compare_op(np.not_equal, node, ir.TRUE)
-
-
-@fold_op.register
-def _(node: ir.LT):
-    return fold_compare_op(np.less, node, ir.FALSE)
-
-
-@fold_op.register
-def _(node: ir.LE):
-    return fold_compare_op(np.less_equal, node, ir.FALSE)
-
-
-@fold_op.register
-def _(node: ir.GT):
-    return fold_compare_op(np.greater, node, ir.FALSE)
-
-
-@fold_op.register
-def _(node: ir.GE):
-    return fold_compare_op(np.greater_equal, node, ir.FALSE)
-
-
-@fold_op.register
-def _(node: ir.AND):
-    subexprs = []
-    for subexpr in node.subexprs:
-        if isinstance(node, ir.Constant):
-            if node.value == 0:
-                return ir.FALSE
-        else:
-            # only add non-constant exprs
-            subexprs.append(subexpr)
-    if len(subexprs) == 0:
-        # all True constants
-        return ir.TRUE
-    return ir.AND(*subexprs)
-
-
-@fold_op.register
-def _(node: ir.OR):
-    subexpr = []
-    for subexpr in node.subexprs:
-        if isinstance(node, ir.Constant):
-            if node.value != 0:
-                return ir.TRUE
-        else:
-            subexprs.append(subexpr)
-    if len(subexprs) == 0:
-        # all False constants
-        return ir.FALSE
-
-
-@fold_op.register
-def _(node: ir.XOR):
-    if is_constant(node):
-        accum = node.operands[0]
-        for term in itertools.islice(node.operands, 1):
-            accum = operator.xor(accum, term)
-        return accum
-    return node
-
-
-@fold_op.register
-def _(node: ir.LSHIFT):
-    return fold_bit_op(np.left_shift, node)
-
-
-@fold_op.register
-def _(node: ir.RSHIFT):
-    return fold_bit_op(np.right_shift, node)
-
-
-@fold_op.register
-def _(node: ir.BITOR):
-    return fold_bit_op(np.bitwise_or, node)
-
-
-@fold_op.register
-def _(node: ir.BITAND):
-    return fold_bit_op(np.bitwise_and, node)
-
-
-@fold_op.register
-def _(node: ir.BITXOR):
-    return fold_bit_op(np.bitwise_xor, node)
-
-
-@fold_op.register
-def _(node: ir.UNOT):
-    if is_constant(node):
-        return ir.TRUE if node.operand == ir.Zero else ir.FALSE
-    return node
-
-
-@fold_op.register
-def _(node: ir.USUB):
-    if is_constant(node):
-        return np.negative(node.operand.value)
-    return node
-
-
-@fold_op.register
-def _(self, node: ir.TRUTH):
-    # This will leave truth casts on constant integers
-    # and floats, since the only gain there is a loss
-    # of clarity.
-    if isinstance(node, ir.Constant):
-        if node.value == 0:
-            return ir.FALSE
-        else:
-            return ir.TRUE
-    return node
-
-
-@fold_op.register
-def _(self, node: ir.Select):
-    if isinstance(node.predicate, ir.Constant):
-        # partial fold if constant predicate
-        if node.predicate.value:
-            return node.on_true
-        else:
-            return node.on_false
-    return node
-    if is_constant(node):
-        if node.predicate.value:
-            return node.on_true
-        else:
-            return node.on_false
-    # predicate is non-const. Check if coercible to Min or max
-    if isinstance(predicate, (ir.LT, ir.LE)):
-        left, right = predicate.subexprs
-        if on_true == left and on_false == right:
-            return ir.Min(on_true, on_false)
-        elif on_false == right and on_true == left:
-            # This is almost negated. The issue is if in the destination assembly:
-            #
-            #     min(a,b) is implemented as a if a <= b else b
-            #     max(a,b) is implemented as a if a >= b else b
-            #
-            #  which is common, we reverse operand order to properly catch unordered cases
-            #  This does not follow Python's min/max conventions, which are too error prone.
-            #  Those can arbitrarily propagate or suppress nans as a side effect of
-            #  determining type from the leading operand.
-            return ir.Max(on_false, on_true)
-    elif isinstance(predicate, (ir.GT, ir.GE)):
-        if on_true == predicate.left and on_false == predicate.right:
-            return ir.Max(on_true, on_false)
-        elif on_true == predicate.right and on_false == predicate.left:
-            # right if left < right else left
-            return ir.Min(on_false, on_true)
-    return node
-
-
-def simplify_expr(node: ir.Expression):
-    rewritten = {}
-    for subexpr in walk(node):
-        if isinstance(subexpr, ir.Expression):
-            # find any previously simplified
-            rewrite = subexpr.reconstruct(*(rewritten.get(s, s) for s in subexpr.subexprs))
-            # Now try to simplify the resulting expression
-            rewritten[subexpr] = fold_op(rewrite)
-    return rewritten.get(node, node)
 
 
 class TargetCollector(StmtVisitor):
@@ -401,6 +126,7 @@ class IndexFreezer(StmtTransformer):
                     msg = f"Target array view {target} is not uniquely bound."
                     raise CompilerError(msg)
                 self.view_to_index_name[target] = index_name
+
 
 class LoopLower(StmtTransformer):
 
@@ -543,7 +269,7 @@ def unwrap_truth_tested(expr):
     return expr
 
 
-def _find_shared_interval(intervals, syms):
+def _find_shared_interval(intervals, syms: symbol_table):
     starts = set()
     stops = set()
     steps = set()
@@ -554,30 +280,30 @@ def _find_shared_interval(intervals, syms):
 
     # enumerate doesn't declare a bound, so it shows up as None
     stops.discard(None)
-    # simplify_min_max = MinMaxSimplifier(syms)
+    type_helper = TypeHelper(syms)
 
     if len(steps) == 1:
         # If there's only one step size, we can
         # avoid explicitly computing iteration count
         step = steps.pop()
-        step = simplify_expr(step)
+        step = simplify_expr(step, type_helper)
         if len(starts) == 1:
             start = starts.pop()
             if len(stops) == 1:
                 stop = stops.pop()
-                simplify_expr(stop)
+                simplify_expr(stop, type_helper)
             else:
-                stop = ir.MinReduction(*(simplify_expr(s) for s in stops))
+                stop = ir.MinReduction(*(simplify_expr(s, type_helper) for s in stops))
                 # stop = simplify_min_max.visit(stop)
             return start, stop, step
         elif len(stops) == 1:
-            stop = stops.pop()
-            stop = simplify_expr(stop)
-            start = {simplify_expr(s) for s in starts}
+            stop = stopfs.pop()
+            stop = simplify_expr(stop, type_helper)
+            start = {simplify_expr(s, type_helper) for s in starts}
             start = ir.MaxReduction(start)
             start = simplify_min_max(start)
             diff = ir.SUB(stop, start)
-            diff = simplify_expr(diff)
+            diff = simplify_expr(diff, type_helper)
             return ir.Zero, diff, step
 
     # collect steps to minimize division and modulo ops required
@@ -585,7 +311,7 @@ def _find_shared_interval(intervals, syms):
     by_diff = defaultdict(set)
     for start, stop, step in intervals:
         diff = ir.SUB(stop, start)
-        diff = simplify_expr(diff)
+        diff = simplify_expr(diff, type_helper)
         by_step[step].add(diff)
 
     for step, diffs in by_step.items():
@@ -614,7 +340,7 @@ def _find_shared_interval(intervals, syms):
     counts = set()
     for step, diff in by_step_refined.items():
         count = _compute_iter_count(diff, step)
-        count = simplify_expr(count)
+        count = simplify_expr(count, type_helper)
         counts.add(count)
     counts = ir.MinReduction(counts)
     counts = simplify_min_max(counts)
@@ -677,7 +403,8 @@ def make_single_index_loop(header: ir.ForLoop, symbols):
             if start != ir.Zero:
                 index = ir.ADD(start, index)
 
-        index = simplify_expr(index)
+        type_helper = TypeHelper(symbols)
+        index = simplify_expr(index, type_helper)
         value = index if isinstance(iterable, ir.AffineSeq) else ir.Subscript(iterable, index)
         assign = ir.Assign(target, value, pos)
         body.append(assign)

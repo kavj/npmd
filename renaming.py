@@ -99,5 +99,3 @@ class LoopLocalValueNumbering(StmtVisitor):
         if_branch = LoopLocalValueNumbering(self.mapper, latest_if).visit(node.if_branch)
         latest_else = self.latest.copy()
         else_branch = LoopLocalValueNumbering(self.mapper, latest_else).visit(node.else_branch)
-
-    

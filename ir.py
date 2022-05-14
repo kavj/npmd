@@ -160,6 +160,8 @@ Half = wrap_constant(0.5)
 Two = wrap_constant(2)
 One = wrap_constant(1)
 Zero = wrap_constant(0)
+NegativeOne = wrap_constant(-1)
+NegativeTwo = wrap_constant(-2)
 TRUE = wrap_constant(True)
 FALSE = wrap_constant(False)
 NAN = wrap_constant(np.nan)
@@ -978,6 +980,7 @@ class Zip(Expression):
 
 @dataclass(frozen=True)
 class InPlaceOp(StmtBase):
+    # Todo: set target explicitly for multiply accum which accumulates to expr.right here
     expr: BinOp
     pos: Position
 
