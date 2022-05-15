@@ -6,11 +6,11 @@ import numpy as np
 from dataclasses import dataclass
 from functools import cache, singledispatch
 from itertools import permutations
-from typing import Dict
 
 import ir
 
 from errors import CompilerError
+from symbol_table import symbol_table
 from type_checks import TypeHelper
 
 

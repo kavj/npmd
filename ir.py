@@ -9,7 +9,6 @@ import numpy as np
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-import ir
 from errors import CompilerError
 
 supported_builtins = frozenset({'iter', 'range', 'enumerate', 'zip', 'all', 'any', 'max', 'min', 'abs', 'pow',
@@ -856,10 +855,10 @@ class AffineSeq(Expression):
         if not isinstance(self.start, ValueRef):
             msg = f"Start param of affine sequence must be a value reference. Received: {self.start}."
             raise ValueError(msg)
-        if self.stop is not None and not isinstance(self.stop, ir.ValueRef):
+        if self.stop is not None and not isinstance(self.stop, ValueRef):
             msg = f"Stop param of affine sequence must be a value reference. Received: {self.stop}."
             raise ValueError(msg)
-        if not isinstance(self.step, ir.ValueRef):
+        if not isinstance(self.step, ValueRef):
             msg = f"Step param of affine sequence must be a value reference. Received: {self.step}."
             raise ValueError(msg)
 

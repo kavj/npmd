@@ -1,11 +1,13 @@
 from collections import defaultdict
 from functools import singledispatchmethod
 from itertools import chain, islice
-from typing import Dict
+from typing import Dict, Iterator
 
 import ir
 
 from errors import CompilerError
+from reductions import ExpressionMapper
+from symbol_table import symbol_table
 from visitor import StmtVisitor, walk
 
 # Need can flatten check
@@ -53,7 +55,6 @@ from visitor import StmtVisitor, walk
 # So here we have either expression or identity
 # looking back at expression, we would need to be able to collapse
 # this is probably going to be a different pass, if it's only used conditionally
-
 
 
 def is_terminal(stmt):
@@ -148,6 +149,50 @@ def check_no_trivially_unreachable(stmts: list, start: int, stop: int):
             if is_exit_point(stmt):
                 msg = f"Trivially dead code found due to unexpected exit statement {stmt}."
                 raise CompilerError(msg)
+
+
+def unpack_assignment(node: ir.StmtBase):
+    if isinstance(node, (ir.Assign, ir.InPlaceOp)):
+        return node.target, node.value
+    else:
+        return None
+
+
+def is_assignment(node: ir.StmtBase):
+    return isinstance(node, (ir.Assign, ir.InPlaceOp))
+
+
+def assign_iter(block: Iterator[ir.StmtBase]):
+    for stmt in block:
+        if isinstance(stmt, (ir.Assign, ir.InPlaceOp)):
+            in_place = isinstance(stmt, ir.InPlaceOp)
+            yield stmt.target, stmt.value, in_place, stmt.pos
+
+
+def block_iter(stmts: list):
+    for start, stop in collect_control_flow_blocks(stmts):
+        yield islice(stmts, start, stop)
+
+
+def map_expression(node: ir.ValueRef, assigned: Dict[ir.ValueRef, ir.ValueRef]):
+    if isinstance(node, ir.Expression):
+        subexprs = []
+        for subexpr in node.subexprs:
+            subexprs.append(map_expression(subexpr, assigned))
+        node = node.reconstruct(*subexprs)
+    return assigned.get(node, node)
+
+
+def eliminate_common_subexprs(stmts: list, symbols: symbol_table):
+    mapper = ExpressionMapper(symbols)
+    for block in block_iter(stmts):
+        for stmt in block:
+            if is_assignment(stmt):
+                target = stmt.target
+                value = stmt.value
+                if isinstance(target, ir.NameRef):
+                    pass
+                # mapper.map_expr()
 
 
 class SimpleBranchFlattenCheck(StmtVisitor):

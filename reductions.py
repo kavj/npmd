@@ -6,19 +6,28 @@ import ir
 
 from symbol_table import symbol_table
 from type_checks import TypeHelper
+from utils import extract_name
 
 
 class ExpressionMapper:
+    """
+    This handles labeling of expressions.
+
+    """
     def __init__(self, symbols: symbol_table):
         self.symbols = symbols
         self.type_helper = TypeHelper(symbols)
         self.mapped = {}
-        self.assigns = []
 
     def is_mapped(self, node: ir.Expression):
+        """
+        determines whether an expression has been seen
+        :param node:
+        :return:
+        """
         return node in self.mapped
 
-    def map_expr(self, node: ir.ValueRef):
+    def map_expr(self, node: ir.ValueRef, target: typing.Optional[ir.NameRef] = None):
         # should be careful about caching subscripts
         if not isinstance(node, ir.ValueRef):
             msg = f"Node '{node}' is not a value reference."
@@ -27,16 +36,14 @@ class ExpressionMapper:
             return node
         name = self.mapped.get(node)
         if name is None:
+            if target is None:
+                target_name = extract_name(target)
+            else:
+                target_name = "t"
             t = self.type_helper.check_type(node)
-            name = self.symbols.make_unique_name_like("i", t)
+            name = self.symbols.make_unique_name_like(target_name, t)
             self.mapped[node] = name
-        self.assigns.append((name, node))
         return name
-
-    def map_terms(self, nodes: typing.Iterable[ir.Expression]):
-        for node in nodes:
-            mapped = self.map_expr(node)
-            yield mapped
 
 
 def flatten_min_max_reduction(node: typing.Union[ir.MinReduction, ir.MaxReduction]):
