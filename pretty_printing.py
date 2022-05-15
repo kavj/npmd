@@ -452,7 +452,9 @@ class pretty_printer:
 
     @visit.register
     def _(self, node: ir.InPlaceOp):
-        expr = self.format(node.expr)
+        expr = self.format(node.value)
+        # Todo: needs update
+        self.print_line(expr)
 
     @visit.register
     def _(self, node: ir.Continue):

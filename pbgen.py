@@ -38,6 +38,32 @@ npy_map = {np.dtype("bool"): "bool",
             np.dtype("float64"): "double"}
 
 
+compare_ops = {ir.GT: ">",
+               ir.GE: ">=",
+               ir.LT: "<",
+               ir.LE: "<=",
+               ir.EQ: "==",
+               ir.NE: "!=",
+               ir.IN: "in",
+               ir.NOTIN: "not in"}
+
+
+arithmetic_ops = {ir.ADD: "+",
+                  ir.SUB: "-",
+                  ir.MULT: "*",
+                  ir.TRUEDIV: "/",
+                  ir.FLOORDIV: "//",
+                  ir.MOD: "%",
+                  ir.POW: "**",
+                  ir.LSHIFT: "<<",
+                  ir.RSHIFT: ">>",
+                  ir.BITOR: "|",
+                  ir.BITXOR: "^",
+                  ir.BITAND: "&",
+                  ir.MATMULT: "@"
+                  }
+
+
 class Emitter:
 
     def __init__(self, path, indent="    ", max_line_width=70):
@@ -228,7 +254,8 @@ class ExprFormatter:
         left, right = node.subexprs
         left = self.render(left)
         right = self.render(right)
-        rendered = f"{left} {node.op} {right}"
+        op = compare_ops[type(node)]
+        rendered = f"{left} {op} {right}"
         return rendered
 
     @render.register
@@ -261,7 +288,8 @@ class ExprFormatter:
         left, right = node.subexprs
         left = self.render(left)
         right = self.render(right)
-        rendered = f"{left} {node.op} {right}"
+        op = arithmetic_ops[type(node)]
+        rendered = f"{left} {op} {right}"
         return rendered
 
     @render.register
@@ -423,13 +451,14 @@ class FuncWriter:
     @visit.register
     def _(self, node: ir.InPlaceOp):
         # no declaration
-        assert isinstance(node.expr, ir.BinOp)
-        if isinstance(node.expr, ir.POW):
-            expr = self.render(node.expr)
+        assert isinstance(node.value, ir.BinOp)
+        if isinstance(node.value, ir.POW):
+            expr = self.render(node.value)
             target = self.render(node.target)
             stmt = f"{target} = {expr};"
         else:
-            op = f"{node.expr.op}="
+            op = arithmetic_ops[type(node.value)]
+            op = f"{op}="
             target = self.render(node.target)
             value = self.render(node.value)
             stmt = f"{target} {op} {value};"

@@ -355,6 +355,22 @@ class Subscript(Expression):
 
 @dataclass(frozen=True)
 class Min(Expression):
+    """
+    unordered version of min
+    """
+    values: typing.FrozenSet[ValueRef, ...]
+
+    def __init__(self, *values):
+        object.__setattr__(self, 'values', frozenset(values))
+        assert len(self.values) == 2
+
+    @property
+    def subexprs(self):
+        yield from self.values
+
+
+@dataclass(frozen=True)
+class OrderedMin(Expression):
     left: ValueRef
     right: ValueRef
 
@@ -376,7 +392,7 @@ class Min(Expression):
 
 @dataclass(frozen=True)
 class MinReduction(Expression):
-    values: frozenset
+    values: typing.FrozenSet[ValueRef, ...]
 
     def __init__(self, *values):
         object.__setattr__(self, "values", frozenset(values))
@@ -390,6 +406,19 @@ class MinReduction(Expression):
 
 @dataclass(frozen=True)
 class Max(Expression):
+    values: typing.FrozenSet[ValueRef, ...]
+
+    def __init__(self, *values):
+        object.__setattr__(self, "values", frozenset(values))
+        assert len(self.values) == 2
+
+    @property
+    def subexprs(self):
+        yield from self.values
+
+
+@dataclass(frozen=True)
+class OrderedMax(Expression):
     left: ValueRef
     right: ValueRef
 
@@ -498,8 +527,12 @@ Targetable = typing.TypeVar('Targetable', NameRef, Subscript, Tuple)
 
 
 @dataclass(frozen=True)
-class Sqrt(Expression):
+class SQRT(Expression):
     operand: ValueRef
+
+    @property
+    def subexprs(self):
+        yield self.operand
 
 
 class BinOp(Expression):
@@ -507,11 +540,6 @@ class BinOp(Expression):
 
     left: ValueRef
     right: ValueRef
-    in_place: bool
-    op: typing.ClassVar[str] = "NOT_IMPLEMENTED"
-
-    def __init__(self, left, right):
-        raise NotImplementedError("Binops cannot be instantiated.")
 
     @property
     def subexprs(self):
@@ -521,106 +549,147 @@ class BinOp(Expression):
 
 @dataclass(frozen=True)
 class ADD(BinOp):
-    left: ValueRef
-    right: ValueRef
-    in_place: typing.Optional[bool] = False
-    op: typing.ClassVar[str] = "+"
+    values: typing.FrozenSet[ValueRef, ValueRef]
+
+    def __init__(self, *values):
+        object.__setattr__(self, 'values', frozenset(values))
+
+    @property
+    def subexprs(self):
+        yield from self.values
 
 
 @dataclass(frozen=True)
 class SUB(BinOp):
     left: ValueRef
     right: ValueRef
-    in_place: typing.Optional[bool] = False
-    op: typing.ClassVar[str] = "-"
+
+    @property
+    def subexprs(self):
+        yield self.left
+        yield self.right
 
 
 @dataclass(frozen=True)
 class MULT(BinOp):
-    left: ValueRef
-    right: ValueRef
-    in_place: typing.Optional[bool] = False
-    op: typing.ClassVar[str] = "*"
+    values: typing.FrozenSet[ValueRef, ValueRef]
+
+    def __init__(self, *values):
+        object.__setattr__(self, 'values', frozenset(values))
+
+    @property
+    def subexprs(self):
+        yield from self.values
 
 
 @dataclass(frozen=True)
 class TRUEDIV(BinOp):
     left: ValueRef
     right: ValueRef
-    in_place: typing.Optional[bool] = False
-    op: typing.ClassVar[str] = "/"
+
+    @property
+    def subexprs(self):
+        yield self.left
+        yield self.right
 
 
 @dataclass(frozen=True)
 class FLOORDIV(BinOp):
     left: ValueRef
     right: ValueRef
-    in_place: typing.Optional[bool] = False
-    op: typing.ClassVar[str] = "//"
+
+    @property
+    def subexprs(self):
+        yield self.left
+        yield self.right
 
 
 @dataclass(frozen=True)
 class MOD(BinOp):
     left: ValueRef
     right: ValueRef
-    in_place: typing.Optional[bool] = False
-    op: typing.ClassVar[str] = "%"
+
+    @property
+    def subexprs(self):
+        yield self.left
+        yield self.right
 
 
 @dataclass(frozen=True)
 class POW(BinOp):
     left: ValueRef
     right: ValueRef
-    in_place: typing.Optional[bool] = False
-    op: typing.ClassVar[str] = "**"
+
+    @property
+    def subexprs(self):
+        yield self.left
+        yield self.right
 
 
 @dataclass(frozen=True)
 class LSHIFT(BinOp):
     left: ValueRef
     right: ValueRef
-    in_place: typing.Optional[bool] = False
-    op: typing.ClassVar[str] = "<<"
+
+    @property
+    def subexprs(self):
+        yield self.left
+        yield self.right
 
 
 @dataclass(frozen=True)
 class RSHIFT(BinOp):
     left: ValueRef
     right: ValueRef
-    in_place: typing.Optional[bool] = False
-    op: typing.ClassVar[str] = ">>"
+
+    @property
+    def subexprs(self):
+        yield self.left
+        yield self.right
 
 
 @dataclass(frozen=True)
 class BITOR(BinOp):
     left: ValueRef
     right: ValueRef
-    in_place: typing.Optional[bool] = False
-    op: typing.ClassVar[str] = "|"
+
+    @property
+    def subexprs(self):
+        yield self.left
+        yield self.right
 
 
 @dataclass(frozen=True)
 class BITXOR(BinOp):
     left: ValueRef
     right: ValueRef
-    in_place: typing.Optional[bool] = False
-    op: typing.ClassVar[str] = "^"
+
+    @property
+    def subexprs(self):
+        yield self.left
+        yield self.right
 
 
 @dataclass(frozen=True)
 class BITAND(BinOp):
     left: ValueRef
     right: ValueRef
-    in_place: typing.Optional[bool] = False
-    op: typing.ClassVar[str] = "&"
+
+    @property
+    def subexprs(self):
+        yield self.left
+        yield self.right
 
 
 @dataclass(frozen=True)
 class MATMULT(BinOp):
     left: ValueRef
     right: ValueRef
-    in_place: typing.Optional[bool] = False
-    op: typing.ClassVar[str] = "@"
+
+    @property
+    def subexprs(self):
+        yield self.left
+        yield self.right
 
 
 @dataclass(frozen=True)
@@ -637,9 +706,39 @@ class Length(Expression):
 
 
 class CompareOp(Expression):
+    pass
+
+
+@dataclass(frozen=True)
+class EQ(CompareOp):
+    values: typing.FrozenSet[ValueRef, ValueRef]
+
+    def __init__(self, *values):
+        object.__setattr__(self, 'values', frozenset(values))
+        assert len(self.values) == 2
+
+    @property
+    def subexprs(self):
+        yield from self.values
+
+
+@dataclass(frozen=True)
+class NE(CompareOp):
+    values: typing.FrozenSet[ValueRef, ValueRef]
+
+    def __init__(self, *values):
+        object.__setattr__(self, 'values', frozenset(values))
+        assert len(self.values) == 2
+
+    @property
+    def subexprs(self):
+        yield from self.values
+
+
+@dataclass(frozen=True)
+class LT(CompareOp):
     left: ValueRef
     right: ValueRef
-    op: typing.ClassVar[str] = "NOT_IMPLEMENTED"
 
     @property
     def subexprs(self):
@@ -648,45 +747,36 @@ class CompareOp(Expression):
 
 
 @dataclass(frozen=True)
-class EQ(CompareOp):
-    left: ValueRef
-    right: ValueRef
-    op: typing.ClassVar[str] = "=="
-
-
-@dataclass(frozen=True)
-class NE(CompareOp):
-    left: ValueRef
-    right: ValueRef
-    op: typing.ClassVar[str] = "!="
-
-
-@dataclass(frozen=True)
-class LT(CompareOp):
-    left: ValueRef
-    right: ValueRef
-    op: typing.ClassVar[str] = "<"
-
-
-@dataclass(frozen=True)
 class LE(CompareOp):
     left: ValueRef
     right: ValueRef
-    op: typing.ClassVar[str] = "<="
+
+    @property
+    def subexprs(self):
+        yield self.left
+        yield self.right
 
 
 @dataclass(frozen=True)
 class GT(CompareOp):
     left: ValueRef
     right: ValueRef
-    op: typing.ClassVar[str] = ">"
+
+    @property
+    def subexprs(self):
+        yield self.left
+        yield self.right
 
 
 @dataclass(frozen=True)
 class GE(CompareOp):
     left: ValueRef
     right: ValueRef
-    op: typing.ClassVar[str] = ">="
+
+    @property
+    def subexprs(self):
+        yield self.left
+        yield self.right
 
 
 # Todo: These two are not correct. Fix..
@@ -695,14 +785,22 @@ class GE(CompareOp):
 class IN(CompareOp):
     operand: ValueRef
     target: ValueRef
-    op: typing.ClassVar[str] = "in"
+
+    @property
+    def subexprs(self):
+        yield self.operand
+        yield self.target
 
 
 @dataclass(frozen=True)
 class NOTIN(CompareOp):
     operand: ValueRef
     target: ValueRef
-    op: typing.ClassVar[str] = "not in"
+
+    @property
+    def subexprs(self):
+        yield self.operand
+        yield self.target
 
 
 class BoolOp(Expression):
@@ -711,7 +809,7 @@ class BoolOp(Expression):
     number of operands. Base class is used here to aggregate type checks.
 
     """
-    operands: typing.Iterable[ValueRef, ...]
+    operands: typing.FrozenSet[ValueRef, ...]
     op: typing.ClassVar[str] = "NOT_IMPLEMENTED"
     c_op: typing.ClassVar[str] = "NOT_IMPLEMENTED"
 
@@ -726,8 +824,7 @@ class OR(BoolOp):
     """
     Boolean OR
     """
-    operands: typing.Iterable[ValueRef, ...]
-    op: typing.ClassVar[str] = "or"
+    operands: typing.FrozenSet[ValueRef, ...]
 
     def __init__(self, *operands):
         object.__setattr__(self, 'operands', frozenset(operands))
@@ -738,11 +835,10 @@ class AND(BoolOp):
     """
     Boolean AND
     """
-    operands: typing.Tuple[ValueRef, ...]
-    op: typing.ClassVar[str] = "and"
+    operands: typing.FrozenSet[ValueRef, ...]
 
     def __init__(self, *operands):
-        object.__setattr__(self, 'operands', operands)
+        object.__setattr__(self, 'operands', frozenset(operands))
 
 
 @dataclass(frozen=True)
@@ -750,8 +846,7 @@ class XOR(BoolOp):
     """
     Boolean XOR
     """
-    operands: typing.Tuple[ValueRef, ...]
-    op: typing.ClassVar[str] = "NOT_IMPLEMENTED" # there is no direct python equivalent
+    operands: typing.FrozenSet[ValueRef, ...]
 
     def __init__(self, *operands):
         object.__setattr__(self, 'operands', frozenset(operands))
@@ -980,19 +1075,12 @@ class Zip(Expression):
 @dataclass(frozen=True)
 class InPlaceOp(StmtBase):
     # Todo: set target explicitly for multiply accum which accumulates to expr.right here
-    expr: BinOp
+    target: ValueRef
+    value: BinOp
     pos: Position
 
     def __post_init__(self):
-        assert isinstance(self.expr, BinOp) and self.expr.in_place
-
-    @property
-    def target(self):
-        return self.expr.left
-
-    @property
-    def value(self):
-        return self.expr.right
+        assert isinstance(self.value, BinOp)
 
 
 @dataclass
@@ -1009,8 +1097,6 @@ class Assign(StmtBase):
     def __post_init__(self):
         assert isinstance(self.target, ValueRef)
         assert isinstance(self.value, ValueRef)
-        if isinstance(self.value, BinOp):
-            assert not self.value.in_place
 
 
 @dataclass

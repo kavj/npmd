@@ -337,8 +337,8 @@ class TreeBuilder(ast.NodeVisitor):
         operand = self.visit(node.value)
         cls = binary_ops[type(node.op)]
         pos = extract_positional_info(node)
-        expr = cls(target, operand, in_place=True)
-        assign = ir.InPlaceOp(expr, pos)
+        expr = cls(target, operand)
+        assign = ir.InPlaceOp(target, expr, pos)
         self.body.append(assign)
 
     def visit_Assign(self, node: ast.Assign):

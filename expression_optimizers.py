@@ -123,6 +123,67 @@ class MultiplyNegateSub(ir.Expression):
         yield self.c
 
 
+# This doesn't handle casts
+
+@singledispatch
+def fold_identity(node: ir.ValueRef, type_helper: TypeHelper):
+    return node
+
+
+@fold_identity.register
+def _(node: ir.ADD):
+    a, b = node.subexprs
+    if a == ir.Zero:
+        return b
+    elif b == ir.Zero:
+        return a
+    else:
+        return node
+
+
+@fold_identity.register
+def _(node: ir.SUB, type_helper: TypeHelper):
+    if node.right == ir.Zero:
+        pass
+    else:
+        pass
+    return node.left if node.right == ir.Zero else node
+
+
+@fold_identity.register
+def _(node: ir.MULT):
+    a, b = node.subexprs
+    if a == ir.One:
+        return b
+    elif b == ir.One:
+        return a
+    else:
+        return node
+
+
+@fold_identity.register
+def _(node: ir.TRUEDIV):
+    if node.right == ir.One:
+        return node.left
+    else:
+        return node
+
+
+@fold_identity.register
+def _(node: ir.POW):
+    return node.left if node.right == ir.One else node
+
+
+@fold_identity.register
+def _(node: ir.LSHIFT):
+    return node.left if node.right == ir.Zero else node
+
+
+@fold_identity.register
+def _(node: ir.RSHIFT):
+    return node.left if node.right == ir.Zero else node
+
+
 @singledispatch
 def as_multiply_accum(node: ir.Expression):
     return node
@@ -299,7 +360,7 @@ def _(node: ir.POW):
         if isinstance(exponent.value, numbers.Integral):
             return ir.Zero
     elif exponent == ir.Half:
-        return ir.Sqrt(base)
+        return ir.SQRT(base)
     elif exponent == ir.One:
         return base
     elif exponent == ir.Two:
