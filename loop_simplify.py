@@ -3,16 +3,17 @@ import operator
 from analysis import find_unterminated_path
 from collections import defaultdict
 from functools import singledispatchmethod
+from typing import List
 
 import ir
 
 from errors import CompilerError
 from symbol_table import SymbolTable
 from utils import unpack_iterated
-from visitor import StmtTransformer
+from traversal import StmtTransformer
 
 
-def remove_trailing_continues(node: list) -> list:
+def remove_trailing_continues(node: List[ir.StmtBase]) -> List[ir.StmtBase]:
     """
     Remove continues that are the last statement along some execution path within the current
     enclosing loop.
@@ -46,7 +47,7 @@ class NormalizePaths(StmtTransformer):
         self.innermost_loop = None
         self.body = None
 
-    def __call__(self, node):
+    def __call__(self, node: ir.StmtBase):
         repl = self.visit(node)
         return repl
 
@@ -157,8 +158,8 @@ class IntervalBuilder:
         return start, stop, step
 
 
-def _compute_iter_count(diff, step):
-    # Todo: may insert an extra round of constant folding here..
+def _compute_iter_count(diff: ir.ValueRef, step: ir.ValueRef):
+    # Todo: replace with compute_element_count from analysis
     if step == ir.Zero:
         msg = "Zero step loop iterator encountered."
         raise CompilerError(msg)
@@ -170,16 +171,6 @@ def _compute_iter_count(diff, step):
         on_true = ir.ADD(on_false, ir.One)
         count = ir.SELECT(predicate=modulo, on_true=on_true, on_false=on_false)
     return count
-
-
-def _find_range_intersection(by_step):
-    if len(by_step) == 0:
-        return set()
-    diff_sets = iter(by_step.value())
-    initial = next(diff_sets)
-    for d in diff_sets:
-        initial.intersection_update(d)
-    return initial
 
 
 def _find_shared_interval(intervals):

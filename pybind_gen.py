@@ -15,8 +15,7 @@ from reductions import serialize_min_max
 from symbol_table import SymbolTable
 from type_checks import TypeHelper, check_return_type
 from utils import extract_name
-from visitor import walk
-
+from traversal import walk
 
 npy_c_type_codes = {
     np.dtype("bool"): "NPY_BOOL",
@@ -28,15 +27,13 @@ npy_c_type_codes = {
     np.dtype("float64"): "NPY_FLOAT64",
 }
 
-
 npy_map = {np.dtype("bool"): "bool",
            np.dtype("int8"): "int8_t",
-            np.dtype("uint8"): "uint8_t",
-            np.dtype("int32"): "int32_t",
-            np.dtype("int64"): "int64_t",
-            np.dtype("float32"): "float",
-            np.dtype("float64"): "double"}
-
+           np.dtype("uint8"): "uint8_t",
+           np.dtype("int32"): "int32_t",
+           np.dtype("int64"): "int64_t",
+           np.dtype("float32"): "float",
+           np.dtype("float64"): "double"}
 
 compare_ops = {ir.GT: ">",
                ir.GE: ">=",
@@ -46,7 +43,6 @@ compare_ops = {ir.GT: ">",
                ir.NE: "!=",
                ir.IN: "in",
                ir.NOTIN: "not in"}
-
 
 arithmetic_ops = {ir.ADD: "+",
                   ir.SUB: "-",
@@ -543,7 +539,6 @@ def gen_module_def(emitter: Emitter, module_name: str, func_names: Set[str], doc
 
 def gen_module(path: pathlib.Path, module_name: str, funcs: List[ir.Function], symbol_tables: Dict[str, SymbolTable],
                docs: Optional[str] = None):
-
     if not module_name.endswith(".cpp"):
         module_name += ".cpp"
     emitter = Emitter(path.joinpath(module_name))

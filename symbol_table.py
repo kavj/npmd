@@ -150,6 +150,7 @@ class SymbolTable:
         # Return the name as it is registered.
         return ir.NameRef(name)
 
-    def make_alias(self, name):
+    def make_versioned(self, name):
+        assert self.is_source_name(name)
         var_type = self.check_type(name)
         return self.make_unique_name_like(name, var_type)

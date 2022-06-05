@@ -1,5 +1,5 @@
 import itertools
-from functools import singledispatch, singledispatchmethod
+from functools import singledispatchmethod
 from typing import Callable, Generator, Iterator, List, Tuple
 
 import ir
@@ -9,15 +9,31 @@ from utils import is_entry_point
 
 
 def sequence_block_intervals(stmts: List[ir.StmtBase]):
-    segment_begin = 0
-    index = -1
-    for index, stmt in enumerate(stmts):
+    segment_first = 0
+    segment_last = 0
+    for segment_last, stmt in enumerate(stmts):
         if is_entry_point(stmt):
-            next_segment_begin = index + 1
-            yield segment_begin, next_segment_begin
-            segment_begin = next_segment_begin
-    if segment_begin <= index:
-        yield segment_begin, index + 1
+            if segment_first < segment_last:
+                # yield up to this statement
+                yield segment_first, segment_last
+            yield segment_last, segment_last + 1
+            segment_first = segment_last + 1
+    if segment_first <= segment_last:
+        yield segment_first, segment_last + 1
+
+
+def sequence_blocks(stmts: List[ir.StmtBase]):
+    segment_first = 0
+    segment_last = 0
+    for segment_last, stmt in enumerate(stmts):
+        if is_entry_point(stmt):
+            if segment_first < segment_last:
+                # yield up to this statement
+                yield itertools.islice(stmts, segment_first, segment_last)
+            yield itertools.islice(stmts, segment_last, segment_last + 1)
+            segment_first = segment_last + 1
+    if segment_first <= segment_last:
+        yield itertools.islice(stmts, segment_first, segment_last + 1)
 
 
 def depth_first_sequence_statements(node: List[ir.StmtBase], reverse=False) -> Generator[ir.StmtBase, None, None]:
@@ -50,7 +66,7 @@ def depth_first_sequence_statements(node: List[ir.StmtBase], reverse=False) -> G
             queued.pop()
 
 
-def depth_first_sequence_block_intervals(node: List[ir.StmtBase]) -> Generator[Iterator[ir.StmtBase], None, None]:
+def depth_first_sequence_blocks(node: List[ir.StmtBase]) -> Generator[Iterator[ir.StmtBase], None, None]:
     """
     basic block generator
     :param node:
@@ -60,8 +76,8 @@ def depth_first_sequence_block_intervals(node: List[ir.StmtBase]) -> Generator[I
     block_iter = sequence_block_intervals(node)
     queued = [(node, block_iter)]
     while queued:
-        node_iter, stmts = queued[-1]
-        for start, stop in node_iter:
+        stmts, block_iter = queued[-1]
+        for start, stop in block_iter:
             yield itertools.islice(stmts, start, stop)
             if stop - start == 1:
                 first = stmts[start]
@@ -104,6 +120,51 @@ def walk(node: ir.ValueRef):
                 seen.add(subexpr)
                 if isinstance(subexpr, ir.Expression):
                     enqueued.append((subexpr, subexpr.subexprs))
+                    break
+                yield subexpr
+            else:
+                # exhausted
+                yield expr
+                enqueued.pop()
+    else:
+        yield node
+
+
+def array_safe_walk(node: ir.ValueRef):
+    """
+    like walk, but doesn't follow subscript.value paths.
+
+    For example, walking 'a[i]' should yield ir versions of 'a', 'i', 'a[i]'. Here we would not yield 'a'.
+
+    For a nested subscript like a[i][j] (once properly supported) this would be updated to check follow the nested
+    index paths. For now, nested subscripts are unsupported (as the interplay with vectorization is not trivial).
+
+    :param node:
+    :return:
+    """
+
+    assert isinstance(node, ir.ValueRef)
+    if isinstance(node, ir.Expression):
+        seen = {node}
+        if isinstance(node, ir.Subscript):
+            # don't yield node.value, since this would suggest
+            # a bare array reference rather than a subscripted one
+            enqueued = [(node, iter((node.index,)))]
+        else:
+            enqueued = [(node, node.subexprs)]
+        while enqueued:
+            expr, subexprs = enqueued[-1]
+            for subexpr in subexprs:
+                if subexpr in seen:
+                    continue
+                seen.add(subexpr)
+                if isinstance(subexpr, ir.Expression):
+                    if isinstance(subexpr, ir.Subscript):
+                        # don't descend on node.value, so on encountering expression a[i],
+                        # yield i then a[i] rather than a, i, a[i], since we only access an element of 'a'.
+                        enqueued.append((subexpr, iter((node.index,))))
+                    else:
+                        enqueued.append((subexpr, subexpr.subexprs))
                     break
                 yield subexpr
             else:
@@ -313,29 +374,3 @@ class SimpleTransform(StmtTransformer):
         body = self.visit(node.body)
         repl = ir.WhileLoop(test, body, node.pos)
         return repl
-
-
-@singledispatch
-def walk_region(node):
-    yield
-
-
-@singledispatch
-def _(node: list):
-    yield from node
-
-
-@walk_region.register
-def _(node: ir.IfElse):
-    yield from node.if_branch
-    yield from node.else_branch
-
-
-@walk_region.register
-def _(node: ir.ForLoop):
-    yield from node.body
-
-
-@walk_region.register
-def _(node: ir.WhileLoop):
-    yield from node.body

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import numbers
 import operator
 import typing
@@ -148,7 +149,7 @@ class CONSTANT(ValueRef):
 
 
 @dataclass(frozen=True)
-class StringConst:
+class StringConst(ValueRef):
     value: str
 
     def __post_init__(self):
@@ -296,13 +297,16 @@ class SingleDimRef(Expression):
 
 @dataclass(frozen=True)
 class Subscript(Expression):
-    value: ValueRef
+    value: NameRef
     index: ValueRef
 
     def __post_init__(self):
         # Subscripting things like tuples isn't supported here
-        if not isinstance(self.value, (NameRef, Subscript)):
-            msg = f"Expected name or nested subscript, got {self.value}, type: {type(self.value)}."
+        if not isinstance(self.value, NameRef):
+            if isinstance(self.value, Subscript):
+                msg = f"Nested subscripts are not currently supported"
+                raise TypeError(msg)
+            msg = f"Expected name, got {self.value}, type: {type(self.value)}."
             raise TypeError(msg)
         elif not isinstance(self.index, ValueRef):
             msg = f"Expected ValueRef, got {self.index}, type: {type(self.index)}."
@@ -563,7 +567,8 @@ class ADD(BinOp):
     right: ValueRef
 
     def __init__(self, *values):
-        left, right = sorted(values, key=lambda k: str(k))
+        # use reverse sort to avoid putting constants first
+        left, right = sorted(values, key=lambda k: str(k), reverse=True)
         object.__setattr__(self, 'left', left)
         object.__setattr__(self, 'right', right)
 
@@ -981,9 +986,14 @@ class Call(Expression):
 
     @property
     def subexprs(self):
-        yield self.func
+        # don't yield call name,
+        # since this shouldn't be visited like a variable
         for arg in self.args:
             yield arg
+
+    def reconstruct(self, *args):
+        assert len(args) == len(self.args)
+        return super().reconstruct(*itertools.chain((self.func,), args))
 
 
 @dataclass(frozen=True)
@@ -1116,7 +1126,7 @@ class InPlaceOp(StmtBase):
         assert isinstance(self.value, (BinOp, Contraction))
 
 
-@dataclass
+@dataclass(frozen=True)
 class Assign(StmtBase):
     """
     An assignment of a right hand side expression to a name or subscripted name.
@@ -1130,9 +1140,12 @@ class Assign(StmtBase):
     def __post_init__(self):
         assert isinstance(self.target, ValueRef)
         assert isinstance(self.value, ValueRef)
+        if isinstance(self.value, Slice):
+            msg = f"Explicitly assigning slice expressions is unsupported: {self}."
+            raise CompilerError(msg)
 
 
-@dataclass
+@dataclass(frozen=True)
 class SingleExpr(StmtBase):
     value: ValueRef
     pos: Position
@@ -1141,12 +1154,12 @@ class SingleExpr(StmtBase):
         assert isinstance(self.value, ValueRef)
 
 
-@dataclass
+@dataclass(frozen=True)
 class Break(StmtBase):
     pos: Position
 
 
-@dataclass
+@dataclass(frozen=True)
 class Continue(StmtBase):
     pos: Position
 
@@ -1199,14 +1212,14 @@ class ImportRef:
         return self.member is None
 
 
-@dataclass
+@dataclass(frozen=True)
 class ModImport(StmtBase):
     module: NameRef
     as_name: NameRef
     pos: Position
 
 
-@dataclass
+@dataclass(frozen=True)
 class NameImport(StmtBase):
     module: NameRef
     name: NameRef
@@ -1219,7 +1232,7 @@ class NameImport(StmtBase):
         assert isinstance(self.as_name, NameRef)
 
 
-@dataclass
+@dataclass(frozen=True)
 class Return(StmtBase):
     value: typing.Optional[ValueRef]
     pos: Position

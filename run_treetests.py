@@ -13,8 +13,6 @@ tests = ("test_forifcont.py", "test_nested.py", "test_cascade_if.py", "test_dead
          "test_pass.py", "test_conditional_terminated.py", "test_bothterminated.py", "test_chained_comparisons.py",
          "test_folding.py", "test_fold_unreachable.py", "test_normalize_return_flow.py", "unpack_with_subscripts.py",
          "test_nested_if.py")
-# tests = ("test_conditional_terminated.py",)
-
 
 array_2d = ir.ArrayType(ndims=2, dtype=ir.float64)
 array_1d = ir.ArrayType(ndims=1, dtype=ir.float64)

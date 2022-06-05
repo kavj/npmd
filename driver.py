@@ -3,15 +3,14 @@ import sys
 
 from pathlib import Path
 
-import ir
 from pybind_gen import gen_module, gen_setup, Emitter
 
 from analysis import ReachingCheck
 from ast_transform import build_module_ir_and_symbols
 from canonicalize import patch_return
 from errors import CompilerError
-from lvn import run_local_value_numbering
 from loop_simplify import LoopLowering, NormalizePaths
+from lvn import run_func_local_opts
 from pretty_printing import PrettyFormatter
 from pprint import pformat
 
@@ -81,15 +80,13 @@ def compile_module(file_path, types,  out_dir, verbose=False, print_result=True,
                 raise CompilerError(msg)
         func = loop_lowering.visit(func)
         func = patch_return(func, func_symbols)
+        func = run_func_local_opts(func, func_symbols)
 
         if print_result:
             from pretty_printing import PrettyPrinter
             pp = PrettyPrinter()
             pp(func, func_symbols)
-        name = func.name
-        args = func.args
-        body = run_local_value_numbering(func.body, func_symbols)
-        func = ir.Function(name, args, body)
+
         funcs.append(func)
 
     gen_module(out_dir, modname, funcs, symbols)

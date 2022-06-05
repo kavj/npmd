@@ -3,68 +3,67 @@ import math
 import operator
 
 from functools import singledispatch
-from typing import Optional, Union
+from typing import Iterable, Iterator, Union
 
 import numpy as np
 
 import ir
 
 from errors import CompilerError
-from type_checks import TypeHelper
-
-int_dtypes = {
-    np.dtype('int8'),
-    np.dtype('int16'),
-    np.dtype('int32'),
-    np.dtype('int64'),
-    np.dtype('uint8'),
-    np.dtype('uint16'),
-    np.dtype('uint32'),
-    np.dtype('uint64'),
-}
+from type_checks import is_integer, TypeHelper
 
 
-real_float_dtypes = {
-    np.dtype('float32'),
-    np.dtype('float64'),
-}
+def concatenate(args: Union[Iterable[ir.Expression], Iterator]):
+    """
+    Method to conjoin two or more arguments as a tuple
+    :param args:
+    :return:
+    """
+    terms = []
+    for arg in args:
+        if isinstance(arg, ir.TUPLE):
+            terms.extend(arg.elements)
+        else:
+            terms.append(arg)
+    if len(terms) < 2:
+        msg = f'Concatenate requires at least 2 valid items, received "{terms}"'
+        raise ValueError(msg)
+    return ir.TUPLE(*terms)
 
 
-complex_dtypes = {
-    np.dtype('complex64'),
-    np.dtype('complex128')
-}
-
-
-float_dtypes = real_float_dtypes.union(complex_dtypes)
-
-real_dtypes = int_dtypes.union(real_float_dtypes)
-
-
-dtype_to_suffix = {np.dtype('int8'): 's8',
-                   np.dtype('int16'): 's16',
-                   np.dtype('int32'): 's32',
-                   np.dtype('int64'): 's64',
-                   np.dtype('uint8'): 'u8',
-                   np.dtype('uint16'): 'u16',
-                   np.dtype('uint32'): 'u32',
-                   np.dtype('uint64'): 'u64',
-                   np.dtype('float32'): 'f32',
-                   np.dtype('float64'): 'f64',
-                   np.dtype('complex64'): 'f32',  # corresponding real component type for ops
-                   np.dtype('complex128'): 'f64'}  # that don't require unpacking
-
-
-def is_integer(dtype: np.dtype):
-    return dtype in int_dtypes
-
-
-def is_float(dtype: np.dtype):
-    return dtype in float_dtypes
-
-
-def is_real(dtype: np.dtype):
-    return dtype in real_dtypes
+def flatten_nested_index(node: ir.Subscript, typer: TypeHelper):
+    """
+    Intended to turn a[i][j] into a[i,j]
+    Todo: Getting multi-dimensional to actually behave properly may require significant work.
+    :param node:
+    :param typer:
+    :return:
+    """
+    if not isinstance(node, ir.Subscript):
+        return node
+    if (isinstance(node.value, ir.Subscript)
+            and not isinstance(node.index, ir.Slice)
+            and not isinstance(node.value.index, ir.Slice)):
+        terms = [node.index, node.value.index]
+        next_term = node.value.value
+        while isinstance(next_term, ir.Subscript):
+            if isinstance(next_term, ir.Slice):
+                break
+            terms.append(next_term.index)
+            next_term = next_term.value
+        index = concatenate(reversed(terms))
+        # check that this isn't an unsupported indirect indexing
+        uses_mask_indices = False
+        for e in index.subexprs:
+            t = typer.check_type(e)
+            if isinstance(t, ir.ArrayType):
+                if is_integer(t.dtype):
+                    msg = f"Indirect indexing is unsupported {node}."
+                    raise CompilerError(msg)
+                uses_mask_indices = True
+        if uses_mask_indices is False:
+            return ir.Subscript(next_term, index)
+    return node
 
 
 def simplify_pow(node: ir.POW):
@@ -146,7 +145,7 @@ class ExprContract:
     def __init__(self, typer: TypeHelper):
         self.typer = typer
 
-    def __call__(self, expr: ir.ValueRef) -> Optional[ir.ValueRef]:
+    def __call__(self, expr: ir.ValueRef) -> ir.ValueRef:
         if isinstance(expr, ir.ADD):
             # prefer negated version
             for left, right in itertools.permutations(expr.subexprs):

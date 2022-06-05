@@ -2,13 +2,14 @@ import operator
 
 from contextlib import contextmanager
 from functools import singledispatchmethod
-from typing import List, Optional
+from typing import Generator, List, Optional, Set, Tuple
 
 import ir
 
 from folding import fold_op
 from utils import is_entry_point, unpack_iterated
-from visitor import depth_first_sequence_block_intervals, get_value_types, StmtVisitor, walk_parameters
+from traversal import (depth_first_sequence_blocks, depth_first_sequence_statements,
+                       get_value_types, StmtVisitor, walk_parameters)
 
 from type_checks import TypeHelper
 
@@ -191,7 +192,7 @@ class AllPathsReturn(StmtVisitor):
             return self.visit(node.if_branch) and self.visit(node.else_branch)
 
 
-def find_unterminated_path(stmts):
+def find_unterminated_path(stmts: List[ir.StmtBase]) -> Optional[List[ir.StmtBase]]:
     if not isinstance(stmts, list):
         raise TypeError("Internal Error: expected a list of statements")
     if len(stmts) > 0:
@@ -218,7 +219,7 @@ def find_unterminated_path(stmts):
     return stmts
 
 
-def find_array_ops(node: ir.Expression, typer: TypeHelper):
+def find_array_ops(node: ir.Expression, typer: TypeHelper) -> Generator[Tuple[ir.ValueRef, ir.ValueRef], None, None]:
     # Todo: remove hard coding in favor of getting array compatible operation types
     for expr in get_value_types(node, (ir.BinOp, ir.CompareOp)):
         left, right = expr.subexprs
@@ -226,6 +227,27 @@ def find_array_ops(node: ir.Expression, typer: TypeHelper):
         right_type = typer.check_type(right)
         if isinstance(left_type, ir.ArrayType) and isinstance(right_type, ir.ArrayType):
             yield left, right
+
+
+def compute_element_count(start: ir.ValueRef, stop: ir.ValueRef, step: ir.ValueRef):
+    """
+    Single method to compute the number of elements for an iterable expression.
+
+    :param start:
+    :param stop:
+    :param step:
+    :return:
+    """
+
+    start = fold_op(start)
+    stop = fold_op(stop)
+    step = fold_op(step)
+    diff = fold_op(ir.SUB(stop, start))
+    base_count = fold_op((ir.FLOORDIV(diff, step)))
+    test = fold_op(ir.MOD(diff, step))
+    fringe = fold_op(ir.SELECT(predicate=test, on_true=ir.One, on_false=ir.Zero))
+    count = fold_op(ir.ADD(base_count, fringe))
+    return count
 
 
 def find_array_length_expression(node: ir.ValueRef) -> Optional[ir.ValueRef]:
@@ -250,22 +272,7 @@ def find_array_length_expression(node: ir.ValueRef) -> Optional[ir.ValueRef]:
             else:
                 stop = fold_op(ir.MIN(index.stop, ir.SingleDimRef(node.value, dim=ir.Zero)))
             step = index.step
-            if step == ir.One:
-                # unit step, just need diff
-                if start == ir.Zero:
-                    return stop
-                else:
-                    return fold_op(ir.SUB(stop, start))
-            else:
-                # (stop - start) // step + 1 if (stop - start) % step else 0
-                if start == ir.Zero:
-                    diff = stop
-                else:
-                    diff = fold_op(ir.SUB(stop, start))
-                base_count = fold_op(ir.FLOORDIV(diff, step))
-                test = fold_op(ir.MOD(diff, step))
-                fringe = fold_op(ir.SELECT(predicate=test, on_true=ir.One, on_false=ir.Zero))
-                return fold_op(ir.ADD(base_count, fringe))
+            return compute_element_count(start, stop, step)
         else:
             # first dim removed
             return ir.SingleDimRef(node.value, dim=ir.One)
@@ -274,7 +281,19 @@ def find_array_length_expression(node: ir.ValueRef) -> Optional[ir.ValueRef]:
     # other cases handled by analyzing sub-expressions and broadcasting constraints
 
 
-def find_ephemeral_references(node: List[ir.StmtBase]):
+def find_bound(node: ir.Function):
+    bound = {*node.args}
+    for stmt in depth_first_sequence_statements(node.body):
+        if isinstance(stmt, ir.Assign) and isinstance(stmt.target, ir.NameRef):
+            bound.add(stmt.target)
+        elif isinstance(stmt, ir.ForLoop):
+            for target, _ in unpack_iterated(stmt.target, stmt.iterable):
+                assert isinstance(target, ir.NameRef)
+                bound.add(target)
+    return bound
+
+
+def find_ephemeral_references(node: ir.Function) -> Set[ir.NameRef]:
     """
     Ephemeral targets are variables that whose assignments can all be localized. This is always decidable in cases
     where a variable is always always bound within a block prior to its first use.
@@ -285,7 +304,7 @@ def find_ephemeral_references(node: List[ir.StmtBase]):
     """
     uevs = set()
     clobbers = set()
-    for block in depth_first_sequence_block_intervals(node):
+    for block in depth_first_sequence_blocks(node.body):
         clobbers.clear()
         for stmt in block:
             if isinstance(stmt, (ir.Assign, ir.InPlaceOp)):
@@ -310,4 +329,8 @@ def find_ephemeral_references(node: List[ir.StmtBase]):
             elif isinstance(stmt, (ir.SingleExpr, ir.Return)):
                 if stmt.value is not None:
                     uevs.update(name for name in walk_parameters(stmt.value) if name not in clobbers)
-    return uevs
+    # remove anything is explictly bound and remove everything that
+    # is read first in any block.
+    bound = find_bound(node)
+    bound.difference_update(uevs)
+    return bound

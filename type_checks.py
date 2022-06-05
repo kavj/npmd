@@ -10,6 +10,61 @@ from symbol_table import SymbolTable
 from utils import extract_name, get_stmt_types
 
 
+int_dtypes = {
+    np.dtype('int8'),
+    np.dtype('int16'),
+    np.dtype('int32'),
+    np.dtype('int64'),
+    np.dtype('uint8'),
+    np.dtype('uint16'),
+    np.dtype('uint32'),
+    np.dtype('uint64'),
+}
+
+
+real_float_dtypes = {
+    np.dtype('float32'),
+    np.dtype('float64'),
+}
+
+
+complex_dtypes = {
+    np.dtype('complex64'),
+    np.dtype('complex128')
+}
+
+
+float_dtypes = real_float_dtypes.union(complex_dtypes)
+
+real_dtypes = int_dtypes.union(real_float_dtypes)
+
+
+dtype_to_suffix = {np.dtype('int8'): 's8',
+                   np.dtype('int16'): 's16',
+                   np.dtype('int32'): 's32',
+                   np.dtype('int64'): 's64',
+                   np.dtype('uint8'): 'u8',
+                   np.dtype('uint16'): 'u16',
+                   np.dtype('uint32'): 'u32',
+                   np.dtype('uint64'): 'u64',
+                   np.dtype('float32'): 'f32',
+                   np.dtype('float64'): 'f64',
+                   np.dtype('complex64'): 'f32',  # corresponding real component type for ops
+                   np.dtype('complex128'): 'f64'}  # that don't require unpacking
+
+
+def is_integer(dtype: np.dtype):
+    return dtype in int_dtypes
+
+
+def is_float(dtype: np.dtype):
+    return dtype in float_dtypes
+
+
+def is_real(dtype: np.dtype):
+    return dtype in real_dtypes
+
+
 def check_return_type(node: ir.Function, symbols: SymbolTable):
     stmts = get_stmt_types(node.body, (ir.Return,))
     typer = TypeHelper(symbols)
@@ -78,6 +133,11 @@ class TypeHelper:
     @check_type.register
     def _(self, expr: ir.BoolOp):
         return ir.bool_type
+
+    @check_type.register
+    def _(self, expr: ir.CAST):
+        # cast nodes should have a make cas with more checking
+        return expr.target_type
 
     @check_type.register
     def _(self, expr: ir.CONSTANT):
