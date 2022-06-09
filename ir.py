@@ -209,7 +209,7 @@ class NameRef(ValueRef):
         if isinstance(name, NameRef):
             name = name.name
         elif not isinstance(name, str):
-            msg = f"No method to make name reference from type {type(name)}."
+            msg = f'No method to make name reference from type {type(name)}.'
             raise TypeError(msg)
         object.__setattr__(self, 'name', name)
 
@@ -246,10 +246,10 @@ class Ones(ArrayInitializer):
     dtype: np.dtype
 
     def __post_init__(self):
-        assert self.shape is None or isinstance(self.shape, tuple)
+        assert isinstance(self.shape, tuple)
         assert isinstance(self.dtype, np.dtype)
         if len(self.shape) > 4:
-            msg = f"Arrays with more than 4 dims are unsupported here"
+            msg = f'Arrays with more than 4 dims are unsupported here'
             raise CompilerError(msg)
 
 
@@ -262,7 +262,7 @@ class Zeros(ArrayInitializer):
         assert self.shape is None or isinstance(self.shape, tuple)
         assert isinstance(self.dtype, np.dtype)
         if len(self.shape) > 4:
-            msg = f"Arrays with more than 4 dims are unsupported here"
+            msg = f'Arrays with more than 4 dims are unsupported here'
             raise CompilerError(msg)
 
 
@@ -286,7 +286,7 @@ class SingleDimRef(Expression):
 
     def __post_init__(self):
         if not isinstance(self.dim, CONSTANT) or not isinstance(self.dim.value, numbers.Integral):
-            msg = f"Expected integer constant, received {self.dim} of type {type(self.dim)}."
+            msg = f'Expected integer constant, received {self.dim} of type {type(self.dim)}.'
             raise TypeError(msg)
 
     @property
@@ -301,15 +301,14 @@ class Subscript(Expression):
     index: ValueRef
 
     def __post_init__(self):
-        # Subscripting things like tuples isn't supported here
         if not isinstance(self.value, NameRef):
             if isinstance(self.value, Subscript):
                 msg = f"Nested subscripts are not currently supported"
                 raise TypeError(msg)
-            msg = f"Expected name, got {self.value}, type: {type(self.value)}."
+            msg = f'Expected name, got {self.value}, type: {type(self.value)}.'
             raise TypeError(msg)
         elif not isinstance(self.index, ValueRef):
-            msg = f"Expected ValueRef, got {self.index}, type: {type(self.index)}."
+            msg = f'Expected ValueRef, got {self.index}, type: {type(self.index)}.'
             raise TypeError(msg)
 
     @property
@@ -343,7 +342,7 @@ class MinReduction(Expression):
     def __init__(self, *values):
         assert len(values) > 0
         assert all(isinstance(v, ValueRef) for v in values)
-        object.__setattr__(self, "values", frozenset(values))
+        object.__setattr__(self, 'values', frozenset(values))
 
     @property
     def subexprs(self):
@@ -366,7 +365,7 @@ class MaxReduction(Expression):
     values: typing.FrozenSet[ValueRef, ...]
 
     def __init__(self, *values):
-        object.__setattr__(self, "values", frozenset(values))
+        object.__setattr__(self, 'values', frozenset(values))
         assert len(self.values) > 0
 
     @property
@@ -429,14 +428,14 @@ class TUPLE(Expression):
     def __init__(self, *elements):
         for e in elements:
             if not isinstance(e, ValueRef):
-                msg = f"ir tuple has non-IR element: {e}."
+                msg = f'ir tuple has non-IR element: "{e}".'
                 raise TypeError(msg)
         object.__setattr__(self, 'elements', tuple(elements))
 
     def __post_init__(self):
         for e in self.elements:
             if not isinstance(e, ValueRef):
-                msg = f"Expected value refs, received {e}."
+                msg = f'Expected value refs, received "{e}".'
                 raise TypeError(msg)
 
     @property
@@ -600,15 +599,15 @@ class TRUEDIV(BinOp):
         # Catch these early, where it's simplest
         if isinstance(self.right, CONSTANT):
             if self.right == Zero:
-                msg = f"Invalid constant operand in true division expression {self.right}."
+                msg = f'Invalid constant operand in true division expression "{self.right}".'
                 raise CompilerError(msg)
             elif self.right.is_bool:
-                msg = f"Boolean value {self.right} is unsupported for " \
-                      f"true division expression {self.left} // {self.right}."
+                msg = f'Boolean value {self.right} is unsupported for ' \
+                      f'true division expression "{self.left} // {self.right}".'
                 raise CompilerError(msg)
             elif self.right.is_nan:
-                msg = f"Nan value {self.right} is unsupported for true division " \
-                      f"expression {self.left} // {self.right}."
+                msg = f'Nan value {self.right} is unsupported for true division ' \
+                      f'expression "{self.left} // {self.right}".'
                 raise CompilerError(msg)
 
 
@@ -621,15 +620,15 @@ class FLOORDIV(BinOp):
         # Catch these early, where it's simplest
         if isinstance(self.right, CONSTANT):
             if self.right == Zero:
-                msg = f"Invalid constant operand in floordiv expression {self.right}."
+                msg = f'Invalid constant operand in floordiv expression "{self.right}".'
                 raise CompilerError(msg)
             elif self.right.is_bool:
-                msg = f"Boolean value {self.right} is unsupported for " \
-                      f"floor division expression {self.left} // {self.right}."
+                msg = f'Boolean value "{self.right}" is unsupported for ' \
+                      f'floor division expression "{self.left} // {self.right}".'
                 raise CompilerError(msg)
             elif self.right.is_nan:
-                msg = f"Nan value {self.right} is unsupported for floor division " \
-                      f"expression {self.left} // {self.right}."
+                msg = f'Nan value "{self.right}" is unsupported for floor division ' \
+                      f'expression "{self.left} // {self.right}".'
                 raise CompilerError(msg)
 
 
@@ -642,13 +641,13 @@ class MOD(BinOp):
         # Catch these early, where it's simplest
         if isinstance(self.right, CONSTANT):
             if self.right == Zero:
-                msg = f"Invalid constant operand in modulo expression {self.right}."
+                msg = f'Invalid constant operand in modulo expression "{self.right}".'
                 raise CompilerError(msg)
             elif self.right.is_bool:
-                msg = f"Modulo boolean value {self.right} is unsupported."
+                msg = f'Modulo boolean value "{self.right}" is unsupported.'
                 raise CompilerError(msg)
             elif self.right.is_nan:
-                msg = f"Modulo nan value {self.right} is unsupported."
+                msg = f'Modulo nan value "{self.right}" is unsupported.'
                 raise CompilerError(msg)
 
 
@@ -667,17 +666,17 @@ class LSHIFT(BinOp):
         if isinstance(self.left, CONSTANT):
             if not self.left.is_integer:
                 if self.left.is_bool:
-                    msg = f"Coercing bool to integer is not supported in expression {self.left} << {self.right}."
+                    msg = f'Coercing bool to integer is not supported in expression "{self.left} << {self.right}".'
                 else:
-                    msg = f"Expression {self.left} << {self.right} is invalid for non-integer operand {self.left}."
+                    msg = f'Expression "{self.left} << {self.right}" is invalid for non-integer operand "{self.left}".'
                 raise CompilerError(msg)
 
         if isinstance(self.right, CONSTANT):
             if not self.right.is_integer:
                 if self.right.is_bool:
-                    msg = f"Coercing bool to integer is not supported in expression {self.left} << {self.right}."
+                    msg = f'Coercing bool to integer is not supported in expression "{self.left} << {self.right}".'
                 else:
-                    msg = f"Expression {self.left} << {self.right} is invalid for non-integer operand {self.right}."
+                    msg = f'Expression "{self.left} << {self.right}" is invalid for non-integer operand {self.right}.'
                 raise CompilerError(msg)
 
 
@@ -690,17 +689,17 @@ class RSHIFT(BinOp):
         if isinstance(self.left, CONSTANT):
             if not self.left.is_integer:
                 if self.left.is_bool:
-                    msg = f"Coercing bool to integer is not supported in expression {self.left} >> {self.right}."
+                    msg = f'Coercing bool to integer is not supported in expression "{self.left} >> {self.right}".'
                 else:
-                    msg = f"Expression {self.left} << {self.right} is invalid for non-integer operand {self.left}."
+                    msg = f'Expression "{self.left} << {self.right}" is invalid for non-integer operand "{self.left}".'
                 raise CompilerError(msg)
 
         if isinstance(self.right, CONSTANT):
             if not self.right.is_integer:
                 if self.right.is_bool:
-                    msg = f"Coercing bool to integer is not supported in expression {self.left} >> {self.right}."
+                    msg = f'Coercing bool to integer is not supported in expression "{self.left} >> {self.right}".'
                 else:
-                    msg = f"Expression {self.left} >> {self.right} is invalid for non-integer operand {self.right}."
+                    msg = f'Expression "{self.left} >> {self.right}" is invalid for non-integer operand "{self.right}".'
                 raise CompilerError(msg)
 
 
@@ -718,7 +717,7 @@ class BITOR(BinOp):
     def __post_init__(self):
         for term in (self.left, self.right):
             if isinstance(term, CONSTANT) and not term.is_integer:
-                msg = f"Unsupported term {term} in bitwise expression."
+                msg = f'Unsupported term "{term}" in bitwise expression.'
                 raise CompilerError(msg)
 
 
@@ -729,14 +728,14 @@ class BITXOR(BinOp):
 
     def __init__(self, *values):
         # These are sorted so that
-        left, right = sorted(values, key=lambda k: str(k))
+        left, right = sorted(values, key=lambda k: str(k), reverse=True)
         object.__setattr__(self, 'left', left)
         object.__setattr__(self, 'right', right)
 
     def __post_init__(self):
         for term in (self.left, self.right):
             if isinstance(term, CONSTANT) and not term.is_integer:
-                msg = f"Unsupported term {term} in bitwise expression."
+                msg = f'Unsupported term "{term}" in bitwise expression.'
                 raise CompilerError(msg)
 
 
@@ -747,14 +746,14 @@ class BITAND(BinOp):
 
     def __init__(self, *values):
         # These are sorted so that
-        left, right = sorted(values, key=lambda k: str(k))
+        left, right = sorted(values, key=lambda k: str(k), reverse=True)
         object.__setattr__(self, 'left', left)
         object.__setattr__(self, 'right', right)
 
     def __post_init__(self):
         for term in (self.left, self.right):
             if isinstance(term, CONSTANT) and not term.is_integer:
-                msg = f"Unsupported term {term} in bitwise expression."
+                msg = f'Unsupported term "{term}" in bitwise expression.'
                 raise CompilerError(msg)
 
 
@@ -794,7 +793,7 @@ class EQ(CompareOp):
     right: ValueRef
 
     def __init__(self, *values):
-        left, right = sorted(values, key=lambda k: str(k))
+        left, right = sorted(values, key=lambda k: str(k), reverse=True)
         object.__setattr__(self, 'left', left)
         object.__setattr__(self, 'right', right)
 
@@ -805,7 +804,7 @@ class NE(CompareOp):
     right: ValueRef
 
     def __init__(self, *values):
-        left, right = sorted(values, key=lambda k: str(k))
+        left, right = sorted(values, key=lambda k: str(k), reverse=True)
         object.__setattr__(self, 'left', left)
         object.__setattr__(self, 'right', right)
 
@@ -976,9 +975,12 @@ class Call(Expression):
 
     def __init__(self, *args):
         func = args[0]
+        if not isinstance(func, NameRef):
+            msg = f"Non-name callables are not supported."
+            raise TypeError(msg)
         args_ = tuple(args[1:])
-        object.__setattr__(self, "func", func)
-        object.__setattr__(self, "args", args_)
+        object.__setattr__(self, 'func', func)
+        object.__setattr__(self, 'args', args_)
 
     func: NameRef
     # no support for keyword arguments, as these complicate transforms
@@ -1007,13 +1009,13 @@ class AffineSeq(Expression):
 
     def __post_init__(self):
         if not isinstance(self.start, ValueRef):
-            msg = f"Start param of affine sequence must be a value reference. Received: {self.start}."
+            msg = f'Start param of affine sequence must be a value reference. Received: "{self.start}".'
             raise ValueError(msg)
         if self.stop is not None and not isinstance(self.stop, ValueRef):
-            msg = f"Stop param of affine sequence must be a value reference. Received: {self.stop}."
+            msg = f'Stop param of affine sequence must be a value reference. Received: "{self.stop}".'
             raise ValueError(msg)
         if not isinstance(self.step, ValueRef):
-            msg = f"Step param of affine sequence must be a value reference. Received: {self.step}."
+            msg = f'Step param of affine sequence must be a value reference. Received: "{self.step}".'
             raise ValueError(msg)
 
     @property
@@ -1032,6 +1034,12 @@ class AffineSeq(Expression):
 class SELECT(Expression):
     """
     A Python if-expression.
+
+    This is also being reused for the array and vector cases, since a scalar predicate can just return one
+    of 2 vectors.
+
+    This is somewhat awkward coming from the Python side, where we can't assign a truth value to a non-empty array.
+    From the IR side, the predicate type can determine how these are blended (scalar, array, or short vector).
 
     """
 
@@ -1086,7 +1094,7 @@ class Enumerate(Expression):
             iterable, start = args
             pass
         else:
-            raise CompilerError(f"Enumerate takes 1 or 2 arguments, {nargs} given.")
+            raise CompilerError(f'Enumerate takes 1 or 2 arguments, "{nargs}" given.')
         object.__setattr__(self, 'iterable', iterable)
         object.__setattr__(self, 'start', start)
 
@@ -1138,10 +1146,11 @@ class Assign(StmtBase):
     pos: Position
 
     def __post_init__(self):
-        assert isinstance(self.target, ValueRef)
+        # no support for assigning to arbitary constructs
+        assert isinstance(self.target, (NameRef, Subscript))
         assert isinstance(self.value, ValueRef)
         if isinstance(self.value, Slice):
-            msg = f"Explicitly assigning slice expressions is unsupported: {self}."
+            msg = f'Explicitly assigning slice expressions is unsupported: "{self}".'
             raise CompilerError(msg)
 
 
@@ -1173,10 +1182,10 @@ class ForLoop(StmtBase):
 
     def __post_init__(self):
         if not isinstance(self.target, (NameRef, TUPLE)):
-            msg = f"Expected ValueRef, got {self.target}, type: {type(self.target)}."
+            msg = f'Expected ValueRef, got "{self.target}", type: "{type(self.target)}".'
             raise TypeError(msg)
         elif not isinstance(self.iterable, ValueRef):
-            msg = f"Expected ValueRef, got {self.iterable}, type: {type(self.iterable)}."
+            msg = f'Expected ValueRef, got "{self.iterable}", type: "{type(self.iterable)}".'
             raise TypeError(msg)
 
 

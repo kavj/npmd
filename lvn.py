@@ -144,9 +144,22 @@ def update_liveness(stmt: ir.StmtBase,
                     queued.append(deps)
 
 
+def find_augment_before_clobber(block: List[ir.StmtBase]):
+    live_stmts = set()
+    clobbered = set()
+    for stmt in block:
+        if isinstance(stmt, (ir.Assign, ir.InPlaceOp)):
+            augmented = get_augmented_name(stmt)
+            if augmented is None:
+                clobbered.add(stmt.target)
+            elif augmented not in clobbered:
+                live_stmts.add(stmt)
+    return live_stmts
+
+
 def dead_code_elim(block: List[ir.StmtBase], ephemeral_refs: Set[ir.NameRef]):
     depends_on, name_to_latest, linked_stmts = make_use_def_map(block)
-    live_stmts = set()
+    live_stmts = find_augment_before_clobber(block)
     for stmt in reversed(block):
         if stmt in live_stmts:
             continue  # already handled by something that declared it a dependency
@@ -311,7 +324,6 @@ def get_single_block_rename_targets(block: Iterable[ir.StmtBase], ephemeral_refs
 
 
 def optimize_block(block: List[ir.StmtBase], symbols: SymbolTable, ephemeral_refs: Set[ir.NameRef]):
-    block = list(block)
     block = dead_code_elim(block, ephemeral_refs)
     should_rename = get_single_block_rename_targets(block, ephemeral_refs)
     block = LVNRewriter.rewrite_block(block, should_rename, symbols)

@@ -37,9 +37,7 @@ def remove_trailing_continues(node: List[ir.StmtBase]) -> List[ir.StmtBase]:
 
 class NormalizePaths(StmtTransformer):
     """
-    This is the tree version of control flow optimization.
-    It removes any statements blocked by break, return, or continue
-    and inlines paths as an alternative to explicit continue statements.
+    This pass tries to isolate divergent control flow and remove trivially unreachable statements.
 
     """
 

@@ -2,7 +2,7 @@ import operator
 
 from contextlib import contextmanager
 from functools import singledispatchmethod
-from typing import Generator, List, Optional, Set, Tuple
+from typing import Generator, Iterable, List, Optional, Set, Tuple
 
 import ir
 
@@ -333,4 +333,5 @@ def find_ephemeral_references(node: ir.Function) -> Set[ir.NameRef]:
     # is read first in any block.
     bound = find_bound(node)
     bound.difference_update(uevs)
+    bound.difference_update(node.args)
     return bound
