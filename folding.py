@@ -2,8 +2,8 @@ import itertools
 import math
 import operator
 
-from functools import singledispatch
-from typing import Iterable, Iterator, Union
+from functools import singledispatch, singledispatchmethod
+from typing import Callable, Iterable, Iterator, Union
 
 import numpy as np
 
@@ -86,40 +86,319 @@ def simplify_pow(node: ir.POW):
 
 
 @singledispatch
-def fold_identity(node):
+def fold_constants(node):
     return node
 
 
-@fold_identity.register
-def _(node: ir.ADD):
-    return node.left if node.right == ir.Zero else node.right if node.left == ir.Zero else node
-
-
-@fold_identity.register
-def _(node: ir.FLOORDIV):
-    if node.right == ir.One:
-        return node.left
+@fold_constants.register
+def _(node: ir.BinOp):
+    if isinstance(node.left, ir.CONSTANT) and isinstance(node.right, ir.CONSTANT):
+        op = const_ops[type(node)]
+        return ir.wrap_constant(op(node.left.value, node.right.value))
     return node
 
 
-@fold_identity.register
-def _(node: ir.MULT):
-    return node.left if (node.right == ir.One) else node.right if (node.left == ir.One) else node
+@fold_constants.register
+def _(node: ir.MAX):
+    left = node.left
+    right = node.right
+    if isinstance(left, ir.CONSTANT) and isinstance(right, ir.CONSTANT):
+        if left.is_bool or right.is_bool:
+            # bad idea to mess with this
+            return node
+        elif left.is_nan:
+            return right
+        elif right.is_nan:
+            return left
+        else:
+            dtype = np.promote_types(left.dtype, right.dtype)
+            # cast nodes
+            left = dtype.type(left.value)
+            right = dtype.type(right.value)
+            result = np.max((left, right))
+            return ir.wrap_constant(result)
+    return node
 
 
-@fold_identity.register
-def _(node: ir.POW):
-    return node.left if node.right == ir.One else node
+@fold_constants.register
+def _(node: ir.MIN):
+    left = node.left
+    right = node.right
+    if isinstance(left, ir.CONSTANT) and isinstance(right, ir.CONSTANT):
+        if left.is_bool or right.is_bool:
+            # bad idea to mess with this
+            return node
+        elif left.is_nan:
+            return right
+        elif right.is_nan:
+            return left
+        else:
+            dtype = np.promote_types(left.dtype, right.dtype)
+            # cast nodes
+            left = dtype.type(left.value)
+            right = dtype.type(right.value)
+            result = np.min((left, right))
+            return ir.wrap_constant(result)
+    return node
 
 
-@fold_identity.register
-def _(node: ir.SUB):
-    return node.left if node.right == ir.Zero else node
+@fold_constants.register
+def _(node: ir.CompareOp):
+    if isinstance(node.left, ir.CONSTANT) and isinstance(node.right, ir.CONSTANT):
+        op = const_ops[type(node)]
+        return ir.wrap_constant(op(node.left.value, node.right.value))
+    return node
 
 
-@fold_identity.register
-def _(node: ir.TRUEDIV):
-    return node.left if node.right == ir.One else node
+@fold_constants.register
+def _(node: ir.IN):
+    return node
+
+
+@fold_constants.register
+def _(node: ir.NOTIN):
+    return node
+
+
+class OpFold:
+
+    int_dtypes = (ir.float32, ir.float64)
+
+    def check_type(self, expr: ir.ValueRef):
+        return self.typer.check_type(expr)
+
+    def check_dtype(self, expr: ir.ValueRef):
+        return self.typer.check_dtype(expr)
+
+    def prepare_replacement(self, expr: ir.ValueRef, base: ir.ValueRef):
+        if expr == base:
+            return base
+        base_type = self.typer.check_type(base)
+        expr_type = self.typer.check_type(expr)
+        if base_type != expr_type:
+            expr = ir.CAST(expr, base_type)
+        return expr
+
+    def is_constant(self, node):
+        if isinstance(node, ir.CONSTANT):
+            return True
+        elif isinstance(node, ir.Expression):
+            return all(isinstance(subexpr, ir.Expression) for subexpr in node.subexprs)
+        return False
+
+    def __init__(self, typer: TypeHelper):
+        self.typer = typer
+
+    def __call__(self, node):
+        return self.visit(node)
+
+    @singledispatchmethod
+    def visit(self, node):
+        msg = f'No method to fold identity for "{node}".'
+        raise TypeError(msg)
+
+    @visit.register
+    def _(self, node: ir.ValueRef):
+        return node
+
+    @visit.register
+    def _(self, node: ir.ADD):
+        left = self.visit(node.left)
+        right = self.visit(node.right)
+        if right == ir.Zero:
+            repl = left
+        else:
+            repl = fold_constants(node.reconstruct(left, right))
+        if isinstance(repl, ir.ADD):
+            left = repl.left
+            right = repl.right
+            if isinstance(right, ir.USUB):
+                repl = ir.SUB(left, right.operand)
+            elif isinstance(left, ir.USUB):
+                repl = ir.SUB(right, left.operand)
+        return self.prepare_replacement(repl, node)
+
+    @visit.register
+    def _(self, node: ir.MULT):
+        left = self.visit(node.left)
+        right = self.visit(node.right)
+        for term in (left, right):
+            if ir.is_nan(term):
+                return term
+        if right == ir.Zero:
+            repl = ir.Zero
+        elif right == ir.One:
+            repl = left
+        else:
+            repl = node.reconstruct(left, right)
+        return self.prepare_replacement(repl, node)
+
+    @visit.register
+    def _(self, node: ir.SUB):
+        left = self.visit(node.left)
+        right = self.visit(node.right)
+        if right == ir.Zero:
+            repl = left
+        elif left == ir.Zero:
+            if isinstance(right, ir.USUB):
+                # avoid double unary negative
+                repl = right.operand
+            else:
+                if isinstance(right, ir.USUB):
+                    repl = right
+                else:
+                    repl = ir.USUB(right)
+        else:
+            repl = fold_constants(node.reconstruct(left, right))
+        if isinstance(repl, ir.SUB):
+            if isinstance(repl.right, ir.USUB):
+                repl = ir.ADD(repl.left, repl.right.operand)
+        return self.prepare_replacement(repl, node)
+
+    @visit.register
+    def _(self, node: ir.CAST):
+        # find redundant ones
+        unwrapped = node
+        while isinstance(unwrapped, ir.CONSTANT):
+            unwrapped = unwrapped.value
+        if unwrapped != node.value:
+            return node.reconstruct(unwrapped)
+        return node
+
+    @visit.register
+    def _(self, node: ir.FLOORDIV):
+        left = self.visit(node.left)
+        right = self.visit(node.right)
+        if right == ir.One:
+            repl = left
+        else:
+            repl = fold_constants(node.reconstruct(left, right))
+        base_dtype = self.check_dtype(node)
+        if base_dtype not in self.int_dtypes:
+            # Todo: need floor for this
+            return node
+        return self.prepare_replacement(repl, node)
+
+    @visit.register
+    def _(self, node: ir.AND):
+        operands = []
+        for subexpr in node.subexprs:
+            subexpr = self.visit(subexpr)
+            if isinstance(subexpr, ir.CONSTANT):
+                # return False or ignore
+                if not operator.truth(subexpr):
+                    return ir.FALSE
+            else:
+                operands.append(subexpr)
+        if len(operands) == 0:
+            return ir.TRUE
+        elif len(operands) == 1:
+            operand = operands.pop()
+            if not isinstance(operand, ir.TRUTH):
+                operand = ir.TRUTH(operand)
+            return operand
+        else:
+            return node.reconstruct(*operands)
+
+    @visit.register
+    def _(self, node: ir.OR):
+        operands = []
+        for subexpr in node.subexprs:
+            subexpr = self.visit(subexpr)
+            if isinstance(subexpr, ir.CONSTANT):
+                if operator.truth(subexpr):
+                    return ir.TRUE
+            else:
+                operands.append(subexpr)
+        if len(operands) == 0:
+            return ir.FALSE
+        elif len(operands) == 1:
+            operand = operands.pop()
+            if not isinstance(operand, ir.TRUTH):
+                operand = ir.TRUTH(operand)
+            return operand
+        else:
+            return node.reconstruct(*operands)
+
+    @visit.register
+    def _(self, node: ir.UINVERT):
+        pass
+
+    @visit.register
+    def _(self, node: ir.USUB):
+        """
+        Sanitize a couple cases of unary logic.
+        :param node:
+        :return:
+        """
+        if isinstance(node, ir.Expression):
+            if isinstance(node, ir.ADD):
+                for left, right in itertools.permutations(node.subexprs):
+                    # too ambiguous if both are unary
+                    if isinstance(right, ir.USUB):
+                        return ir.SUB(left, right.operand)
+            elif isinstance(node, ir.SUB) and isinstance(node.right, ir.USUB):
+                return ir.ADD(node.left, node.right)
+            elif isinstance(node, ir.USUB) and isinstance(node.operand, ir.USUB):
+                return node.operand.operand
+            elif isinstance(node, ir.UINVERT) and isinstance(node.operand, ir.UINVERT):
+                return node.operand.operand
+        return node
+
+    @visit.register
+    def _(self, node: ir.MOD):
+        left = self.visit(node.left)
+        right = self.visit(node.right)
+        repl = fold_constants(node.reconstruct(left, right))
+        return self.prepare_replacement(repl, node)
+
+    @visit.register
+    def _(self, node: ir.TRUEDIV):
+        left = self.visit(node.left)
+        right = self.visit(node.right)
+        if node.right == ir.One:
+            repl = left
+        else:
+            repl = node.reconstruct(left, right)
+        return self.prepare_replacement(repl, node)
+
+    @visit.register
+    def _(self, node: ir.POW):
+        # have to handle casts for cases like some_int ** 1.0
+        repl = simplify_pow(node)
+        return self.prepare_replacement(repl, node)
+
+    @visit.register
+    def _(self, node: ir.SELECT):
+        on_true = self.visit(node.on_true)
+        on_false = self.visit(node.on_false)
+        predicate = self.visit(node.predicate)
+        if isinstance(predicate, ir.CONSTANT):
+            repl = on_true if operator.truth(predicate) else on_false
+        else:
+            repl = node
+            if isinstance(predicate, (ir.LT, ir.LE)):
+                left = predicate.left
+                right = predicate.right
+                if on_true == left and on_false == right:
+                    repl = ir.MIN(on_true, on_false)
+                elif on_false == right and on_true == left:
+                    repl = ir.MAX(on_false, on_true)
+            elif isinstance(predicate, (ir.GT, ir.GE)):
+                left = predicate.left
+                right = predicate.right
+                if on_true == left and on_false == right:
+                    repl = ir.MAX(on_true, on_false)
+                elif on_true == right and on_false == left:
+                    repl = ir.MIN(on_false, on_true)
+        return self.prepare_replacement(repl, node)
+
+    @visit.register
+    def _(self, node: ir.CompareOp):
+        left = self.visit(node.left)
+        right = self.visit(node.right)
+        repl = node.reconstruct(left, right)
+        return self.prepare_replacement(repl, node)
 
 
 class ExprContract:
@@ -197,81 +476,6 @@ const_ops = {
     ir.USUB: operator.neg,
     ir.SQRT: math.sqrt
 }
-
-
-@singledispatch
-def fold_constants(node):
-    return node
-
-
-@fold_constants.register
-def _(node: ir.BinOp):
-    if isinstance(node.left, ir.CONSTANT) and isinstance(node.right, ir.CONSTANT):
-        op = const_ops[type(node)]
-        return ir.wrap_constant(op(node.left.value, node.right.value))
-    return node
-
-
-@fold_constants.register
-def _(node: ir.MAX):
-    left = node.left
-    right = node.right
-    if isinstance(left, ir.CONSTANT) and isinstance(right, ir.CONSTANT):
-        if left.is_bool or right.is_bool:
-            # bad idea to mess with this
-            return node
-        elif left.is_nan:
-            return right
-        elif right.is_nan:
-            return left
-        else:
-            dtype = np.promote_types(left.dtype, right.dtype)
-            # cast nodes
-            left = dtype.type(left.value)
-            right = dtype.type(right.value)
-            result = np.max((left, right))
-            return ir.wrap_constant(result)
-    return node
-
-
-@fold_constants.register
-def _(node: ir.MIN):
-    left = node.left
-    right = node.right
-    if isinstance(left, ir.CONSTANT) and isinstance(right, ir.CONSTANT):
-        if left.is_bool or right.is_bool:
-            # bad idea to mess with this
-            return node
-        elif left.is_nan:
-            return right
-        elif right.is_nan:
-            return left
-        else:
-            dtype = np.promote_types(left.dtype, right.dtype)
-            # cast nodes
-            left = dtype.type(left.value)
-            right = dtype.type(right.value)
-            result = np.min((left, right))
-            return ir.wrap_constant(result)
-    return node
-
-
-@fold_constants.register
-def _(node: ir.CompareOp):
-    if isinstance(node.left, ir.CONSTANT) and isinstance(node.right, ir.CONSTANT):
-        op = const_ops[type(node)]
-        return ir.wrap_constant(op(node.left.value, node.right.value))
-    return node
-
-
-@fold_constants.register
-def _(node: ir.IN):
-    return node
-
-
-@fold_constants.register
-def _(node: ir.NOTIN):
-    return node
 
 
 def fold_unary_logic(node: ir.ValueRef):
@@ -352,146 +556,3 @@ def _(node: ir.MaxReduction, typer: TypeHelper):
     if len(constants) > 0:
         varying.append(ir.wrap_constant(np.max(varying)))
     return node.reconstruct(*varying)
-
-
-@singledispatch
-def fold_op(node):
-    return node
-
-
-@fold_op.register
-def _(node: ir.MIN):
-    for term in node.subexprs:
-        if isinstance(term, ir.CONSTANT) and term.is_nan:
-            return node.right
-    if isinstance(node.left, ir.CONSTANT) and isinstance(node.right, ir.CONSTANT):
-        if node.left.is_bool != node.right.is_bool:
-            msg = f"Taking min of boolean and non boolean is unsupported for {node.left} and {node.right}."
-            raise CompilerError(msg)
-        return ir.wrap_constant(min(node.left.value, node.right.value))
-    elif node.left == node.right:
-        return node.left
-
-
-@fold_op.register
-def _(node: ir.MAX):
-    for term in node.subexprs:
-        if isinstance(term, ir.CONSTANT) and term.is_nan:
-            return node.right
-    if isinstance(node.left, ir.CONSTANT) and isinstance(node.right, ir.CONSTANT):
-        if node.left.is_bool != node.right.is_bool:
-            msg = f"Taking min of boolean and non boolean is unsupported for {node.left} and {node.right}."
-            raise CompilerError(msg)
-        return ir.wrap_constant(max(node.left.value, node.right.value))
-    elif node.left == node.right:
-        return node.left
-
-
-@fold_op.register
-def _(node: ir.ADD):
-    const_folded = fold_constants(node)
-    identity_folded = fold_identity(const_folded)
-    return identity_folded
-
-
-@fold_op.register
-def _(node: ir.SUB):
-    const_folded = fold_constants(node)
-    identity_folded = fold_identity(const_folded)
-    return identity_folded
-
-
-@fold_op.register
-def _(node: ir.MULT):
-    const_folded = fold_constants(node)
-    identity_folded = fold_identity(const_folded)
-    return identity_folded
-
-
-@fold_op.register
-def _(node: ir.FLOORDIV):
-    if node.right == ir.One:
-        return node.left
-    return fold_constants(node)
-
-
-@fold_op.register
-def _(node: ir.MOD):
-    # safe and common case
-    if node.right == ir.One:
-        return ir.Zero
-    return fold_constants(node)
-
-
-@fold_op.register
-def _(node: ir.TRUTH):
-    operand = node.operand
-    if isinstance(operand, ir.CONSTANT):
-        if operand.is_bool:
-            return operand
-        else:
-            value = np.bool_(operand.value)
-            return ir.wrap_constant(value)
-    elif isinstance(operand, ir.BoolOp):
-        return operand
-    return node
-
-
-@fold_op.register
-def _(node: ir.SELECT):
-    if isinstance(node.predicate, ir.CONSTANT):
-        return node.on_true if node.predicate else node.on_false
-    elif isinstance(node.on_true, ir.CONSTANT) and isinstance(node.on_false, ir.CONSTANT):
-        if node.on_true == node.on_false or (node.on_true.is_nan and node.on_false.is_nan):
-            return node.on_true
-    return node
-
-
-def simplify_arithmetic(node: ir.ValueRef, typer: TypeHelper):
-    t = typer.check_type(node)
-    simplified = fold_op(node)
-    if simplified == node:
-        # avoid leaking copies if unchanged
-        return node
-    simplified_t = typer.check_type(simplified)
-    if simplified_t != t:
-        simplified = ir.CAST(simplified, t)
-    return simplified
-
-
-def simplify_select(node: ir.SELECT):
-    """
-    Todo: integrate with other simplifies so we can lose the _class mangling
-    :param node:
-    :return:
-    """
-    if isinstance(node.predicate, ir.CONSTANT):
-        if operator.truth(node.predicate):
-            return node.on_true
-        else:
-            return node.on_false
-    predicate = node.predicate
-    on_true = node.on_true
-    on_false = node.on_false
-    if isinstance(node.predicate, (ir.LT, ir.LE)):
-        left, right = node.predicate.subexprs
-        if on_true == left and on_false == right:
-            return ir.MIN(on_true, on_false)
-        elif on_false == right and on_true == left:
-            # This is almost negated. The issue is if in the destination assembly:
-            #
-            #     min(a,b) is implemented as a if a <= b else b
-            #     max(a,b) is implemented as a if a >= b else b
-            #
-            #  which is common, we reverse operand order to properly catch unordered cases
-            #  This does not follow Python's min/max conventions, which are too error prone.
-            #  Those can arbitrarily propagate or suppress nans as a side effect of
-            #  determining type from the leading operand.
-            return ir.MAX(on_false, on_true)
-    elif isinstance(predicate, (ir.GT, ir.GE)):
-        if on_true == predicate.left and on_false == predicate.right:
-            return ir.MAX(on_true, on_false)
-        elif on_true == predicate.right and on_false == predicate.left:
-            # right if left < right else left
-            return ir.MIN(on_false, on_true)
-    return node

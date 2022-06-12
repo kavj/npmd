@@ -1,21 +1,81 @@
 import operator
 
+import numpy as np
+
+from collections import defaultdict
 from contextlib import contextmanager
 from functools import singledispatchmethod
-from typing import Generator, Iterable, List, Optional, Set, Tuple
+from typing import Iterable, List, Optional, Set
 
 import ir
 
-from folding import fold_op
-from utils import is_entry_point, unpack_iterated
-from traversal import (depth_first_sequence_blocks, depth_first_sequence_statements,
-                       get_value_types, StmtVisitor, walk_parameters)
-
+from folding import OpFold
+from symbol_table import SymbolTable
 from type_checks import TypeHelper
+from utils import is_entry_point, unpack_iterated
+from traversal import depth_first_sequence_blocks, StmtVisitor, walk_parameters
 
 
 # Todo: stub
 specialized = {ir.NameRef("print")}
+
+
+def has_nan(node: ir.Expression):
+    for subexpr in node.subexprs:
+        if isinstance(subexpr, ir.CONSTANT):
+            if np.isnan(subexpr.value):
+                return True
+
+
+def is_compare(node):
+    """
+    This tests whether we have either a single compare or a chained comparison.
+    Chained comparisons are regarded as logical and nodes, where every operand
+    is a compare operation and for any consecutive comparisons, indexed by 'i' and 'i+1':
+        operands[i].right == operands[i+1].left
+
+    Note, this will ignore cases that are not laid out like:
+
+        (a cmp b) and (b cmp c) and (c cmp d)
+
+    but the internal passes attempt to factor everything this way.
+
+    """
+
+    if isinstance(node, ir.CompareOp):
+        return True
+
+    elif isinstance(node, ir.AND):
+        operand_iter = node.subexprs
+        first = next(operand_iter)
+        if not isinstance(first, ir.CompareOp):
+            return False
+        prev_rhs = first.right
+        for operand in operand_iter:
+            if not isinstance(operand, ir.CompareOp) or prev_rhs != operand.left:
+                return False
+
+    else:
+        return False
+
+    return True
+
+
+def get_possible_aliasing(stmts: Iterable[ir.StmtBase], symbols: SymbolTable):
+    """
+    Get sub-array references that may be linked to an array name
+    :param stmts:
+    :param symbols:
+    :return:
+    """
+    aliasing = defaultdict(set)
+    for stmt in stmts:
+        if isinstance(stmt, ir.Assign):
+            if isinstance(stmt.target, ir.NameRef) and isinstance(stmt.value, ir.Subscript):
+                if isinstance(symbols.check_type(stmt.target), ir.ArrayType):
+                    aliasing[stmt.target].add(stmt.value)
+                    aliasing[stmt.value].add(stmt.target)
+    return aliasing
 
 
 class ReachingCheck(StmtVisitor):
@@ -219,17 +279,7 @@ def find_unterminated_path(stmts: List[ir.StmtBase]) -> Optional[List[ir.StmtBas
     return stmts
 
 
-def find_array_ops(node: ir.Expression, typer: TypeHelper) -> Generator[Tuple[ir.ValueRef, ir.ValueRef], None, None]:
-    # Todo: remove hard coding in favor of getting array compatible operation types
-    for expr in get_value_types(node, (ir.BinOp, ir.CompareOp)):
-        left, right = expr.subexprs
-        left_type = typer.check_type(left)
-        right_type = typer.check_type(right)
-        if isinstance(left_type, ir.ArrayType) and isinstance(right_type, ir.ArrayType):
-            yield left, right
-
-
-def compute_element_count(start: ir.ValueRef, stop: ir.ValueRef, step: ir.ValueRef):
+def compute_element_count(start: ir.ValueRef, stop: ir.ValueRef, step: ir.ValueRef, typer: TypeHelper):
     """
     Single method to compute the number of elements for an iterable expression.
 
@@ -238,6 +288,7 @@ def compute_element_count(start: ir.ValueRef, stop: ir.ValueRef, step: ir.ValueR
     :param step:
     :return:
     """
+    fold_op = OpFold(typer)
 
     start = fold_op(start)
     stop = fold_op(stop)
@@ -250,7 +301,7 @@ def compute_element_count(start: ir.ValueRef, stop: ir.ValueRef, step: ir.ValueR
     return count
 
 
-def find_array_length_expression(node: ir.ValueRef) -> Optional[ir.ValueRef]:
+def find_array_length_expression(node: ir.ValueRef, typer: TypeHelper) -> Optional[ir.ValueRef]:
     """
       Find an expression for array length if countable. Otherwise returns None.
       For example:
@@ -262,7 +313,7 @@ def find_array_length_expression(node: ir.ValueRef) -> Optional[ir.ValueRef]:
 
       :return:
     """
-
+    fold_op = OpFold(typer)
     if isinstance(node, ir.Subscript):
         if isinstance(node.index, ir.Slice):
             index = node.index
@@ -272,7 +323,7 @@ def find_array_length_expression(node: ir.ValueRef) -> Optional[ir.ValueRef]:
             else:
                 stop = fold_op(ir.MIN(index.stop, ir.SingleDimRef(node.value, dim=ir.Zero)))
             step = index.step
-            return compute_element_count(start, stop, step)
+            return compute_element_count(start, stop, step, typer)
         else:
             # first dim removed
             return ir.SingleDimRef(node.value, dim=ir.One)
@@ -281,19 +332,34 @@ def find_array_length_expression(node: ir.ValueRef) -> Optional[ir.ValueRef]:
     # other cases handled by analyzing sub-expressions and broadcasting constraints
 
 
-def find_bound(node: ir.Function):
-    bound = {*node.args}
-    for stmt in depth_first_sequence_statements(node.body):
-        if isinstance(stmt, ir.Assign) and isinstance(stmt.target, ir.NameRef):
-            bound.add(stmt.target)
-        elif isinstance(stmt, ir.ForLoop):
-            for target, _ in unpack_iterated(stmt.target, stmt.iterable):
-                assert isinstance(target, ir.NameRef)
-                bound.add(target)
-    return bound
+def get_uevs(stmt: ir.StmtBase, clobbers: Set[ir.NameRef]):
+    if isinstance(stmt, (ir.Assign, ir.InPlaceOp)):
+        # Todo: need some other checks for unsupported tuple patterns
+        for name in walk_parameters(stmt.value):
+            if name not in clobbers:
+                yield name
+        if isinstance(stmt, ir.Assign):
+            if isinstance(stmt.target, ir.NameRef):
+                clobbers.add(stmt.target)
+            else:
+                # ensure supported target
+                assert isinstance(stmt.target, ir.Subscript)
+                for name in walk_parameters(stmt.target):
+                    if name not in clobbers:
+                        yield name
+    elif is_entry_point(stmt):
+        # single statement blocks
+        if isinstance(stmt, (ir.IfElse, ir.WhileLoop)):
+            yield from walk_parameters(stmt.test)
+        else:
+            assert isinstance(stmt, ir.ForLoop)
+            yield from walk_parameters(stmt.iterable)
+    elif isinstance(stmt, (ir.SingleExpr, ir.Return)):
+        if stmt.value is not None:
+            yield from walk_parameters(stmt.value)
 
 
-def find_ephemeral_references(node: ir.Function) -> Set[ir.NameRef]:
+def find_ephemeral_references(node: Iterable[ir.StmtBase], symbols: SymbolTable) -> Set[ir.NameRef]:
     """
     Ephemeral targets are variables that whose assignments can all be localized. This is always decidable in cases
     where a variable is always always bound within a block prior to its first use.
@@ -304,34 +370,13 @@ def find_ephemeral_references(node: ir.Function) -> Set[ir.NameRef]:
     """
     uevs = set()
     clobbers = set()
-    for block in depth_first_sequence_blocks(node.body):
+    for block in depth_first_sequence_blocks(node):
         clobbers.clear()
         for stmt in block:
-            if isinstance(stmt, (ir.Assign, ir.InPlaceOp)):
-                # Todo: need some other checks for unsupported tuple patterns
-                uevs.update(name for name in walk_parameters(stmt.value) if name not in clobbers)
-                if isinstance(stmt, ir.Assign):
-                    if isinstance(stmt.target, ir.NameRef):
-                        clobbers.add(stmt.target)
-                    else:
-                        # ensure supported target
-                        assert isinstance(stmt.target, ir.Subscript)
-                        uevs.update(name for name in walk_parameters(stmt.target) if name not in clobbers)
-            elif is_entry_point(stmt):
-                # single statement blocks
-                if isinstance(stmt, ir.IfElse):
-                    uevs.update(walk_parameters(stmt.test))
-                elif isinstance(stmt, ir.ForLoop):
-                    uevs.update(walk_parameters(stmt.iterable))
-                else:
-                    assert isinstance(stmt, ir.WhileLoop)
-                    uevs.update(walk_parameters(stmt.test))
-            elif isinstance(stmt, (ir.SingleExpr, ir.Return)):
-                if stmt.value is not None:
-                    uevs.update(name for name in walk_parameters(stmt.value) if name not in clobbers)
+            uevs.update(get_uevs(stmt, clobbers))
     # remove anything is explictly bound and remove everything that
     # is read first in any block.
-    bound = find_bound(node)
+    bound = set(symbols.assigned_names)
     bound.difference_update(uevs)
-    bound.difference_update(node.args)
+    bound = {b for b in bound if not symbols.is_argument(b)}
     return bound

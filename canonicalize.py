@@ -44,7 +44,7 @@ def patch_return(node: ir.Function, symbols: SymbolTable):
     always_terminated = return_checker(node)
     if not always_terminated:
         return_type = check_return_type(node, symbols)
-        if return_type is None:
+        if isinstance(return_type, ir.NoneRef):
             if node.body:
                 last_pos = node.body[-1].pos
                 pos = ir.Position(last_pos.line_end + 1, last_pos.line_end + 2, col_begin=1, col_end=74)
@@ -52,7 +52,7 @@ def patch_return(node: ir.Function, symbols: SymbolTable):
                 # Todo: not quite right but will revisit
                 pos = ir.Position(1, 1, 1, 74)
             body = node.body.copy()
-            body.append(ir.Return(value=None, pos=pos))
+            body.append(ir.Return(value=ir.NoneRef(), pos=pos))
             repl = ir.Function(name=node.name, args=node.args, body=body)
             return repl
         else:

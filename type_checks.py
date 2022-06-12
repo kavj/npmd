@@ -1,14 +1,14 @@
 import numpy as np
 
 from functools import singledispatchmethod
-from typing import Optional
+from typing import Any, List, Optional, Tuple
 
 import ir
 
 from errors import CompilerError
 from symbol_table import SymbolTable
-from utils import extract_name, get_stmt_types
-
+from traversal import StmtVisitor, walk_parameters
+from utils import extract_name
 
 int_dtypes = {
     np.dtype('int8'),
@@ -21,23 +21,19 @@ int_dtypes = {
     np.dtype('uint64'),
 }
 
-
 real_float_dtypes = {
     np.dtype('float32'),
     np.dtype('float64'),
 }
-
 
 complex_dtypes = {
     np.dtype('complex64'),
     np.dtype('complex128')
 }
 
-
 float_dtypes = real_float_dtypes.union(complex_dtypes)
 
 real_dtypes = int_dtypes.union(real_float_dtypes)
-
 
 dtype_to_suffix = {np.dtype('int8'): 's8',
                    np.dtype('int16'): 's16',
@@ -65,24 +61,52 @@ def is_real(dtype: np.dtype):
     return dtype in real_dtypes
 
 
+def contains_stmt_types(stmts: List[ir.StmtBase], stmt_types: Tuple[Any, ...]):
+    for stmt in stmts:
+        if any(isinstance(stmt, stmt_type) for stmt_type in stmt_types):
+            return True
+        elif isinstance(stmt, (ir.ForLoop, ir.WhileLoop)):
+            if type(stmt) in stmt_types:
+                return True
+            elif contains_stmt_types(stmt.body, stmt_types):
+                return True
+        elif isinstance(stmt, ir.IfElse):
+            if ir.IfElse in stmt_types:
+                return True
+            elif contains_stmt_types(stmt.if_branch, stmt_types) or contains_stmt_types(stmt.else_branch, stmt_types):
+                return True
+    return False
+
+
+def get_stmt_types(stmts: List[ir.StmtBase], stmt_types: Tuple[Any, ...]):
+    retrievals = []
+    for stmt in stmts:
+        if any(isinstance(stmt, stmt_type) for stmt_type in stmt_types):
+            retrievals.append(stmt)
+        if isinstance(stmt, (ir.ForLoop, ir.WhileLoop)):
+            retrievals.extend(get_stmt_types(stmt.body, stmt_types))
+        elif isinstance(stmt, ir.IfElse):
+            retrievals.extend(get_stmt_types(stmt.if_branch, stmt_types))
+            retrievals.extend(get_stmt_types(stmt.else_branch, stmt_types))
+    return retrievals
+
+
 def check_return_type(node: ir.Function, symbols: SymbolTable):
     stmts = get_stmt_types(node.body, (ir.Return,))
     typer = TypeHelper(symbols)
     return_types = set()
     for stmt in stmts:
         if stmt.value is None:
-            return_types.add(None)
+            return_types.add(ir.NoneRef())
         else:
             return_types.add(typer.check_type(stmt.value))
-    # should check if all paths terminate..
-    # eg either ends in a return statement or every branch has a return statement
     if len(return_types) > 1:
         msg = f"Function {extract_name(node)} has more than one return type, received {return_types}."
         raise CompilerError(msg)
     elif len(return_types) == 1:
         return_type = return_types.pop()
     else:
-        return_type = None  # coerce to void at C level outside wrapper
+        return_type = ir.NoneRef()  # coerce to void at C level outside wrapper
     return return_type
 
 
@@ -111,6 +135,18 @@ class TypeHelper:
         msg = f"No method to check type for {expr}"
         raise NotImplementedError(msg)
 
+    def verify_no_nones(self, expr: ir.ValueRef):
+        for p in walk_parameters(expr):
+            if self.symbols.check_type(p) is None:
+                msg = f'Parameter "{p.name}" in expression "{expr}" has no declared type.'
+                raise CompilerError(msg)
+
+    @check_type.register
+    def _(self, expr: ir.ArrayInitializer):
+        ndims = len(expr.shape)
+        dtype = expr.dtype
+        return ir.ArrayType(ndims, dtype)
+
     @check_type.register
     def _(self, expr: ir.NameRef):
         if expr in self._cached:
@@ -128,23 +164,35 @@ class TypeHelper:
     @check_type.register
     def _(self, expr: ir.CompareOp):
         # should validate..
+        self.verify_no_nones(expr)
         return ir.bool_type
 
     @check_type.register
     def _(self, expr: ir.BoolOp):
+        self.verify_no_nones(expr)
         return ir.bool_type
 
     @check_type.register
     def _(self, expr: ir.CAST):
         # cast nodes should have a make cas with more checking
+        self.verify_no_nones(expr)
         return expr.target_type
+
+    @check_type.register
+    def _(self, expr: ir.StringConst):
+        return type(expr)
 
     @check_type.register
     def _(self, expr: ir.CONSTANT):
         return expr.dtype
 
     @check_type.register
+    def _(self, expr: ir.NoneRef):
+        return expr
+
+    @check_type.register
     def _(self, expr: ir.BinOp):
+        self.verify_no_nones(expr)
         if expr in self._cached:
             return self._cached[expr]
         left, right = expr.subexprs
@@ -170,6 +218,7 @@ class TypeHelper:
 
     @check_type.register
     def _(self, expr: ir.Subscript):
+        self.verify_no_nones(expr)
         if expr in self._cached:
             return self._cached[expr]
         value, index = expr.subexprs
@@ -204,6 +253,7 @@ class TypeHelper:
 
     @check_type.register
     def _(self, expr: ir.UnaryOp):
+        self.verify_no_nones(expr)
         if expr in self._cached:
             return self._cached[expr]
         t = self.check_type(expr.operand)
@@ -211,6 +261,7 @@ class TypeHelper:
         return t
 
     def check_dtype(self, expr: ir.ValueRef):
+        self.verify_no_nones(expr)
         t = self.check_type(expr)
         if isinstance(t, ir.ArrayType):
             t = t.dtype
@@ -261,3 +312,35 @@ class TypeHelper:
         t = self.check_type(like_expr)
         s = self.symbols.make_unique_name_like(prefix, t)
         return s
+
+
+class TypeInference(StmtVisitor):
+    """
+    This differs from type helper, in that it actively assigns a type. It does this by checking
+    inferred expression and trying to bind to that, then raising an error on conflict. Conflicts
+    do get resolved with casts if assigning to something with an unambiguous type.
+    """
+
+    def __init__(self, symbols: SymbolTable):
+        self.symbols = symbols
+        self.typer = TypeHelper(symbols)
+
+    @singledispatchmethod
+    def visit(self, node):
+        super().visit(node)
+
+    @visit.register
+    def _(self, node: ir.Assign):
+        if isinstance(node.target, ir.NameRef):
+            t = self.typer.check_type(node.value)
+            target_sym = self.symbols.lookup(node.target)
+            if target_sym.type_ is None or target_sym.type_is_inferred:
+                self.symbols.bind_type(node.target, t)
+
+    @visit.register
+    def _(self, node: ir.ForLoop):
+        assert isinstance(node.iterable, ir.AffineSeq)
+        assert isinstance(node.target, ir.NameRef)
+        t = self.typer.check_type(node.iterable)
+        self.symbols.bind_type(node.target, t)
+        self.visit(node.body)

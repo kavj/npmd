@@ -73,6 +73,10 @@ class PrettyFormatter:
         raise NotImplementedError(msg)
 
     @visit.register
+    def _(self, node: ir.NoneRef):
+        return 'None'
+
+    @visit.register
     def _(self, node: np.dtype):
         return str(node)
 
@@ -368,29 +372,8 @@ class PrettyPrinter:
         raise NotImplementedError(msg)
 
     @visit.register
-    def _(self, node: ir.ModImport):
-        module = self.format(node.module)
-        module_alias = self.format(node.as_name)
-        if module == module_alias:
-            as_str = f"import {module}"
-        else:
-            as_str = f"import {module} as {module_alias}"
-        self.print_line(as_str)
-
-    @visit.register
-    def _(self, node: ir.NameImport):
-        module = self.visit(node.module)
-        imported_name = self.visit(node.name)
-        import_alias = self.visit(node.as_name)
-        if imported_name == import_alias:
-            as_str = f"from {module} import {imported_name}"
-        else:
-            as_str = f"from {module} import {imported_name} as {import_alias}"
-        self.print_line(as_str)
-
-    @visit.register
     def _(self, node: ir.Return):
-        if node.value is None:
+        if isinstance(node.value, ir.NoneRef):
             self.print_line("return")
         else:
             expr = self.format(node.value)
@@ -477,9 +460,19 @@ class PrettyPrinter:
 
     @visit.register
     def _(self, node: ir.InPlaceOp):
-        expr = self.format(node.value)
+        left = node.target
+        right = None
+        for right in node.value.subexprs:
+            # if there's a distinct one, pick it
+            if right is not left:
+                break
+        assert right is not None
+        op = binop_ops[type(node.value)]
+        left = self.format(left)
+        right = self.format(right)
+        formatted = f'{left} {op}= {right};'
         # Todo: needs update
-        self.print_line(expr)
+        self.print_line(formatted)
 
     @visit.register
     def _(self, node: ir.Continue):

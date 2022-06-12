@@ -1,5 +1,3 @@
-# cython: control_flow.dot_output=blah.dot
-
 import numpy as np
 
 

@@ -5,7 +5,7 @@ import numpy as np
 
 from collections import defaultdict
 from contextlib import contextmanager
-from functools import singledispatch, singledispatchmethod
+from functools import singledispatchmethod
 from typing import Dict, List, Optional, Set
 
 import ir
@@ -15,7 +15,6 @@ from reductions import serialize_min_max
 from symbol_table import SymbolTable
 from type_checks import TypeHelper, check_return_type
 from utils import extract_name
-from traversal import walk
 
 npy_c_type_codes = {
     np.dtype("bool"): "NPY_BOOL",
@@ -190,7 +189,7 @@ def get_function_header(func: ir.Function, symbols: SymbolTable, mangled_name: O
         c_arg_str = f"{c_type} {arg_str}"
         args.append(c_arg_str)
     args_str = ", ".join(a for a in args)
-    if return_type is None:
+    if isinstance(return_type, ir.NoneRef):
         return_type = "py::object"
     else:
         return_type = npy_map[return_type]
@@ -206,8 +205,12 @@ class ExprFormatter:
     def render(self, node):
         # some compound stuff has to be broken up if we don't have a replacement
         # (possibly inlinable) sub-routine
-        msg = f"No method implemented to render type: {type(node)}."
+        msg = f'No method implemented to render type: {type(node)}.'
         raise NotImplementedError(msg)
+
+    @render.register
+    def _(self, node: ir.NoneRef):
+        return 'py::none()'
 
     @render.register
     def _(self, node: ir.CONSTANT):
@@ -215,23 +218,23 @@ class ExprFormatter:
 
     @render.register
     def _(self, node: ir.AND):
-        expr = " && ".join(self.render(subexpr) for subexpr in node.subexprs)
+        expr = ' && '.join(self.render(subexpr) for subexpr in node.subexprs)
         return expr
 
     @render.register
     def _(self, node: ir.OR):
-        expr = " || ".join(self.render(subexpr) for subexpr in node.subexprs)
+        expr = ' || '.join(self.render(subexpr) for subexpr in node.subexprs)
         return expr
 
     @render.register
     def _(self, node: ir.NOT):
         expr = self.render(node.operand)
-        return f"!{expr}"
+        return f'!{expr}'
 
     @render.register
     def _(self, node: ir.StringConst):
         # Todo: need to think about unicode cases
-        return f"std::string({node.value})"
+        return f'std::string({node.value})'
 
     @render.register
     def _(self, node: ir.MaxReduction):
@@ -251,7 +254,7 @@ class ExprFormatter:
         left = self.render(left)
         right = self.render(right)
         op = compare_ops[type(node)]
-        rendered = f"{left} {op} {right}"
+        rendered = f'{left} {op} {right}'
         return rendered
 
     @render.register
@@ -293,7 +296,7 @@ class ExprFormatter:
         left, right = node.subexprs
         left = self.render(left)
         right = self.render(right)
-        rendered = f"pow({left}, {right})"
+        rendered = f'pow({left}, {right})'
         return rendered
 
     @render.register
@@ -311,14 +314,14 @@ class ExprFormatter:
         left, right = node.subexprs
         left = self.render(left)
         right = self.render(right)
-        rendered = f"std::min({left}, {right})"
+        rendered = f'std::min({left}, {right})'
         return rendered
 
     @render.register
     def _(self, node: ir.SingleDimRef):
         dim = self.render(node.dim)
         base = self.render(node.base)
-        rendered = f"{base}.shape({dim})"
+        rendered = f'{base}.shape({dim})'
         return rendered
 
     @render.register
@@ -345,27 +348,27 @@ class ExprFormatter:
         if func_name == 'print':
             # quick temporary hack
             func_name = 'py::print'
-        args = ", ".join(self.render(arg) for arg in node.args)
+        args = '', ''.join(self.render(arg) for arg in node.args)
         rendered = f'{func_name}({args})'
         return rendered
 
     @render.register
     def _(self, node: ir.Slice):
-        params = ", ".join(self.render(subexpr) for subexpr in node.subexprs)
-        rendered = f"py::slice({params})"
+        params = '', ''.join(self.render(subexpr) for subexpr in node.subexprs)
+        rendered = f'py::slice({params})'
         return rendered
 
     @render.register
     def _(self, node: ir.TUPLE):
-        params = ", ".join(self.render(subexpr) for subexpr in node.subexprs)
-        rendered = f"py::make_tuple({params})"
+        params = ', '.join(self.render(subexpr) for subexpr in node.subexprs)
+        rendered = f'py::make_tuple({params})'
         return rendered
 
     @render.register
     def _(self, node: ir.Subscript):
         index = self.render(node.index)
         base = self.render(node.value)
-        rendered = f"{base}[{index}]"
+        rendered = f'{base}[{index}]'
         return rendered
 
 
@@ -393,7 +396,7 @@ class FuncWriter:
                 # added symbol, must declare in place
                 target_type = self.symbols.check_type(name_str)
                 c_target_type = get_c_type_name(target_type)
-                return f"{c_target_type} {name_str}"
+                return f'{c_target_type} {name_str}'
         else:
             return self.render(name)
 
@@ -402,12 +405,12 @@ class FuncWriter:
         # allow writing scalar to scalar reference arising from subscripting
         static_cast_allowed = not isinstance(target_type, ir.ArrayType)
         if cast_required and not static_cast_allowed:
-            msg = f"Casts from {target_type} to {src_type} are unsupported."
+            msg = f'Casts from {target_type} to {src_type} are unsupported.'
             raise CompilerError(msg)
         expr_str = self.render(expr)
         if cast_required:
             c_target_type = get_c_type_name(target_type)
-            expr_str = f"static_cast<{c_target_type}>({expr_str})"
+            expr_str = f'static_cast<{c_target_type}>({expr_str})'
         return expr_str
 
     def render(self, expr):
@@ -419,7 +422,7 @@ class FuncWriter:
 
     @singledispatchmethod
     def visit(self, node):
-        msg = f"No method to write node of type {type(node)}."
+        msg = f'No method to write node of type {type(node)}.'
         raise CompilerError(msg)
 
     @visit.register
@@ -439,8 +442,8 @@ class FuncWriter:
                 decls[target_type].append(sym.name)
             for target_type, names in decls.items():
                 c_target_type = get_c_type_name(target_type)
-                name_decls = ", ".join(names)
-                decl_str = f"{c_target_type} {name_decls};"
+                name_decls = '', ''.join(names)
+                decl_str = f'{c_target_type} {name_decls};'
                 self.emitter.print_line(decl_str)
             self.visit(node.body)
 
@@ -451,44 +454,44 @@ class FuncWriter:
         if isinstance(node.value, ir.POW):
             expr = self.render(node.value)
             target = self.render(node.target)
-            stmt = f"{target} = {expr};"
+            stmt = f'{target} = {expr};'
         else:
             op = arithmetic_ops[type(node.value)]
-            op = f"{op}="
+            op = f'{op}='
             target = self.render(node.target)
             value = self.render(node.value)
-            stmt = f"{target} {op} {value};"
+            stmt = f'{target} {op} {value};'
         self.emitter.print_line(stmt)
 
     @visit.register
     def _(self, node: ir.IfElse):
         # render test
         test_str = self.render(node.test)
-        header = f"if({test_str})"
+        header = f'if({test_str})'
         with self.emitter.curly_braces(line=header, semicolon=False):
             self.visit(node.if_branch)
         if node.else_branch:
-            with self.emitter.curly_braces(line="else", semicolon=False):
+            with self.emitter.curly_braces(line='else', semicolon=False):
                 self.visit(node.else_branch)
 
     @visit.register
     def _(self, node: ir.ForLoop):
         # this should be reduced to a simple range loop
         if not isinstance(node.iterable, ir.AffineSeq) or not isinstance(node.target, ir.NameRef):
-            msg = f"Unsupported for loop {node}"
+            msg = f'Unsupported for loop {node}'
             raise ValueError(msg)
         start, stop, step = node.iterable.subexprs
         start_value_str = self.render(start)
         target = self.format_target(node.target)
-        start_str = f"{target} = {start_value_str}"
+        start_str = f'{target} = {start_value_str}'
         stop_value_str = self.render(stop)
-        stop_str = f"{node.target.name} < {stop_value_str}"
+        stop_str = f'{node.target.name} < {stop_value_str}'
         step_value_str = self.render(step)
         if step == ir.One:
-            step_str = f"++{node.target.name}"
+            step_str = f'++{node.target.name}'
         else:
-            step_str = f"{node.target.name} += {step_value_str}"
-        header = f"for({start_str}; {stop_str}; {step_str})"
+            step_str = f'{node.target.name} += {step_value_str}'
+        header = f'for({start_str}; {stop_str}; {step_str})'
         with self.emitter.curly_braces(line=header, semicolon=False):
             self.visit(node.body)
 
@@ -500,7 +503,7 @@ class FuncWriter:
     @visit.register
     def _(self, node: ir.WhileLoop):
         test = self.render(node.test)
-        header = f"while({test})"
+        header = f'while({test})'
         with self.emitter.curly_braces(line=header, semicolon=False):
             self.visit(node.body)
 
@@ -513,26 +516,23 @@ class FuncWriter:
         target_type = self.type_helper.check_type(node.target)
         value_type = self.type_helper.check_type(node.value)
         value_str = self.format_cast(node.value, value_type, target_type)
-        stmt = f"{target_str} = {value_str};"
+        stmt = f'{target_str} = {value_str};'
         return stmt
 
     @visit.register
     def _(self, node: ir.Break):
-        self.emitter.print_line("break;")
+        self.emitter.print_line('break;')
 
     @visit.register
     def _(self, node: ir.Return):
-        if node.value is None:
-            self.emitter.print_line("return py::none();")
-        else:
-            self.emitter.print_line(f"return {self.render(node.value)};")
+        self.emitter.print_line(f'return {self.render(node.value)};')
 
 
 def gen_module_def(emitter: Emitter, module_name: str, func_names: Set[str], docs: Optional[str] = None):
     module_name_no_ext = pathlib.Path(module_name).stem
-    with emitter.curly_braces(line=f"PYBIND11_MODULE({module_name_no_ext}, m)"):
+    with emitter.curly_braces(line=f'PYBIND11_MODULE({module_name_no_ext}, m)'):
         if docs is not None:
-            emitter.print_line(line=f"m.doc() = {docs};")
+            emitter.print_line(line=f'm.doc() = {docs};')
         for func_name in func_names:
             emitter.print_line(f'm.def("{func_name}", &{func_name}, "");')
 
@@ -540,18 +540,18 @@ def gen_module_def(emitter: Emitter, module_name: str, func_names: Set[str], doc
 def gen_module(path: pathlib.Path, module_name: str, funcs: List[ir.Function], symbol_tables: Dict[str, SymbolTable],
                docs: Optional[str] = None):
     if not module_name.endswith(".cpp"):
-        module_name += ".cpp"
+        module_name += '.cpp'
     emitter = Emitter(path.joinpath(module_name))
     func_names = {func.name for func in funcs}
 
     # Todo: don't write if exception occurs
     with emitter.flush_on_exit():
         # boilerplate
-        emitter.print_line(line="#include <pybind11/pybind11.h>")
-        emitter.print_line(line="#include <pybind11/numpy.h>")
-        emitter.print_line(line="#include <algorithm>")
+        emitter.print_line(line='#include <pybind11/pybind11.h>')
+        emitter.print_line(line='#include <pybind11/numpy.h>')
+        emitter.print_line(line='#include <algorithm>')
         emitter.blank_lines(count=1)
-        emitter.print_line(line="namespace py = pybind11;")
+        emitter.print_line(line='namespace py = pybind11;')
         emitter.blank_lines(count=2)
 
         for func in funcs:

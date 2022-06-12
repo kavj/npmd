@@ -10,9 +10,10 @@ from ast_transform import build_module_ir_and_symbols
 from canonicalize import patch_return
 from errors import CompilerError
 from loop_simplify import LoopLowering, NormalizePaths
-from lvn import run_func_local_opts
+from lvn import optimize_statements, run_func_local_opts, strip_dead_symbols
 from pretty_printing import PrettyFormatter
 from pprint import pformat
+from type_checks import TypeInference
 
 
 version = sys.version_info
@@ -47,7 +48,7 @@ def name_and_source_from_path(file_path):
 
 # Todo: Add explicit entry points
 
-def compile_module(file_path, types,  out_dir, verbose=False, print_result=True, check_unbound=True):
+def compile_module(file_path, types,  out_dir, verbose=False, print_result=True, ignore_unbound=False, allow_inference=True):
     out_dir = Path(out_dir).absolute()
     if "." in str(out_dir):
         msg = f"Expected a directory path, received: {out_dir} ."
@@ -70,7 +71,7 @@ def compile_module(file_path, types,  out_dir, verbose=False, print_result=True,
         func_symbols = symbols.get(func.name)
         loop_lowering = LoopLowering(func_symbols)
         func = norm_paths(func)
-        if check_unbound:
+        if not ignore_unbound:
             maybe_unbound = rc(func)
             if maybe_unbound:
                 pf = PrettyFormatter()
@@ -80,7 +81,10 @@ def compile_module(file_path, types,  out_dir, verbose=False, print_result=True,
                 raise CompilerError(msg)
         func = loop_lowering.visit(func)
         func = patch_return(func, func_symbols)
-        func = run_func_local_opts(func, func_symbols)
+        func = optimize_statements(func, func_symbols)
+        TypeInference(func_symbols).visit(func)
+        # func = run_func_local_opts(func, func_symbols)
+        strip_dead_symbols(func, func_symbols)
 
         if print_result:
             from pretty_printing import PrettyPrinter

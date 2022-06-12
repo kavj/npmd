@@ -14,7 +14,7 @@ from canonicalize import replace_call
 from errors import CompilerError
 from pretty_printing import PrettyFormatter
 from symbol_table import symbol, SymbolTable
-from utils import unpack_assignment, unpack_iterated
+from utils import unpack_iterated
 
 binary_op_strs = {ast.Add: "+",
                   ast.Sub: "-",
@@ -92,6 +92,18 @@ supported_builtins = {"iter", "range", "enumerate", "zip", "all", "any", "max", 
                       "round", "reversed"}
 
 
+def unpack_assignment(target, value, pos):
+    if isinstance(target, ir.TUPLE) and isinstance(value, ir.TUPLE):
+        if target.length != value.length:
+            msg = f"Cannot unpack {value} with {value.length} elements using {target} with {target.length} elements: " \
+                  f"line {pos.line_begin}."
+            raise ValueError(msg)
+        for t, v in zip(target.subexprs, value.subexprs):
+            yield from unpack_assignment(t, v, pos)
+    else:
+        yield target, value
+
+
 def is_ellipsis(node):
     vi = sys.version_info
     if vi.major != 3 or vi.minor < 8:
@@ -141,32 +153,58 @@ class ImportHandler(ast.NodeVisitor):
         # ignore anything that isn't an import
         pass
 
-    def visit_Import(self, node):
-        # import modules only
-        pos = extract_positional_info(node)
-        member = None
-        for name in node.names:
-            module_name = name.name
-            module_alias = name.asname if hasattr(name, "asname") else None
-            mod_import = ir.ImportRef(module_name, member, module_alias, pos)
-            if mod_import.name in self.imports:
-                msg = f"{mod_import.name} shadows a previously bound name."
-                raise CompilerError(msg)
-            self.imports[mod_import.name] = mod_import
+    class ImportHandler(ast.NodeVisitor):
+        """
+        This is used to replace source aliases with fully qualified names.
 
-    def visit_ImportFrom(self, node):
-        module_name = node.module
-        pos = extract_positional_info(node)
-        for name in node.names:
-            # assume alias node
-            import_name = name.name
-            import_alias = name.asname if hasattr(name, "asname") else None
-            name_import = ir.ImportRef(module_name, import_name, import_alias, pos)
-            if name_import.name in self.imports:
-                msg = "Name {import_alias} overwrites an existing assignment."
-                raise CompilerError(msg)
-            self.imports[name_import.name] = name_import
+        """
 
+        def __init__(self):
+            self.imports = None
+            self.numpy_alias = None
+
+        @contextmanager
+        def make_context(self):
+            self.imports = {}
+            yield
+            self.imports = None
+            self.numpy_alias = None
+
+        def __call__(self, node):
+            with self.make_context():
+                self.visit(node)
+                return self.imports, self.numpy_alias
+
+        def visit_Module(self, node):
+            for n in node.body:
+                self.visit(n)
+
+        def generic_visit(self, node):
+            # ignore anything that isn't an import
+            pass
+
+        def visit_Import(self, node):
+            # import modules only
+            for name in node.names:
+                if name.name != 'numpy':
+                    names = ", ".join(name.name for name in node.names)
+                    msg = f'Single import of numpy is the only currently supported import, received: {names}'
+                    raise CompilerError(msg)
+                self.numpy_alias = ir.NameRef(getattr(name, 'asname', 'numpy'))
+
+        def visit_ImportFrom(self, node):
+            module_name = node.module
+            if module_name != 'numpy':
+                msg = f'Only some imports from numpy are supported, received "{module_name}"'
+                raise CompilerError(msg)
+            for name in node.names:
+                # assume alias node
+                imported_name = name.name
+                import_alias = getattr(name, 'asname', imported_name)
+                if imported_name in self.imports:
+                    msg = 'Name "{import_alias}" overwrites an existing assignment.'
+                    raise CompilerError(msg)
+                self.imports[ir.NameRef(import_alias)] = ir.NameRef(imported_name)
 
 class TreeBuilder(ast.NodeVisitor):
 
@@ -475,7 +513,7 @@ class TreeBuilder(ast.NodeVisitor):
 
     def visit_Return(self, node: ast.Return):
         pos = extract_positional_info(node)
-        value = self.visit(node.value) if node.value is not None else None
+        value = self.visit(node.value) if node.value is not None else ir.NoneRef()
         stmt = ir.Return(value, pos)
         self.body.append(stmt)
 
@@ -492,7 +530,7 @@ def map_functions_by_name(node: ast.Module):
     return by_name
 
 
-def populate_func_symbols(func_table, types, ignore_unbound=False):
+def populate_func_symbols(func_table, types, allow_inference=True, ignore_unbound=False):
     """
     Turns python symbol table into a typed internal representation.
 
@@ -500,6 +538,9 @@ def populate_func_symbols(func_table, types, ignore_unbound=False):
     # Todo: This needs a better way to deal with imports where they are used.
     # since we have basic type info here, later phases should be validating the argument
     # and type signatures used when calling imported functions
+    if allow_inference and ignore_unbound:
+        msg = "Cannot allow type inference if unbound variable paths are allowed here."
+        raise CompilerError(msg)
     func_name = func_table.get_name()
     symbols = {}
     missing = []
@@ -516,21 +557,27 @@ def populate_func_symbols(func_table, types, ignore_unbound=False):
             msg = f"Assigning to global and non-local variables is unsupported: {name} in function {func_name}"
             raise CompilerError(msg)
         elif is_local:
-            if not (ignore_unbound or is_assigned):
+            if not (ignore_unbound or is_assigned or is_arg):
                 msg = f"Local variable {name} in function {func_name} is unassigned. " \
                       f"This is automatically treated as an error."
                 raise CompilerError(msg)
             type_ = types.get(name)
             if type_ is None:
                 missing.append(name)
-            sym = symbol(name, type_, is_arg, is_source_name=True, is_local=is_local)
+            sym = symbol(name,
+                         type_,
+                         is_arg,
+                         is_source_name=True,
+                         is_local=is_local,
+                         is_assigned=is_assigned,
+                         type_is_inferred=False)
             symbols[name] = sym
         elif name in types:
             # if a type is given here but this is not local, raise an error
             if s.is_referenced():
                 msg = f"Typed name {name} does not match an assignment."
                 raise CompilerError(msg)
-    if missing:
+    if missing and not allow_inference:
         msg = f"No type provided for local variable(s): '{', '.join(m for m in missing)}' in function '{func_name}'."
         raise CompilerError(msg)
     return SymbolTable(func_name, symbols)
@@ -567,7 +614,7 @@ def populate_symbol_tables(module_name, src, types):
         func_names.add(name)
         func_types = types.get(name)
         # declare a header file to avoid worrying about declaration order
-        func_tables[name] = populate_func_symbols(func_table, func_types, ignore_unbound=True)
+        func_tables[name] = populate_func_symbols(func_table, func_types, allow_inference=True, ignore_unbound=False)
     return func_tables
 
 

@@ -1,6 +1,6 @@
 
 
-def something(a,b):
+def something(a, b):
     # divergent return with no loop
     if a > b:
         return a

@@ -148,6 +148,11 @@ class CONSTANT(ValueRef):
         return not self.is_bool and isinstance(self.value, numbers.Integral)
 
 
+def is_nan(value: ValueRef):
+    assert isinstance(value, ValueRef)
+    return isinstance(value, CONSTANT) and np.isnan(value.value)
+
+
 @dataclass(frozen=True)
 class StringConst(ValueRef):
     value: str
@@ -196,6 +201,11 @@ NAN = wrap_constant(np.nan)
 
 # Top Level
 
+@dataclass(frozen=True)
+class NoneRef(ValueRef):
+    # sentinel value, since it's b
+    pass
+
 
 # Todo: add typing to these to avoid needing constant access to symbol table
 @dataclass(frozen=True)
@@ -225,6 +235,12 @@ class ArrayType(TypeBase):
         assert isinstance(self.ndims, int)
         assert self.ndims > 0
         assert isinstance(self.dtype, np.dtype)
+
+    def without_leading_dim(self):
+        if self.ndims == 1:
+            return self.dtype
+        else:
+            return ArrayType(self.ndims - 1, self.dtype)
 
 
 class ArrayInitializer(Expression):
@@ -585,7 +601,7 @@ class MULT(BinOp):
 
     def __init__(self, *values):
         # These are sorted so that
-        left, right = sorted(values, key=lambda k: str(k))
+        left, right = sorted(values, key=lambda k: str(k), reverse=True)
         object.__setattr__(self, 'left', left)
         object.__setattr__(self, 'right', right)
 
@@ -1125,13 +1141,15 @@ class Zip(Expression):
 @dataclass(frozen=True)
 class InPlaceOp(StmtBase):
     # Todo: set target explicitly for multiply accum which accumulates to expr.right here
-    target: typing.Union[NameRef, Subscript, TUPLE]
+    target: typing.Union[NameRef, Subscript]
     value: BinOp
     pos: Position
 
     def __post_init__(self):
         # contraction added so that we can represent a += b * c as a contracted op
-        assert isinstance(self.value, (BinOp, Contraction))
+        assert isinstance(self.value, BinOp)
+        assert isinstance(self.target, (NameRef, Subscript))
+        assert self.target in self.value.subexprs
 
 
 @dataclass(frozen=True)
@@ -1201,50 +1219,12 @@ class IfElse(StmtBase):
 
 
 @dataclass(frozen=True)
-class ImportRef:
-    module: str
-    member: typing.Optional[str]
-    alias: typing.Optional[str]
-    pos: Position
-
-    @property
-    def name(self):
-        if self.alias is not None:
-            return self.alias
-        elif self.member is not None:
-            return self.member
-        else:
-            return self.module
-
-    @property
-    def is_module_import(self):
-        return self.member is None
-
-
-@dataclass(frozen=True)
-class ModImport(StmtBase):
-    module: NameRef
-    as_name: NameRef
-    pos: Position
-
-
-@dataclass(frozen=True)
-class NameImport(StmtBase):
-    module: NameRef
-    name: NameRef
-    as_name: NameRef
-    pos: Position
-
-    def __post_init__(self):
-        assert isinstance(self.module, NameRef)
-        assert isinstance(self.name, NameRef)
-        assert isinstance(self.as_name, NameRef)
-
-
-@dataclass(frozen=True)
 class Return(StmtBase):
     value: typing.Optional[ValueRef]
     pos: Position
+
+    def __post_init__(self):
+        assert isinstance(self.value, ValueRef)
 
 
 @dataclass

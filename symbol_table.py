@@ -1,12 +1,24 @@
+from __future__ import annotations
+import builtins
 import itertools
+import keyword
 
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional
 
 import ir
 
 from errors import CompilerError
-from utils import extract_name, is_allowed_identifier
+from utils import extract_name
+
+
+reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
+
+
+def is_allowed_identifier(name):
+    if isinstance(name, ir.NameRef):
+        name = name.name
+    return isinstance(name, str) and name.isidentifier() and (name not in reserved_names)
 
 
 def reduces_array_dims(ref):
@@ -19,25 +31,6 @@ def reduces_array_dims(ref):
         raise TypeError(msg)
 
 
-def map_alias_to_qualified_names(import_nodes):
-    """
-    Internally, we refer to qualified names for uniqueness reasons.
-    This maps any any aliases of modules or names from modules to
-    qualified names.
-
-    alias: module_name or alias: module_name.imported_name
-
-    """
-    qual_names = {}
-    for node in import_nodes:
-        if isinstance(node, ir.NameImport):
-            qual_names[node.as_name] = f"{node.module}.{node.name}"
-        elif isinstance(node, ir.ModImport):
-            qual_names[node.as_name] = node.module
-        else:
-            raise ValueError
-
-
 @dataclass(frozen=True)
 class symbol:
     """
@@ -45,11 +38,36 @@ class symbol:
     These are meant to be interned by the symbol table and not created arbitrarily.
     """
 
+    def __post_init__(self):
+        if self.is_assigned:
+            # this should be caught elsewhere, where function information is available
+            assert self.is_local
+        if self.is_arg:
+            assert self.type_ is not None
+        assert is_allowed_identifier(self.name)
+
     name: str
-    type_: ir.TypeBase
+    type_: Optional[ir.TypeBase]
     is_arg: bool
     is_source_name: bool
     is_local: bool
+    is_assigned: bool
+    type_is_inferred: bool
+
+    def with_inferred_type(self, t):
+        if t is None:
+            msg = f'Cannot make typed symbol from "{self.name}" with None.'
+            raise CompilerError(msg)
+        else:
+            if self.type_ is not None:
+                # numpy dtypes compare True with None on default for some reason, so this has to be quite specific
+                if self.type_ == t:
+                    return self
+                else:
+                    # This is intentionally strict, since inferring too large of an array type is bad.
+                    msg = f'Existing type "{self.type_}" is incompatible with updated declaration "{t}"'
+                    raise CompilerError(msg)
+            return symbol(self.name, t, self.is_arg, self.is_source_name, self.is_local, self.is_assigned, True)
 
 
 class SymbolTable:
@@ -59,8 +77,17 @@ class SymbolTable:
 
     def __init__(self, namespace: str, symbols: Dict[str, symbol]):
         self.namespace = namespace
+        untyped_args = [name for (name, symbol) in symbols.items() if symbol.is_arg and symbol.type_ is None]
+        if untyped_args:
+            msg = f'Arguments "{untyped_args}" are missing type annotations'
+            raise CompilerError(msg)
         self.symbols = symbols
         self.name_manglers = {}
+
+    def drop_symbol(self, name):
+        name = extract_name(name)
+        del self.symbols[name]
+        # keep in name mangler
 
     @property
     def from_source(self):
@@ -81,10 +108,21 @@ class SymbolTable:
                 yield sym
 
     @property
+    def assigned_names(self):
+        for sym in self.symbols.values():
+            if sym.is_assigned:
+                yield ir.NameRef(sym.name)
+
+    @property
     def arguments(self):
         for sym in self.symbols.values():
             if sym.is_arg:
                 yield sym
+
+    def bind_type(self, name: ir.NameRef, t):
+        existing_sym = self.symbols[name.name]
+        updated_sym = existing_sym.with_inferred_type(t)
+        self.symbols[name.name] = updated_sym
 
     def declares(self, name):
         name = extract_name(name)
@@ -100,11 +138,20 @@ class SymbolTable:
         return (sym is not None
                 and sym.is_source_name)
 
+    def is_assigned(self, name):
+        sym = self.lookup(name)
+        return sym.is_assigned
+
     def is_impl_name(self, name):
         sym = self.lookup(name)
         if sym is None:
             return False
         return not sym.is_source_name
+
+    def is_argument(self, name):
+        name = extract_name(name)
+        sym = self.symbols[name]
+        return sym.is_arg
 
     def check_type(self, name):
         name = extract_name(name)
@@ -144,7 +191,15 @@ class SymbolTable:
         name = f'{prefix_}'
         while self.declares(name):
             name = f'{prefix_}_{next(gen)}'
-        sym = symbol(name, type_, is_arg=False, is_source_name=False, is_local=True)
+
+        sym = symbol(name,
+                     type_,
+                     is_arg=False,
+                     is_source_name=False,
+                     is_local=True,
+                     is_assigned=True,
+                     type_is_inferred=False)
+
         self.symbols[name] = sym
         # The input name may require mangling for uniqueness.
         # Return the name as it is registered.
