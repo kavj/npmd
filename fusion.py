@@ -1,14 +1,17 @@
+import itertools
+
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import singledispatchmethod
-from typing import Iterable, List
+from typing import List, Set, Union
 
 import ir
 
+from analysis import count_clobbers
 from errors import CompilerError
 from symbol_table import SymbolTable
-from traversal import array_safe_walk, depth_first_sequence_statements, walk
+from traversal import depth_first_sequence_blocks, walk
 from type_checks import TypeHelper
 
 
@@ -27,11 +30,55 @@ class AccessFunc:
     step: ir.ValueRef
 
 
-class ArrayOpCollector:
+def make_access_func(node: Union[ir.NameRef, ir.Expression]):
+    if isinstance(node, ir.Subscript):
+        if isinstance(node.index, ir.Slice):
+            start, stop, step = node.index.subexprs
+            return node.value, AccessFunc(start, stop, step)
+        else:
+            # slices can't be bound here, so this is unambiguous
+            dimref = ir.SingleDimRef(node, ir.One)
+            return node.value, AccessFunc(ir.Zero, dimref, ir.One)
+    elif isinstance(node, ir.Expression):
+        return None, AccessFunc(ir.Zero, ir.SingleDimRef(node, ir.Zero), ir.One)
+    elif isinstance(node, ir.NameRef):
+        return node, AccessFunc(ir.Zero, ir.SingleDimRef(node, ir.Zero), ir.One)
+    else:
+        msg = f'Cannot extract access func from "{node}".'
+        raise CompilerError(msg)
+
+
+def group_access_funcs(array_refs: Set[ir.NameRef, ir.Subscript]):
+    # Now group array access functions by base
+    access_funcs_by_name = defaultdict(set)
+    for ref in array_refs:
+        name, accessor = make_access_func(ref)
+        access_funcs_by_name[name].add(accessor)
+    return access_funcs_by_name
+
+
+class ArrayExprCollector:
 
     def __init__(self, symbols: SymbolTable):
         self.symbols = symbols
+        self.typer = TypeHelper(symbols)
         self.array_ops = set()
+        self.seen = set()
+        # also keep track of array refs to track access funcs
+        self.array_refs = set()
+
+    def __call__(self, node: ir.ValueRef):
+        self.visit(node)
+
+    def visit_bin_or_compare(self, node: Union[ir.BinOp, ir.CompareOp]):
+        if node in self.seen:
+            return
+        self.seen.add(node)
+        # Record cases where both terms are array references
+        if self.typer.is_array(node.left) and self.typer.is_array(node.right):
+            self.array_refs.add(node.left)
+        for subexpr in node.subexprs:
+            self.visit(subexpr)
 
     @singledispatchmethod
     def visit(self, node):
@@ -39,22 +86,31 @@ class ArrayOpCollector:
         raise TypeError(msg)
 
     @visit.register
-    def _(self, node: ir.ValueRef):
-        return False
+    def _(self, node: ir.NameRef):
+        if self.typer.is_array(node):
+            self.array_refs.add(node)
+
+    @visit.register
+    def _(self, node: ir.Subscript):
+        if self.typer.is_array(node):
+            self.array_refs.add(node)
+
+    @visit.register
+    def _(self, node: ir.BinOp):
+        self.visit_bin_or_compare(node)
+
+    @visit.register
+    def _(self, node: ir.CompareOp):
+        self.visit_bin_or_compare(node)
 
     @visit.register
     def _(self, node: ir.Expression):
-        if node in self.array_ops:
-            return True
+        if node in self.seen:
+            return
+        # it's possible to have something like 1 + (a + b).min()
+        # due to weird nesting, so we have to assume anything might hide an array expression
         for subexpr in node.subexprs:
-            if isinstance(subexpr, ir.NameRef):
-                if isinstance(self.symbols.check_type(subexpr), ir.ArrayType):
-                    self.array_ops.add(node)
-                    return True
-            elif isinstance(subexpr, ir.Expression):
-                if self.visit(subexpr):
-                    return True
-        return False
+            self.visit(subexpr)
 
     @visit.register
     def _(self, node: ir.SELECT):
@@ -73,70 +129,48 @@ class ArrayOpCollector:
         return self.visit(node.predicate) or on_true_is_array
 
 
-class AccessFuncCollector:
-
-    def __init__(self, symbols: SymbolTable):
-        self.symbols = symbols
-        self.accessors = defaultdict(set)
-
-    @singledispatchmethod
-    def visit(self, node):
-        msg = f'No method to collect access funcs from "{node}"'
-        raise TypeError(msg)
-
-    @visit.register
-    def _(self, node: ir.Expression):
-        for subexpr in node.subexprs:
-            self.visit(subexpr)
-
-    @visit.register
-    def _(self, node: ir.NameRef):
-        return AccessFunc(start=ir.Zero, stop=ir.SingleDimRef(node, dim=ir.Zero), step=ir.One)
-
-    @visit.register
-    def _(self, node: ir.Subscript):
-        # don't descend on value here
-        name = node.value
-        # ensure array type
-        if not isinstance(name, ir.ArrayType):
-            msg = f'Cannot subscript non-array type "{name}".'
-            raise CompilerError(msg)
-        if isinstance(node.index, ir.Slice):
-            start, stop, step = node.index.subexprs
-            if stop is None:
-                stop = ir.SingleDimRef(name, ir.Zero)
-            self.accessors[name].add(AccessFunc(start=start, stop=stop, step=step))
-        else:
-            base_array_type = self.symbols.check_type(name)
-            reduced_type = base_array_type.without_leading_dim()
-            if isinstance(reduced_type, ir.ArrayType):
-                self.accessors[name].add(AccessFunc(start=ir.Zero, stop=ir.SingleDimRef(name, ir.One), step=ir.One))
-
-
 def find_array_expressions(stmts: List[ir.StmtBase], symbols: SymbolTable):
-    array_op_collector = ArrayOpCollector(symbols)
-    for stmt in depth_first_sequence_statements(stmts):
+    collector = ArrayExprCollector(symbols)
+    for stmt in itertools.chain(*depth_first_sequence_blocks(stmts)):
         if isinstance(stmt, ir.Assign):
-            array_op_collector.visit(stmt.value)
-            array_op_collector.visit(stmt.target)
+            collector.visit(stmt.value)
+            collector.visit(stmt.target)
         elif isinstance(stmt, (ir.InPlaceOp, ir.SingleExpr)):
-            array_op_collector.visit(stmt.value)
+            collector.visit(stmt.value)
         elif isinstance(stmt, ir.Return):
             if stmt.value is not None:
-                array_op_collector.visit(stmt.value)
+                collector.visit(stmt.value)
         elif isinstance(stmt, (ir.IfElse, ir.WhileLoop)):
-            array_op_collector.visit(stmt.test)
+            collector.visit(stmt.test)
         elif isinstance(stmt, ir.ForLoop):
-            array_op_collector.visit(stmt.iterable)
-    return array_op_collector.array_ops
+            collector.visit(stmt.iterable)
+    return collector.array_ops, collector.array_refs
 
 
-def fuse_statements(block: Iterable[ir.StmtBase]):
-    access_funcs = defaultdict(set)
-    chunks = []
-    curr = []
-    for stmt in block:
-        # If this introduces an incompatible access pattern
-        # check if curr has any statement.
-        # If so, break it
-        pass
+def fuse_(block: List[ir.StmtBase], symbols: SymbolTable, ephemeral: Set[ir.NameRef]):
+    """
+    This is meant to run after locality optimizers.
+    :param block:
+    :param symbols:
+    :param ephemeral:
+    :return:
+    """
+    # gather array expressions
+    array_exprs, array_refs = find_array_expressions(block, symbols)
+    accessor_by_name = group_access_funcs(array_refs)
+
+    # Now find those that appear together
+    groups = []
+    for expr in array_exprs:
+        for group in groups:
+            if not group.isdisjoint(expr.subexprs):
+                group.update(expr.subexprs)
+                break
+        else:
+            # doesn't match existing
+            groups.append(set(expr.subexprs))
+        # This is a bit more conservative than it needs to be.
+        # Technically if write stride is faster than read stride, we're okay.
+
+    counts = count_clobbers(block)
+

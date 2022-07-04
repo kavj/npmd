@@ -1,23 +1,90 @@
-import operator
-
+from __future__ import annotations
 import numpy as np
 
-from collections import defaultdict
+from collections import defaultdict, Counter
 from contextlib import contextmanager
-from functools import singledispatchmethod
-from typing import Iterable, List, Optional, Set
+from functools import singledispatch, singledispatchmethod
+from typing import List, Optional, Set
 
 import ir
 
-from folding import OpFold
+from errors import CompilerError
 from symbol_table import SymbolTable
-from type_checks import TypeHelper
+from type_checks import contains_stmt_types, TypeHelper
 from utils import is_entry_point, unpack_iterated
-from traversal import depth_first_sequence_blocks, StmtVisitor, walk_parameters
-
+from traversal import depth_first_sequence_blocks, walk_parameters
 
 # Todo: stub
 specialized = {ir.NameRef("print")}
+
+
+class DeclTracker:
+    """
+    A class to track what should be declared at this point.
+    """
+
+    def __init__(self):
+        self.declared = []
+
+    @contextmanager
+    def scope(self):
+        s = set()
+        self.declared.append(s)
+        yield
+        self.declared.pop()
+
+    def innermost(self):
+        return self.declared[-1]
+
+    def declare(self, node: ir.NameRef):
+        if self.is_undeclared(node):
+            self.declared[-1].add(node)
+
+    def is_declared(self, node: ir.NameRef):
+        return any(node in d for d in reversed(self.declared))
+
+    def is_undeclared(self, node: ir.NameRef):
+        return not any(node in d for d in reversed(self.declared))
+
+    def check_undeclared(self, expr: ir.ValueRef, current_line):
+        for param in walk_parameters(expr):
+            if self.is_undeclared(param):
+                msg = f'Possible unbound local "{param.name}" at line {current_line}.'
+                raise CompilerError(msg)
+
+
+def count_clobbers(block: List[ir.StmtBase]):
+    clobbers = Counter()
+    for index, stmt in enumerate(block):
+        if isinstance(stmt, ir.Assign) and isinstance(stmt.target, ir.NameRef):
+            clobbers[stmt.target] += 1
+        elif isinstance(stmt, ir.ForLoop):
+            assert index == 0
+            for target, _ in unpack_iterated(stmt.target, stmt.iterable):
+                clobbers[target] += 1
+                break
+    return clobbers
+
+
+def count_assigning_blocks(node: List[ir.StmtBase]):
+    """
+    This counts the number of blocks that bind a particular name.
+    Anything with exactly one assigning block that does not appear in arguments can be declared
+    wherever it's first assigned.
+    :param node:
+    :return:
+    """
+
+    seen = set()
+    counts = Counter()
+    for block in depth_first_sequence_blocks(node):
+        for stmt in block:
+            if isinstance(stmt, ir.Assign) and isinstance(stmt.target, ir.NameRef):
+                seen.add(stmt.target)
+        for name in seen:
+            counts[name] += 1
+        seen.clear()
+    return counts
 
 
 def has_nan(node: ir.Expression):
@@ -27,41 +94,7 @@ def has_nan(node: ir.Expression):
                 return True
 
 
-def is_compare(node):
-    """
-    This tests whether we have either a single compare or a chained comparison.
-    Chained comparisons are regarded as logical and nodes, where every operand
-    is a compare operation and for any consecutive comparisons, indexed by 'i' and 'i+1':
-        operands[i].right == operands[i+1].left
-
-    Note, this will ignore cases that are not laid out like:
-
-        (a cmp b) and (b cmp c) and (c cmp d)
-
-    but the internal passes attempt to factor everything this way.
-
-    """
-
-    if isinstance(node, ir.CompareOp):
-        return True
-
-    elif isinstance(node, ir.AND):
-        operand_iter = node.subexprs
-        first = next(operand_iter)
-        if not isinstance(first, ir.CompareOp):
-            return False
-        prev_rhs = first.right
-        for operand in operand_iter:
-            if not isinstance(operand, ir.CompareOp) or prev_rhs != operand.left:
-                return False
-
-    else:
-        return False
-
-    return True
-
-
-def get_possible_aliasing(stmts: Iterable[ir.StmtBase], symbols: SymbolTable):
+def get_possible_aliasing(stmts: List[ir.StmtBase], symbols: SymbolTable):
     """
     Get sub-array references that may be linked to an array name
     :param stmts:
@@ -78,205 +111,87 @@ def get_possible_aliasing(stmts: Iterable[ir.StmtBase], symbols: SymbolTable):
     return aliasing
 
 
-class ReachingCheck(StmtVisitor):
-    """
-    This is meant to check for statements that could result in unbound local errors.
-    It also tracks cases where a write must follow a read or a read follows a write.
-
-    """
-
-    def __init__(self):
-        self.unknowns = None
-        self.specialized = specialized.copy()
-        self._bound = []
-
-    def __call__(self, node):
-        # Needs to have context added so we can check imported symbols
-        self.unknowns = {}
-        assert not self._bound
-        self.visit(node)
-        assert not self._bound
-        unknowns = self.unknowns
-        self.unknowns = None
-        return unknowns
-
-    @contextmanager
-    def scoped(self):
-        innermost = set()
-        self._bound.append(innermost)
-        yield
-        p = self._bound.pop()
-        assert p is innermost
-
-    @property
-    def current_scope(self):
-        return self._bound[-1]
-
-    def mark_assigned(self, target):
-        if isinstance(target, ir.NameRef):
-            self.current_scope.add(target)
-
-    def maybe_unbound(self, name):
-        if name in self.specialized:
-            return False
-        for scope in reversed(self._bound):
-            if name in scope:
-                return False
-        return True
-
-    def register_name_reference(self, name, stmt):
-        if name not in self.unknowns:
-            if self.maybe_unbound(name):
-                self.unknowns[name] = stmt
-
-    def register_expr_reference(self, expr, stmt):
-        for param in walk_parameters(expr):
-            self.register_name_reference(param, stmt)
-        if isinstance(expr, ir.NameRef):
-            self.register_name_reference(expr, stmt)
-
-    @singledispatchmethod
-    def visit(self, node):
-        return super().visit(node)
-
-    @visit.register
-    def _(self, node: ir.Function):
-        with self.scoped():
-            for arg in node.args:
-                self.mark_assigned(arg)
-            self.visit(node.body)
-
-    @visit.register
-    def _(self, node: ir.SingleExpr):
-        self.register_expr_reference(node.value, node)
-
-    @visit.register
-    def _(self, node: ir.InPlaceOp):
-        self.register_expr_reference(node.value, node)
-
-    @visit.register
-    def _(self, node: ir.Assign):
-        self.register_expr_reference(node.value, node)
-        self.mark_assigned(node.target)
-        # catch non-name targets
-        self.register_expr_reference(node.target, node)
-
-    @visit.register
-    def _(self, node: ir.ForLoop):
-        with self.scoped():
-            for target, value in unpack_iterated(node.target, node.iterable):
-                self.register_expr_reference(value, node)
-                self.mark_assigned(target)
-                self.register_expr_reference(target, node)
-            self.visit(node.body)
-
-    @visit.register
-    def _(self, node: ir.WhileLoop):
-        # test is encountered before loop
-        self.register_expr_reference(node.test, node)
-        with self.scoped():
-            self.visit(node.body)
-
-    @visit.register
-    def _(self, node: ir.IfElse):
-        self.register_expr_reference(node.test, node)
-        with self.scoped():
-            self.visit(node.if_branch)
-            if_branch = self.current_scope
-        with self.scoped():
-            self.visit(node.else_branch)
-            else_branch = self.current_scope
-        definitely_bound = if_branch.intersection(else_branch)
-        # If bound in both branches, mark as bound.
-        # Declarations must be hoisted if these may
-        # escape.
-        self.current_scope.update(definitely_bound)
-
-    @visit.register
-    def _(self, node: ir.Return):
-        if node.value is not None:
-            self.register_expr_reference(node.value, node)
+@singledispatch
+def is_terminated(node):
+    raise TypeError
 
 
-class AllPathsReturn(StmtVisitor):
-    """
-    This needs to check return type
+@is_terminated.register
+def _(node: ir.StmtBase):
+    return isinstance(node, (ir.Break, ir.Continue, ir.Return))
 
-    """
 
-    def __call__(self, node):
-        terminated = self.visit(node)
-        return terminated
+@is_terminated.register
+def _(node: ir.IfElse):
+    return is_terminated(node.if_branch) and is_terminated(node.else_branch)
 
-    @singledispatchmethod
-    def visit(self, node):
-        return super().visit(node)
 
-    @visit.register
-    def _(self, node: ir.Function):
-        return self.visit(node.body)
-
-    @visit.register
-    def _(self, node: ir.StmtBase):
+@is_terminated.register
+def _(node: ir.WhileLoop):
+    if not isinstance(node.test, ir.CONSTANT):
         return False
+    if node.test.value:
+        return contains_stmt_types(node.body, (ir.Break,))
 
-    @visit.register
-    def _(self, node: ir.ForLoop):
-        return False
 
-    @visit.register
-    def _(self, node: ir.WhileLoop):
-        # ignoring the case of while True: .. return ..
-        # which basically works if return is the only way out
-        return False
-
-    @visit.register
-    def _(self, node: ir.Return):
-        return True
-
-    @visit.register
-    def _(self, node: list):
-        for stmt in reversed(node):
-            if self.visit(stmt):
+@is_terminated.register
+def _(body: list):
+    for stmt in reversed(body):
+        if isinstance(stmt, (ir.Break, ir.Continue, ir.Return)):
+            return True
+        elif isinstance(stmt, (ir.IfElse, ir.WhileLoop)):
+            if is_terminated(stmt):
                 return True
-        return False
+    return False
 
-    @visit.register
-    def _(self, node: ir.IfElse):
-        if isinstance(node.test, ir.CONSTANT):
-            if operator.truth(node.test):
-                return self.visit(node.if_branch)
+
+def check_all_declared(block: List[ir.StmtBase], tracker: Optional[DeclTracker] = None):
+    if tracker is None:
+        tracker = DeclTracker()
+    for stmt in block:
+        current_line = stmt.pos.line_begin
+        if isinstance(stmt, ir.IfElse):
+            tracker.check_undeclared(stmt.test, current_line)
+            with tracker.scope():
+                check_all_declared(stmt.if_branch, tracker)
+                bound_if = tracker.innermost()
+            with tracker.scope():
+                check_all_declared(stmt.else_branch, tracker)
+                bound_else = tracker.innermost()
+            tracker.innermost().update(bound_if.intersection(bound_else))
+        elif isinstance(stmt, ir.ForLoop):
+            with tracker.scope():
+                for target, iterable in unpack_iterated(stmt.target, stmt.iterable):
+                    tracker.check_undeclared(iterable, current_line)
+                    tracker.declare(target)
+                with tracker.scope():
+                    check_all_declared(stmt.body, tracker)
+        elif isinstance(stmt, ir.WhileLoop):
+            tracker.check_undeclared(stmt.test, current_line)
+            with tracker.scope():
+                check_all_declared(stmt.body, tracker)
+        elif isinstance(stmt, ir.Assign):
+            tracker.check_undeclared(stmt.value, current_line)
+            if isinstance(stmt.target, ir.NameRef):
+                tracker.declare(stmt.target)
             else:
-                return self.visit(node.else_branch)
-        else:
-            return self.visit(node.if_branch) and self.visit(node.else_branch)
+                tracker.check_undeclared(stmt.target, current_line)
+        elif isinstance(stmt, ir.InPlaceOp):
+            tracker.check_undeclared(stmt.value, current_line)
+        elif isinstance(stmt, (ir.SingleExpr, ir.Return)):
+            tracker.check_undeclared(stmt.value, current_line)
 
 
-def find_unterminated_path(stmts: List[ir.StmtBase]) -> Optional[List[ir.StmtBase]]:
-    if not isinstance(stmts, list):
-        raise TypeError("Internal Error: expected a list of statements")
-    if len(stmts) > 0:
-        last = stmts[-1]
-        if isinstance(last, (ir.Continue, ir.Break, ir.Return)):
-            return
-        elif isinstance(last, ir.IfElse):
-            if last.test.constant:
-                # If we have a constant branch condition,we can only follow
-                # the reachable branch
-                if operator.truth(last.test):
-                    return find_unterminated_path(last.if_branch)
-                else:
-                    return find_unterminated_path(last.else_branch)
-            else:
-                if_path = find_unterminated_path(last.if_branch)
-                else_path = find_unterminated_path(last.else_branch)
-                if if_path is None and else_path is None:
-                    return  # terminated
-                elif if_path is None:
-                    return else_path
-                elif else_path is None:
-                    return if_path
-    return stmts
+def check_all_paths_return(stmts: List[ir.StmtBase]):
+    for stmt in stmts:
+        if isinstance(stmt, ir.Return):
+            return True
+        elif isinstance(stmt, ir.IfElse):
+            if check_all_paths_return(stmt.if_branch) and check_all_paths_return(stmt.else_branch):
+                return True
+        if isinstance(stmt, ir.WhileLoop) and is_terminated(stmt):
+            return True
+    return False
 
 
 def compute_element_count(start: ir.ValueRef, stop: ir.ValueRef, step: ir.ValueRef, typer: TypeHelper):
@@ -288,16 +203,12 @@ def compute_element_count(start: ir.ValueRef, stop: ir.ValueRef, step: ir.ValueR
     :param step:
     :return:
     """
-    fold_op = OpFold(typer)
 
-    start = fold_op(start)
-    stop = fold_op(stop)
-    step = fold_op(step)
-    diff = fold_op(ir.SUB(stop, start))
-    base_count = fold_op((ir.FLOORDIV(diff, step)))
-    test = fold_op(ir.MOD(diff, step))
-    fringe = fold_op(ir.SELECT(predicate=test, on_true=ir.One, on_false=ir.Zero))
-    count = fold_op(ir.ADD(base_count, fringe))
+    diff = ir.SUB(stop, start)
+    base_count = (ir.FLOORDIV(diff, step))
+    test = ir.MOD(diff, step)
+    fringe = ir.SELECT(predicate=test, on_true=ir.One, on_false=ir.Zero)
+    count = ir.ADD(base_count, fringe)
     return count
 
 
@@ -313,7 +224,6 @@ def find_array_length_expression(node: ir.ValueRef, typer: TypeHelper) -> Option
 
       :return:
     """
-    fold_op = OpFold(typer)
     if isinstance(node, ir.Subscript):
         if isinstance(node.index, ir.Slice):
             index = node.index
@@ -321,7 +231,7 @@ def find_array_length_expression(node: ir.ValueRef, typer: TypeHelper) -> Option
             if index.stop is None:
                 stop = ir.SingleDimRef(node.value, dim=ir.Zero)
             else:
-                stop = fold_op(ir.MIN(index.stop, ir.SingleDimRef(node.value, dim=ir.Zero)))
+                stop = ir.MIN(index.stop, ir.SingleDimRef(node.value, dim=ir.Zero))
             step = index.step
             return compute_element_count(start, stop, step, typer)
         else:
@@ -332,7 +242,7 @@ def find_array_length_expression(node: ir.ValueRef, typer: TypeHelper) -> Option
     # other cases handled by analyzing sub-expressions and broadcasting constraints
 
 
-def get_uevs(stmt: ir.StmtBase, clobbers: Set[ir.NameRef]):
+def get_read_first(stmt: ir.StmtBase, clobbers: Set[ir.NameRef]):
     if isinstance(stmt, (ir.Assign, ir.InPlaceOp)):
         # Todo: need some other checks for unsupported tuple patterns
         for name in walk_parameters(stmt.value):
@@ -359,7 +269,15 @@ def get_uevs(stmt: ir.StmtBase, clobbers: Set[ir.NameRef]):
             yield from walk_parameters(stmt.value)
 
 
-def find_ephemeral_references(node: Iterable[ir.StmtBase], symbols: SymbolTable) -> Set[ir.NameRef]:
+def get_read_first_in_block(stmts: List[ir.StmtBase]):
+    uevs = set()
+    clobbers = set()
+    for stmt in stmts:
+        uevs.update(get_read_first(stmt, clobbers))
+    return uevs
+
+
+def find_ephemeral_references(node: List[ir.StmtBase], symbols: SymbolTable) -> Set[ir.NameRef]:
     """
     Ephemeral targets are variables that whose assignments can all be localized. This is always decidable in cases
     where a variable is always always bound within a block prior to its first use.
@@ -369,14 +287,12 @@ def find_ephemeral_references(node: Iterable[ir.StmtBase], symbols: SymbolTable)
     :return:
     """
     uevs = set()
-    clobbers = set()
     for block in depth_first_sequence_blocks(node):
-        clobbers.clear()
-        for stmt in block:
-            uevs.update(get_uevs(stmt, clobbers))
+        uevs.update(get_read_first_in_block(block))
     # remove anything is explictly bound and remove everything that
     # is read first in any block.
     bound = set(symbols.assigned_names)
     bound.difference_update(uevs)
-    bound = {b for b in bound if not symbols.is_argument(b)}
+    bound.difference_update(symbols.arguments)
+
     return bound

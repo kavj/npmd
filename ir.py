@@ -145,7 +145,7 @@ class CONSTANT(ValueRef):
 
     @property
     def is_integer(self):
-        return not self.is_bool and isinstance(self.value, numbers.Integral)
+        return not self.is_bool and isinstance(self.value, np.integer)
 
 
 def is_nan(value: ValueRef):
@@ -243,9 +243,11 @@ class ArrayType(TypeBase):
             return ArrayType(self.ndims - 1, self.dtype)
 
 
+@dataclass(frozen=True)
 class ArrayInitializer(Expression):
     shape: TUPLE
     dtype: np.dtype
+    fill_value: CONSTANT
 
     @property
     def subexprs(self):
@@ -253,45 +255,13 @@ class ArrayInitializer(Expression):
 
     def reconstruct(self, *args):
         assert len(args) == 1
-        return super().reconstruct(args[0], self.dtype)
-
-
-@dataclass(frozen=True)
-class Ones(ArrayInitializer):
-    shape: TUPLE
-    dtype: np.dtype
+        return super().reconstruct(args[0], self.dtype, self.fill_value)
 
     def __post_init__(self):
         assert isinstance(self.shape, tuple)
         assert isinstance(self.dtype, np.dtype)
         if len(self.shape) > 4:
             msg = f'Arrays with more than 4 dims are unsupported here'
-            raise CompilerError(msg)
-
-
-@dataclass(frozen=True)
-class Zeros(ArrayInitializer):
-    shape: TUPLE
-    dtype: np.dtype
-
-    def __post_init__(self):
-        assert self.shape is None or isinstance(self.shape, tuple)
-        assert isinstance(self.dtype, np.dtype)
-        if len(self.shape) > 4:
-            msg = f'Arrays with more than 4 dims are unsupported here'
-            raise CompilerError(msg)
-
-
-@dataclass(frozen=True)
-class Empty(ArrayInitializer):
-    shape: TUPLE
-    dtype: np.dtype
-
-    def __post_init__(self):
-        assert self.shape is None or isinstance(self.shape, tuple)
-        assert isinstance(self.dtype, np.dtype)
-        if len(self.shape) > 4:
-            msg = f"Arrays with more than 4 dims are unsupported here"
             raise CompilerError(msg)
 
 
@@ -309,6 +279,11 @@ class SingleDimRef(Expression):
     def subexprs(self):
         yield self.base
         yield self.dim
+
+
+@dataclass(frozen=True)
+class FLOOR(Expression):
+    value: ValueRef
 
 
 @dataclass(frozen=True)
@@ -331,6 +306,35 @@ class Subscript(Expression):
     def subexprs(self):
         yield self.value
         yield self.index
+
+
+# horizontal reductions
+class ArrayReduction:
+    value: ValueRef
+
+    @property
+    def subexprs(self):
+        yield self.value
+
+
+@dataclass(frozen=True)
+class ARRAY_MIN(ArrayReduction):
+    value: ValueRef
+
+
+@dataclass(frozen=True)
+class ARRAY_MAX(ArrayReduction):
+    value: ValueRef
+
+
+@dataclass(frozen=True)
+class ARRAY_SUM(ArrayReduction):
+    value: ValueRef
+
+
+@dataclass(frozen=True)
+class ARRAY_SELECT(ArrayReduction):
+    value: ValueRef
 
 
 @dataclass(frozen=True)

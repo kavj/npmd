@@ -98,7 +98,7 @@ for i, t in enumerate(tests):
     print("\n\nOUTPUT\n\n")
     types = uws_types.get(t, {})
     try:
-        module = driver.compile_module(inpath, types, print_result=True, out_dir=outpath, ignore_unbound=True)
+        module = driver.compile_module(inpath, types, print_result=True, out_dir=outpath)
     except CompilerError as ce:
         msg = f"Failed test: {t}: {ce.args[0]}"
         failed_tests.append(msg)

@@ -5,13 +5,12 @@ from pathlib import Path
 
 from pybind_gen import gen_module, gen_setup, Emitter
 
-from analysis import ReachingCheck
-from ast_transform import build_module_ir_and_symbols
+from analysis import check_all_declared, DeclTracker
+from ast_conversion import build_module_ir_and_symbols
 from canonicalize import patch_return
 from errors import CompilerError
-from loop_simplify import LoopLowering, NormalizePaths
-from lvn import optimize_statements, run_func_local_opts, strip_dead_symbols
-from pretty_printing import PrettyFormatter
+from loop_simplify import LoopLowering, remove_unreachable
+from lvn import remove_dead, optimize_statements
 from pprint import pformat
 from type_checks import TypeInference
 
@@ -48,7 +47,7 @@ def name_and_source_from_path(file_path):
 
 # Todo: Add explicit entry points
 
-def compile_module(file_path, types,  out_dir, verbose=False, print_result=True, ignore_unbound=False, allow_inference=True):
+def compile_module(file_path, types,  out_dir, verbose=False, print_result=True, allow_inference=True):
     out_dir = Path(out_dir).absolute()
     if "." in str(out_dir):
         msg = f"Expected a directory path, received: {out_dir} ."
@@ -65,26 +64,21 @@ def compile_module(file_path, types,  out_dir, verbose=False, print_result=True,
         raise CompilerError(msg)
     mod_ir, symbols = build_module_ir_and_symbols(file_path, types)
     funcs = []
-    norm_paths = NormalizePaths()
-    rc = ReachingCheck()
     for func in mod_ir.functions:
         func_symbols = symbols.get(func.name)
         loop_lowering = LoopLowering(func_symbols)
-        func = norm_paths(func)
-        if not ignore_unbound:
-            maybe_unbound = rc(func)
-            if maybe_unbound:
-                pf = PrettyFormatter()
-                mub = ', '.join(pf(m) for m in maybe_unbound)
-                msg = f'The following variables are unbound along some paths. This is unsupported ' \
-                      f'to avoid tracking or ignoring UnboundLocal errors at runtime: "{mub}".'
-                raise CompilerError(msg)
-        func = loop_lowering.visit(func)
-        func = patch_return(func, func_symbols)
+        tracker = DeclTracker()
+        with tracker.scope():
+            for arg in func.args:
+                tracker.declare(arg)
+            check_all_declared(func.body, tracker)
+        func.body = remove_unreachable(func.body)
+        func = remove_dead(func, func_symbols)
         func = optimize_statements(func, func_symbols)
         TypeInference(func_symbols).visit(func)
-        # func = run_func_local_opts(func, func_symbols)
-        strip_dead_symbols(func, func_symbols)
+        func = loop_lowering.visit(func)
+        func = remove_dead(func, func_symbols)
+        func = patch_return(func, func_symbols)
 
         if print_result:
             from pretty_printing import PrettyPrinter

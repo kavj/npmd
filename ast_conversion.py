@@ -12,9 +12,11 @@ import ir
 
 from canonicalize import replace_call
 from errors import CompilerError
+from folding import fold_constants, simplify_arithmetic
 from pretty_printing import PrettyFormatter
 from symbol_table import symbol, SymbolTable
 from utils import unpack_iterated
+
 
 binary_op_strs = {ast.Add: "+",
                   ast.Sub: "-",
@@ -206,6 +208,7 @@ class ImportHandler(ast.NodeVisitor):
                     raise CompilerError(msg)
                 self.imports[ir.NameRef(import_alias)] = ir.NameRef(imported_name)
 
+
 class TreeBuilder(ast.NodeVisitor):
 
     def __init__(self):
@@ -291,17 +294,24 @@ class TreeBuilder(ast.NodeVisitor):
             cls = unary_ops.get(type(node.op))
             operand = self.visit(node.operand)
             expr = cls(operand)
+        expr = fold_constants(expr)
+        expr = simplify_arithmetic(expr)
         return expr
 
     def visit_BinOp(self, node: ast.BinOp) -> ir.BinOp:
         cls = binary_ops.get(type(node.op))
         left = self.visit(node.left)
         right = self.visit(node.right)
-        return cls(left, right)
+        expr = cls(left, right)
+        expr = fold_constants(expr)
+        expr = simplify_arithmetic(expr)
+        return expr
 
     def visit_BoolOp(self, node: ast.BoolOp) -> typing.Union[ir.CONSTANT, ir.AND, ir.OR]:
         cls = bool_ops.get(node.op)
         expr = cls(*(self.visit(v) for v in node.values))
+        expr = fold_constants(expr)
+        expr = simplify_arithmetic(expr)
         return expr
 
     def visit_Compare(self, node: ast.Compare) -> typing.Union[ir.BinOp, ir.AND, ir.CONSTANT]:
@@ -323,20 +333,38 @@ class TreeBuilder(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> typing.Union[ir.ValueRef, ir.NameRef, ir.Call]:
         if not isinstance(node.func, ast.Name):
-            raise CompilerError("Calls only supported on function names.")
-        func_name = ir.NameRef(node.func.id)
-        if node.keywords:
-            # Todo: add AST positional arguments, since these are available for expressions
-            #  at Python AST level
-            msg = "Keyword arguments are unsupported."
-            raise CompilerError(msg)
-        args = [func_name]
-        for arg in node.args:
-            args.append(self.visit(arg))
-        call_ = ir.Call(*args)
-        # Todo: need a way to identify array creation
-        repl = replace_call(call_)
-        return repl
+            raise CompilerError('Calls only supported on function names.')
+        if isinstance(node.func, ast.Name):
+            func_name = ir.NameRef(node.func.id)
+            if node.keywords:
+                # Todo: add AST positional arguments, since these are available for expressions
+                #  at Python AST level
+                msg = 'Keyword arguments are unsupported.'
+                raise CompilerError(msg)
+            args = [func_name]
+            for arg in node.args:
+                args.append(self.visit(arg))
+            call_ = ir.Call(*args)
+            # Todo: need a way to identify array creation
+            repl = replace_call(call_)
+            return repl
+        else:
+            no_match_msg = f'No matching supported signature for "{node}". ' \
+                           f'Non-default arguments not yet supported on reductions.'
+            arg = self.visit(node.func.value)
+            if not isinstance(node.func, ast.Attribute):
+                msg = f'Unsupported call "{node.func}". Only names and some attributes are supported as callable.'
+                raise CompilerError(msg)
+            elif len(node.keywords) or len(node.args):
+                raise CompilerError(no_match_msg)
+            if node.func.attr == 'min':
+                return ir.ARRAY_MIN(arg)
+            elif node.func.attr == 'max':
+                return ir.ARRAY_MAX(arg)
+            elif node.func.attr == 'sum':
+                return ir.ARRAY_SUM(arg)
+            else:
+                raise CompilerError(no_match_msg)
 
     def visit_IfExp(self, node: ast.IfExp) -> ir.ValueRef:
         predicate = self.visit(node.test)
@@ -352,7 +380,7 @@ class TreeBuilder(ast.NodeVisitor):
         if isinstance(target, ir.Subscript):
             # this could be done better with pretty printing
             formatted = self.formatter(value)
-            msg = f"Nested subscripts are not currently supported: {formatted}."
+            msg = f'Nested subscripts are not currently supported: "{formatted}".'
         return value
 
     def visit_Index(self, node: ast.Index) -> typing.Union[ir.ValueRef, ir.NameRef, ir.CONSTANT]:
@@ -367,8 +395,8 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_ExtSlice(self, node: ast.ExtSlice):
         # This is probably never going to be supported, because it requires inlining
         # a large number of calculations in ways that may sometimes hamper performance.
-        raise CompilerError("Extended slices are currently unsupported. This supports single"
-                            "slices per dimension")
+        raise CompilerError('Extended slices are currently unsupported. This supports single'
+                            'slices per dimension')
 
     def visit_AugAssign(self, node: ast.AugAssign):
         target = self.visit(node.target)
@@ -399,7 +427,7 @@ class TreeBuilder(ast.NodeVisitor):
             # Check if type is recognized by name
             type_ = self.symbols.type_by_name.get(annotation.name)
             if type_ is None:
-                msg = f"Ignoring unrecognized annotation: {annotation}, line: {pos.line_begin}"
+                msg = f'Ignoring unrecognized annotation: {annotation}, line: {pos.line_begin}'
                 warnings.warn(msg)
             else:
                 ir_type = self.symbols.get_ir_type(type_)
@@ -408,8 +436,8 @@ class TreeBuilder(ast.NodeVisitor):
                     existing_type = sym.type_
                     # This is an error, since it's an actual conflict.
                     if existing_type != ir_type:
-                        msg = f"IR type from type hint conflicts with existing " \
-                              f"(possibly inferred) type {existing_type}, line: {pos.line_begin}"
+                        msg = f'IR type from type hint conflicts with existing ' \
+                              f'(possibly inferred) type {existing_type}, line: {pos.line_begin}'
                         raise CompilerError(msg)
         if node.value is not None:
             # CPython will turn the syntax "var: annotation" into an AnnAssign node
@@ -438,7 +466,7 @@ class TreeBuilder(ast.NodeVisitor):
 
     def visit_For(self, node: ast.For):
         if node.orelse:
-            raise CompilerError("or else clause not supported for for statements")
+            raise CompilerError('or else clause not supported for for statements')
         iter_node = self.visit(node.iter)
         target_node = self.visit(node.target)
         assert iter_node is not None
@@ -454,19 +482,19 @@ class TreeBuilder(ast.NodeVisitor):
             for target, iterable in unpack_iterated(target_node, iter_node, include_enumerate_indices=True):
                 # check for some things that aren't currently supported
                 if isinstance(target, ir.Subscript):
-                    msg = f"Setting a subscript target in a for loop iterator is currently unsupported: line{pos.line_begin}."
+                    msg = f'Setting a subscript target in a for loop iterator is currently unsupported: line{pos.line_begin}.'
                     raise CompilerError(msg)
                 targets.add(target)
                 iterables.add(iterable)
         except ValueError:
             # Generator will throw an error on bad unpacking
-            msg = f"Cannot safely unpack for loop expression, line: {pos.line_begin}"
+            msg = f'Cannot safely unpack for loop expression, line: {pos.line_begin}'
             raise CompilerError(msg)
         conflicts = targets.intersection(iterables)
         if conflicts:
             conflict_names = ", ".join(c for c in conflicts)
-            msg = f"{conflict_names} appear in both the target an iterable sequences of a for loop, " \
-                  f"line {pos.line_begin}. This is not supported."
+            msg = f'{conflict_names} appear in both the target an iterable sequences of a for loop, ' \
+                  f'line {pos.line_begin}. This is not supported.'
             raise CompilerError(msg)
         with self.loop_region(node):
             for stmt in node.body:
@@ -476,7 +504,7 @@ class TreeBuilder(ast.NodeVisitor):
 
     def visit_While(self, node: ast.While):
         if node.orelse:
-            raise CompilerError("or else clause not supported for for statements")
+            raise CompilerError('or else clause not supported for for statements')
         test = self.visit(node.test)
         pos = extract_positional_info(node)
         with self.loop_region(node):
@@ -487,14 +515,14 @@ class TreeBuilder(ast.NodeVisitor):
 
     def visit_Break(self, node: ast.Break):
         if self.enclosing_loop is None:
-            raise CompilerError("Break encountered outside of loop.")
+            raise CompilerError('Break encountered outside of loop.')
         pos = extract_positional_info(node)
         stmt = ir.Break(pos)
         self.body.append(stmt)
 
     def visit_Continue(self, node: ast.Continue):
         if self.enclosing_loop is None:
-            raise CompilerError("Continue encountered outside of loop.")
+            raise CompilerError('Continue encountered outside of loop.')
         pos = extract_positional_info(node)
         stmt = ir.Continue(pos)
         self.body.append(stmt)
@@ -518,7 +546,7 @@ class TreeBuilder(ast.NodeVisitor):
         self.body.append(stmt)
 
     def generic_visit(self, node):
-        raise CompilerError(f"{type(node)} is unsupported")
+        raise CompilerError(f'{type(node)} is unsupported')
 
 
 def map_functions_by_name(node: ast.Module):
@@ -539,7 +567,7 @@ def populate_func_symbols(func_table, types, allow_inference=True, ignore_unboun
     # since we have basic type info here, later phases should be validating the argument
     # and type signatures used when calling imported functions
     if allow_inference and ignore_unbound:
-        msg = "Cannot allow type inference if unbound variable paths are allowed here."
+        msg = 'Cannot allow type inference if unbound variable paths are allowed here.'
         raise CompilerError(msg)
     func_name = func_table.get_name()
     symbols = {}
@@ -547,19 +575,19 @@ def populate_func_symbols(func_table, types, allow_inference=True, ignore_unboun
     for s in func_table.get_symbols():
         name = s.get_name()
         if s.is_imported():
-            msg = "Locally importing names within a function is not currently supported: " \
-                  f"Function: {func_name} , imports: {name}"
+            msg = 'Locally importing names within a function is not currently supported: ' \
+                  f'Function: {func_name} , imports: {name}'
             raise CompilerError(msg)
         is_arg = s.is_parameter()
         is_assigned = s.is_assigned()
         is_local = s.is_local()
         if is_assigned and not is_local:
-            msg = f"Assigning to global and non-local variables is unsupported: {name} in function {func_name}"
+            msg = f'Assigning to global and non-local variables is unsupported: {name} in function {func_name}'
             raise CompilerError(msg)
         elif is_local:
             if not (ignore_unbound or is_assigned or is_arg):
-                msg = f"Local variable {name} in function {func_name} is unassigned. " \
-                      f"This is automatically treated as an error."
+                msg = f'Local variable {name} in function {func_name} is unassigned. ' \
+                      f'This is automatically treated as an error.'
                 raise CompilerError(msg)
             type_ = types.get(name)
             if type_ is None:
@@ -575,10 +603,10 @@ def populate_func_symbols(func_table, types, allow_inference=True, ignore_unboun
         elif name in types:
             # if a type is given here but this is not local, raise an error
             if s.is_referenced():
-                msg = f"Typed name {name} does not match an assignment."
+                msg = f'Typed name {name} does not match an assignment.'
                 raise CompilerError(msg)
     if missing and not allow_inference:
-        msg = f"No type provided for local variable(s): '{', '.join(m for m in missing)}' in function '{func_name}'."
+        msg = f'No type provided for local variable(s): {missing}'
         raise CompilerError(msg)
     return SymbolTable(func_name, symbols)
 

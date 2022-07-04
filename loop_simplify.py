@@ -1,149 +1,54 @@
-import operator
-
-from analysis import find_unterminated_path
 from collections import defaultdict
 from functools import singledispatchmethod
-from typing import List
+from typing import List, Union
 
 import ir
 
+from analysis import is_terminated
 from errors import CompilerError
 from symbol_table import SymbolTable
+from type_checks import contains_stmt_types
 from utils import unpack_iterated
-from traversal import StmtTransformer
 
 
-def remove_trailing_continues(node: List[ir.StmtBase]) -> List[ir.StmtBase]:
-    """
-    Remove continues that are the last statement along some execution path within the current
-    enclosing loop.
+def remove_unreachable(body: List[ir.StmtBase]):
+    # first find trivial cases
+    repl = []
 
-    """
-
-    if len(node) > 0:
-        last = node[-1]
-        if isinstance(last, ir.IfElse):
-            if_branch = remove_trailing_continues(last.if_branch)
-            else_branch = remove_trailing_continues(last.else_branch)
-            if if_branch != last.if_branch or else_branch != last.else_branch:
-                last = ir.IfElse(last.test, if_branch, else_branch, last.pos)
-                # copy original
-                node = node[:-1]
-                node.append(last)
-        elif isinstance(last, ir.Continue):
-            node = node[:-1]
-    return node
-
-
-class NormalizePaths(StmtTransformer):
-    """
-    This pass tries to isolate divergent control flow and remove trivially unreachable statements.
-
-    """
-
-    def __init__(self):
-        self.innermost_loop = None
-        self.body = None
-
-    def __call__(self, node: ir.StmtBase):
-        repl = self.visit(node)
-        return repl
-
-    @singledispatchmethod
-    def visit(self, node):
-        return super().visit(node)
-
-    @visit.register
-    def _(self, node: ir.ForLoop):
-        body = self.visit(node.body)
-        body = remove_trailing_continues(body)
-        if body != node.body:
-            node = ir.ForLoop(node.target, node.iterable, body, node.pos)
-        return node
-
-    @visit.register
-    def _(self, node: ir.WhileLoop):
-        test = node.test
-        if test.constant:
-            if not operator.truth(test):
-                # return None if the loop body is unreachable.
-                return
-            body = self.visit(node.body)
-            body = remove_trailing_continues(body)
-            if body != node.body:
-                node = ir.WhileLoop(node.test, body, node.pos)
-        return node
-
-    @visit.register
-    def _(self, node: ir.IfElse):
-        if_branch = self.visit(node.if_branch)
-        else_branch = self.visit(node.else_branch)
-        if not (if_branch or else_branch):
-            return
-        node = ir.IfElse(node.test, if_branch, else_branch, node.pos)
-        return node
-
-    @visit.register
-    def _(self, node: list):
-        repl = []
-        append_to = repl
-        for stmt in node:
-            if isinstance(stmt, ir.IfElse):
-                if stmt.test.constant:
-                    live_branch = stmt.if_branch if operator.truth(stmt.test) else stmt.else_branch
-                    live_branch = self.visit(live_branch)
-                    extendable_path = find_unterminated_path(live_branch)
-                    append_to.extend(live_branch)
-                    if extendable_path is not live_branch:
-                        if extendable_path is None:
-                            break
-                        else:  # extendable path exists and is distinct from the inlined branch
-                            append_to = extendable_path
-                else:
-                    stmt = self.visit(stmt)
-                    if stmt is None:
-                        continue  # doesn't execute anything
-                    append_to.append(stmt)
-                    if_path = find_unterminated_path(stmt.if_branch)
-                    else_path = find_unterminated_path(stmt.else_branch)
-                    if if_path is None and else_path is None:
-                        break  # remaining statements are unreachable
-                    elif if_path is None:
-                        append_to = else_path
-                    elif else_path is None:
-                        append_to = if_path
-            else:
-                stmt = self.visit(stmt)
-                if stmt is not None:
-                    append_to.append(stmt)
-                    if isinstance(stmt, (ir.Break, ir.Continue, ir.Return)):
-                        break  # remaining statements are unreachable
-        return repl
+    for stmt in body:
+        if isinstance(stmt, ir.ForLoop):
+            loop_body = remove_unreachable(stmt.body)
+            # old code removed more aggressively, but this case is trivial
+            if loop_body and isinstance(loop_body[-1], ir.Continue):
+                loop_body.pop()
+            stmt = ir.ForLoop(stmt.target, stmt.iterable, loop_body, stmt.pos)
+        elif isinstance(stmt, ir.WhileLoop):
+            loop_body = remove_unreachable(stmt.body)
+            if loop_body and isinstance(loop_body[-1], ir.Continue):
+                loop_body.pop()
+            stmt = ir.WhileLoop(stmt.test, loop_body, stmt.pos)
+        elif isinstance(stmt, ir.IfElse):
+            if_branch = remove_unreachable(stmt.if_branch)
+            else_branch = remove_unreachable(stmt.else_branch)
+            stmt = ir.IfElse(stmt.test, if_branch, else_branch, stmt.pos)
+        repl.append(stmt)
+        if is_terminated(stmt):
+            break
+    return repl
 
 
-class IntervalBuilder:
-
-    @singledispatchmethod
-    def visit(self, iterable):
-        msg = f"No method to generate interval for {iterable} of type {type(iterable)}."
-        raise TypeError(msg)
-
-    @visit.register
-    def _(self, iterable: ir.AffineSeq):
-        return iterable.start, iterable.stop, iterable.step
-
-    @visit.register
-    def _(self, iterable: ir.NameRef):
-        return ir.Zero, ir.SingleDimRef(iterable, ir.Zero), ir.One
-
-    @visit.register
-    def _(self, iterable: ir.Subscript):
-        if isinstance(iterable.index, ir.Slice):
-            slice_ = iterable.index
+def get_iterator_access_pattern(node: Union[ir.AffineSeq, ir.NameRef, ir.Subscript]):
+    if isinstance(node, ir.AffineSeq):
+        return node.start, node.stop, node.step
+    elif isinstance(node, ir.NameRef):
+        return ir.Zero, ir.SingleDimRef(node, ir.Zero), ir.One
+    elif isinstance(node, ir.Subscript):
+        if isinstance(node.index, ir.Slice):
+            slice_ = node.index
             start = slice_.start
             if start is None:
                 start = ir.Zero
-            stop = ir.SingleDimRef(iterable.value, ir.Zero)
+            stop = ir.SingleDimRef(node.value, ir.Zero)
             if slice_.stop is not None:
                 stop = ir.MIN(stop, slice_.stop)
             step = slice_.step
@@ -151,9 +56,12 @@ class IntervalBuilder:
                 step = ir.One
         else:
             start = ir.Zero
-            stop = ir.SingleDimRef(iterable, ir.One)
+            stop = ir.SingleDimRef(node, ir.One)
             step = ir.One
         return start, stop, step
+    else:
+        msg = f"No method to generate interval for {node} of type {type(node)}."
+        raise TypeError(msg)
 
 
 def _compute_iter_count(diff: ir.ValueRef, step: ir.ValueRef):
@@ -236,6 +144,7 @@ def _find_shared_interval(intervals):
     return ir.Zero, counts, ir.One
 
 
+
 def make_single_index_loop(header: ir.ForLoop, symbols):
     """
 
@@ -257,9 +166,8 @@ def make_single_index_loop(header: ir.ForLoop, symbols):
 
     by_iterable = {}
     intervals = set()
-    interval_from_iterable = IntervalBuilder()
     for _, iterable in unpack_iterated(header.target, header.iterable):
-        interval = interval_from_iterable.visit(iterable)
+        interval = get_iterator_access_pattern(iterable)
         by_iterable[iterable] = interval
         intervals.add(interval)
 
@@ -300,14 +208,41 @@ def make_single_index_loop(header: ir.ForLoop, symbols):
     return repl
 
 
-class LoopLowering(StmtTransformer):
+class LoopLowering:
 
     def __init__(self, symbols: SymbolTable):
         self.symbols = symbols
 
     @singledispatchmethod
     def visit(self, node):
-        return super().visit(node)
+        msg = f'No method to lower node "{node}".'
+        raise TypeError(msg)
+
+    @visit.register
+    def _(self, node: ir.Function):
+        if not contains_stmt_types(node.body, (ir.ForLoop,)):
+            return node
+        body = self.visit(node.body)
+        return ir.Function(node.name, node.args, body)
+
+    @visit.register
+    def _(self, node: list):
+        return [self.visit(stmt) for stmt in node]
+
+    @visit.register
+    def _(self, node: ir.StmtBase):
+        return node
+
+    @visit.register
+    def _(self, node: ir.IfElse):
+        if_branch = self.visit(node.if_branch)
+        else_branch = self.visit(node.else_branch)
+        return ir.IfElse(node.test, if_branch, else_branch, node.pos)
+
+    @visit.register
+    def _(self, node: ir.WhileLoop):
+        body = self.visit(node.body)
+        return ir.WhileLoop(node.test, body, node.pos)
 
     @visit.register
     def _(self, node: ir.ForLoop):

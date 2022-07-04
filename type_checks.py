@@ -7,8 +7,7 @@ import ir
 
 from errors import CompilerError
 from symbol_table import SymbolTable
-from traversal import StmtVisitor, walk_parameters
-from utils import extract_name
+from utils import extract_name, unpack_iterated
 
 int_dtypes = {
     np.dtype('int8'),
@@ -125,21 +124,15 @@ def check_binop_dtype(left: np.dtype, right: np.dtype, op: ir.BinOp):
 
 
 class TypeHelper:
-    def __init__(self, syms: SymbolTable, default_prefix: Optional[str] = None):
+    def __init__(self, syms: SymbolTable, allow_none=False, default_prefix: Optional[str] = None):
         self.symbols = syms
+        self.allow_none = allow_none
         self.default_prefix = default_prefix if default_prefix is not None else "i"
-        self._cached = {}
 
     @singledispatchmethod
     def check_type(self, expr):
         msg = f"No method to check type for {expr}"
         raise NotImplementedError(msg)
-
-    def verify_no_nones(self, expr: ir.ValueRef):
-        for p in walk_parameters(expr):
-            if self.symbols.check_type(p) is None:
-                msg = f'Parameter "{p.name}" in expression "{expr}" has no declared type.'
-                raise CompilerError(msg)
 
     @check_type.register
     def _(self, expr: ir.ArrayInitializer):
@@ -149,11 +142,7 @@ class TypeHelper:
 
     @check_type.register
     def _(self, expr: ir.NameRef):
-        if expr in self._cached:
-            # don't use get here, as it won't catch invalid Nones
-            return self._cached[expr]
-        t = self.symbols.check_type(expr)
-        self._cached[expr] = t
+        t = self.symbols.check_type(expr, self.allow_none)
         return t
 
     @check_type.register
@@ -164,18 +153,15 @@ class TypeHelper:
     @check_type.register
     def _(self, expr: ir.CompareOp):
         # should validate..
-        self.verify_no_nones(expr)
         return ir.bool_type
 
     @check_type.register
     def _(self, expr: ir.BoolOp):
-        self.verify_no_nones(expr)
         return ir.bool_type
 
     @check_type.register
     def _(self, expr: ir.CAST):
         # cast nodes should have a make cas with more checking
-        self.verify_no_nones(expr)
         return expr.target_type
 
     @check_type.register
@@ -192,12 +178,11 @@ class TypeHelper:
 
     @check_type.register
     def _(self, expr: ir.BinOp):
-        self.verify_no_nones(expr)
-        if expr in self._cached:
-            return self._cached[expr]
         left, right = expr.subexprs
         left_type = self.check_type(left)
         right_type = self.check_type(right)
+        if left_type is None or right_type is None:
+            return
         left_is_array = isinstance(left_type, ir.ArrayType)
         right_is_array = isinstance(right_type, ir.ArrayType)
         if left_is_array and right_is_array:
@@ -213,23 +198,23 @@ class TypeHelper:
             result_type = ir.ArrayType(right_type.ndims, result_dtype)
         else:
             result_type = check_binop_dtype(left_type, right_type, expr)
-        self._cached[expr] = result_type
         return result_type
 
     @check_type.register
     def _(self, expr: ir.Subscript):
-        self.verify_no_nones(expr)
-        if expr in self._cached:
-            return self._cached[expr]
         value, index = expr.subexprs
         value_type = self.check_type(value)
+        if value_type is None:
+            return
         if not isinstance(value_type, ir.ArrayType):
             msg = f"Cannot subscript non-array type {value_type}."
             raise CompilerError(msg)
         if isinstance(index, ir.TUPLE):
             # check that all integer types
             subtypes = [self.check_type(subexpr) for subexpr in index.subexprs]
-            if any(t not in (np.int32, np.int64) for t in subtypes):
+            if None in subtypes:
+                return
+            elif any(t not in (np.int32, np.int64) for t in subtypes):
                 msg = f"Non integer indices, types: {subtypes}."
                 raise CompilerError(msg)
             # now check sizing..
@@ -237,60 +222,38 @@ class TypeHelper:
         else:
             ndims_removed = 1
             subtype = self.check_type(index)
-            if subtype not in (np.int32, np.int64):
+            if subtype is None:
+                return
+            elif subtype not in (np.int32, np.int64):
                 msg = f"Non integer index, type: {subtype}."
                 raise CompilerError(msg)
         if value_type.ndims < ndims_removed:
             msg = f"Over subscripted array {expr}."
             raise CompilerError(msg)
         if ndims_removed == value_type.ndims:
-            self._cached[expr] = value_type.dtype
             return value_type.dtype
         else:
             arrtype = ir.ArrayType(ndims=value_type.ndims - ndims_removed, dtype=value_type.dtype)
-            self._cached[expr] = arrtype
             return arrtype
 
     @check_type.register
     def _(self, expr: ir.UnaryOp):
-        self.verify_no_nones(expr)
-        if expr in self._cached:
-            return self._cached[expr]
         t = self.check_type(expr.operand)
-        self._cached[expr] = t
         return t
 
     def check_dtype(self, expr: ir.ValueRef):
-        self.verify_no_nones(expr)
         t = self.check_type(expr)
         if isinstance(t, ir.ArrayType):
             t = t.dtype
         return t
 
-    @singledispatchmethod
-    def is_predicate(self, expr):
-        raise NotImplementedError
+    def is_array(self, node: ir.ValueRef):
+        t = self.check_type(node)
+        return isinstance(t, ir.ArrayType)
 
-    @is_predicate.register
-    def _(self, expr: ir.NameRef):
-        return self.check_dtype(expr) == ir.bool_type
-
-    @is_predicate.register
-    def _(self, expr: ir.CONSTANT):
-        return expr.dtype == ir.bool_type
-
-    @is_predicate.register
-    def _(self, expr: ir.Subscript):
-        # this is not a predicate if it's predicated, only if its dtype matches
-        return self.is_predicate(expr.value)
-
-    @is_predicate.register
-    def _(self, expr: ir.CompareOp):
-        return True
-
-    @is_predicate.register
-    def _(self, expr: ir.BoolOp):
-        return True
+    def is_scalar(self, node: ir.ValueRef):
+        t = self.check_type(node)
+        return isinstance(t, np.dtype)
 
     def declare_typed(self, type_, prefix: Optional[str] = None):
         if prefix is None:
@@ -314,7 +277,7 @@ class TypeHelper:
         return s
 
 
-class TypeInference(StmtVisitor):
+class TypeInference:
     """
     This differs from type helper, in that it actively assigns a type. It does this by checking
     inferred expression and trying to bind to that, then raising an error on conflict. Conflicts
@@ -327,7 +290,25 @@ class TypeInference(StmtVisitor):
 
     @singledispatchmethod
     def visit(self, node):
-        super().visit(node)
+        msg = f'No type inference method for node "{node}".'
+        raise TypeError(msg)
+
+    @visit.register
+    def _(self, node: ir.Function):
+        for arg in node.args:
+            if self.symbols.check_type(arg) is None:
+                msg = f'Missing argument type for "{arg}".'
+                raise CompilerError(msg)
+        self.visit(node.body)
+
+    @visit.register
+    def _(self, node: list):
+        for stmt in node:
+            self.visit(stmt)
+
+    @visit.register
+    def _(self, node: ir.StmtBase):
+        pass
 
     @visit.register
     def _(self, node: ir.Assign):
@@ -338,9 +319,32 @@ class TypeInference(StmtVisitor):
                 self.symbols.bind_type(node.target, t)
 
     @visit.register
+    def _(self, node: ir.IfElse):
+        self.visit(node.if_branch)
+        self.visit(node.else_branch)
+
+    @visit.register
+    def _(self, node: ir.WhileLoop):
+        self.visit(node.body)
+
+    @visit.register
     def _(self, node: ir.ForLoop):
-        assert isinstance(node.iterable, ir.AffineSeq)
-        assert isinstance(node.target, ir.NameRef)
-        t = self.typer.check_type(node.iterable)
-        self.symbols.bind_type(node.target, t)
+        for target, iterable in unpack_iterated(node.target, node.iterable):
+            assert isinstance(target, ir.NameRef)
+            target_sym = self.symbols.lookup(target)
+            if target_sym.type_ is None or target_sym.type_is_inferred:
+                if isinstance(iterable, ir.AffineSeq):
+                    self.symbols.bind_type(target, np.dtype("int32"))
+                else:
+                    iterable_type = self.typer.check_type(iterable)
+                    if isinstance(iterable_type, ir.ArrayType):
+                        ndims = iterable_type.ndims - 1
+                        dtype = iterable_type.dtype
+                        if ndims != 0:
+                            t = ir.ArrayType(ndims, dtype)
+                        else:
+                            t = dtype
+                        self.symbols.bind_type(target, t)
+                    else:
+                        raise CompilerError("bad type for iterable")
         self.visit(node.body)

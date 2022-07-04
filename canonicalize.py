@@ -1,6 +1,6 @@
 import ir
 
-from analysis import AllPathsReturn
+from analysis import check_all_paths_return
 from errors import CompilerError
 from pretty_printing import PrettyFormatter
 from symbol_table import SymbolTable
@@ -11,11 +11,11 @@ from utils import extract_name
 def replace_call(node: ir.Call):
     func_name = extract_name(node)
     if func_name == "numpy.ones":
-        node = ir.Ones(*node.args)
+        node = ir.ArrayInitializer(*node.args, ir.One)
     elif func_name == "numpy.zeros":
-        node = ir.Zeros(*node.args)
+        node = ir.ArrayInitializer(*node.args, ir.Zero)
     elif func_name == "numpy.empty":
-        node = ir.Empty(*node.args)
+        node = ir.ArrayInitializer(*node.args, ir.NoneRef)
     elif func_name == "zip":
         node = ir.Zip(*node.args)
     elif func_name == "enumerate":
@@ -40,8 +40,7 @@ def replace_call(node: ir.Call):
 
 
 def patch_return(node: ir.Function, symbols: SymbolTable):
-    return_checker = AllPathsReturn()
-    always_terminated = return_checker(node)
+    always_terminated = check_all_paths_return(node.body)
     if not always_terminated:
         return_type = check_return_type(node, symbols)
         if isinstance(return_type, ir.NoneRef):

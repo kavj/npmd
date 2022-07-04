@@ -315,13 +315,14 @@ class PrettyPrinter:
 
     """
 
-    def __init__(self, single_indent="    ", print_annotations=True):
+    def __init__(self, single_indent="    ", print_annotations=True, allow_missing_type=True):
         self.indent = ""
         self._increment = len(single_indent)
         self._single_indent = single_indent
         self.print_annotations = print_annotations
         self.format = PrettyFormatter()
         self.symbols = None
+        self.allow_missing_type = allow_missing_type
 
     def __call__(self, tree, symbols):
         assert self.indent == ""
@@ -450,7 +451,7 @@ class PrettyPrinter:
         formatted_target = self.format(node.target)
         formatted_value = self.format(node.value)
         if self.print_annotations and isinstance(target, ir.NameRef):
-            type_ = self.symbols.check_type(target)
+            type_ = self.symbols.check_type(target, allow_none=self.allow_missing_type)
             if type_ is not None:
                 # This is None if no typed symbol is registered
                 # This will be an error later.

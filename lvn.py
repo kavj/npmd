@@ -1,7 +1,8 @@
 import itertools
+
 from collections import Counter, defaultdict
-from functools import partial, singledispatch, singledispatchmethod
-from typing import Callable, Dict, Iterable, List, Set, Union
+from functools import singledispatchmethod
+from typing import List, Set, Union
 
 import ir
 
@@ -9,18 +10,17 @@ from analysis import find_ephemeral_references
 from symbol_table import SymbolTable
 from type_checks import TypeHelper
 from utils import is_entry_point, unpack_iterated
-from traversal import depth_first_sequence_statements, sequence_block_intervals, walk_parameters, StmtVisitor, \
-     BlockRewriter
+from traversal import depth_first_sequence_blocks, walk_parameters, BlockRewriter
 
 
-def get_assign_counts(node: Iterable[ir.StmtBase]):
+def get_assign_counts(node: List[ir.StmtBase]):
     """
     This ignores in place assignments, should run after expansion
     :param node:
     :return:
     """
     counts = Counter()
-    for stmt in depth_first_sequence_statements(node):
+    for stmt in itertools.chain(*depth_first_sequence_blocks(node)):
         if isinstance(stmt, ir.Assign):
             counts[stmt.target] += 1
         elif isinstance(stmt, ir.ForLoop):
@@ -29,19 +29,11 @@ def get_assign_counts(node: Iterable[ir.StmtBase]):
     return counts
 
 
-def get_block_assign_counts(block: Iterable[ir.StmtBase]):
-    counts = Counter()
-    for stmt in block:
-        if isinstance(stmt, ir.Assign):
-            counts[stmt.target] += 1
-    return counts
-
-
-def get_uniquely_assigned(node: Iterable[ir.StmtBase]):
+def get_uniquely_assigned(node: List[ir.StmtBase]):
     return {name for (name, count) in get_assign_counts(node).items() if count == 1}
 
 
-def strip_dead_symbols(node: ir.Function, symbols: SymbolTable):
+def drop_unused_symbols(node: ir.Function, symbols: SymbolTable):
     """
     Purges any dead symbols from the symbol table. This is useful to remove non-ephemeral variables
     that are simply unused, so that they are not declared.
@@ -52,14 +44,14 @@ def strip_dead_symbols(node: ir.Function, symbols: SymbolTable):
     counts = get_assign_counts(node.body)
     live_names = set(k.name for k in counts.keys() if isinstance(k, ir.NameRef))
     dead_names = set()
-    for sym in symbols.all_locals:
-        if not (sym.is_arg or sym.name in live_names):
+    for sym in symbols.symbols.values():
+        if sym.is_local and not (sym.is_arg or sym.name in live_names):
             dead_names.add(sym.name)
     for name in dead_names:
         symbols.drop_symbol(name)
 
 
-def get_last_assign_to_name(block: Iterable[ir.StmtBase]):
+def get_last_assign_to_name(block: List[ir.StmtBase]):
     last_assign = {}
     # since this can be done via a generator, we need to reverse prior to this point
     for stmt in block:
@@ -159,73 +151,45 @@ class LiveStatementMarker:
             self.mark_live(node.value)
 
 
-def dead_assign_elim(ephemeral: Set[ir.NameRef], block: List[ir.StmtBase]):
-    """
-    Checks for assignments to control block scoped variables that are not used in any statement other than
-    a self reference.
-    :param ephemeral:
-    :param block:
-    :return:
-    """
-    if not isinstance(block, list):
+def find_last_assign(block: List[ir.StmtBase]):
+    last_assign = {}
+    for stmt in reversed(block):
+        if isinstance(stmt, ir.Assign) and isinstance(stmt.target, ir.NameRef):
+            if stmt.target not in last_assign:
+                last_assign[stmt.target] = stmt
+    return last_assign
+
+
+class AssignExpander(BlockRewriter):
+    def __init__(self, symbols: SymbolTable):
+        self.symbols = symbols
+
+    def visit_block(self, block: List[ir.StmtBase]):
+        """
+        Expand in place assignments without requiring explicit type information.
+        :param block:
+        :return:
+        """
+        repl = []
         block = list(block)
+        typer = TypeHelper(self.symbols)
 
-    if is_entry_point(block[0]):
-        return block
-
-    marker = LiveStatementMarker()
-    for stmt in block:
-        marker.mark(stmt)
-
-    # mark anything that could escape as live
-    marker.mark_potential_live_outs(ephemeral)
-
-    # Now rewrite the block
-    repl = []
-
-    for stmt in block:
-        if isinstance(stmt, (ir.Assign, ir.InPlaceOp)):
-            if stmt in marker.live:
-                repl.append(stmt)
-        else:
+        # we don't have to rely on determinations of what is ephemeral
+        # if we know what augments a newly allocated handle
+        clobbered = set()
+        for stmt in block:
+            if isinstance(stmt, ir.InPlaceOp):
+                if isinstance(stmt.target, ir.NameRef):
+                    if stmt.target in clobbered:
+                        stmt = ir.Assign(stmt.target, stmt.value, stmt.pos)
+                else:
+                    if typer.is_scalar(stmt.target):
+                        stmt = ir.Assign(stmt.target, stmt.value, stmt.pos)
+            elif isinstance(stmt, ir.Assign):
+                if isinstance(stmt.target, ir.NameRef):
+                    clobbered.add(stmt.target)
             repl.append(stmt)
-
-    return repl
-
-
-def run_func_local_opts(node: ir.Function, symbols: SymbolTable):
-    # do this before checking ephemeral references, since it may reveal more
-    node = ExpandAssigns(symbols).visit(node)
-    node = NameLocalizer.localize_names(node, symbols)
-    ephemeral_refs = find_ephemeral_references(node.body, symbols)
-    ephemeral_refs.difference_update(node.args)
-    # have to handle sequencing manually here for context
-    body = run_local_opts(node.body, symbols, ephemeral_refs)
-    return ir.Function(node.name, node.args, body)
-
-
-def expand_assigns(block: Iterable[ir.StmtBase]):
-    """
-    Expand in place assignments without requiring explicit type information.
-    :param block:
-    :return:
-    """
-    repl = []
-    block = list(block)
-
-    # we don't have to rely on determinations of what is ephemeral
-    # if we know what augments a newly allocated handle
-    clobbered = set()
-    for stmt in block:
-        if isinstance(stmt, ir.InPlaceOp):
-            if isinstance(stmt.target, ir.NameRef):
-                if stmt.target in clobbered:
-                    stmt = ir.Assign(stmt.target, stmt.value, stmt.pos)
-        elif isinstance(stmt, ir.Assign):
-            if isinstance(stmt.target, ir.NameRef):
-                clobbered.add(stmt.target)
-        repl.append(stmt)
-    return repl
+        return repl
 
 
 class ExprRewriter:
@@ -248,53 +212,102 @@ class ExprRewriter:
         return self.current.get(node, node)
 
     def rename_target(self, target: ir.NameRef):
-        assert isinstance(node.target, ir.NameRef)
-        t = self.symbols.check_type(node.target)
-        target = self.symbols.make_unique_name_like(target, t)
-        self.current[stmt.target] = target
-        return target
+        assert isinstance(target, ir.NameRef)
+        t = self.symbols.check_type(target, allow_none=True)
+        renamed = self.symbols.make_unique_name_like(target, t)
+        self.current[target] = renamed
+        return renamed
 
 
-def rename_intermediate(symbols: SymbolTable, always_rename: Set[ir.NameRef], block: Iterable[ir.StmtBase]):
-    """
-    Renames clobbering assignments to cases where the variable name is ephemeral with more than one global assignment
-    as determined by always_rename.
+class Renamer(BlockRewriter):
+    def __init__(self, symbols: SymbolTable, rename_targets: Set[ir.NameRef]):
+        self.symbols = symbols
+        self.rename_targets = rename_targets
 
-    :param symbols:
-    :param always_rename:
-    :param block:
-    :return:
-    """
-    block = list(block)
-    counts = get_block_assign_counts(block)
-    curr_assign_index = Counter()
-    rewriter = ExprRewriter(symbols)
-    repl = []
-    for stmt in block:
-        if isinstance(stmt, ir.Assign):
-            value = rewriter.rewrite_expr(stmt.value)
-            target = stmt.target
-            if isinstance(target, ir.NameRef):
-                curr_assign_index[target] += 1
-                index = curr_assign_index[target]
-                if index < counts[target] or target in always_rename:
-                    target = rewriter.rename_target(target)
-            else:
-                target = rewriter.rewrite_expr(target)
-            stmt = ir.Assign(target, value, stmt.pos)
-        elif isinstance(stmt, ir.InPlaceOp):
-            value = rewriter.rewrite_expr(stmt.value)
-            target = rewriter.rewrite_expr(stmt.target)
-            stmt = ir.InPlaceOp(target, value, stmt.pos)
-        elif isinstance(stmt, ir.Return):
-            if stmt.value is not None:
+    def visit_block(self, block: List[ir.StmtBase]):
+        """
+        Renames clobbering assignments. This is mainly intended for localizing ephemeral names.
+
+        :param block:stmt = ir.Assign(stmt.target, stmt.value, stmt.pos)
+        :return:
+        """
+        block = list(block)
+        if not block:
+            return block
+
+        rewriter = ExprRewriter(self.symbols)
+        repl = []
+
+        for stmt in block:
+            if isinstance(stmt, ir.Assign):
                 value = rewriter.rewrite_expr(stmt.value)
-                stmt = ir.Return(value, stmt.pos)
-        elif isinstance(stmt, ir.SingleExpr):
-            value = rewriter.rewrite_expr(stmt.value)
-            stmt = ir.SingleExpr(value, stmt.pos)
-        repl.append(stmt)
-    return repl
+                target = stmt.target
+                if target in self.rename_targets:
+                    target = rewriter.rename_target(target)
+                else:
+                    target = rewriter.rewrite_expr(target)
+                stmt = ir.Assign(target, value, stmt.pos)
+            elif isinstance(stmt, ir.InPlaceOp):
+                value = rewriter.rewrite_expr(stmt.value)
+                target = rewriter.rewrite_expr(stmt.target)
+                stmt = ir.InPlaceOp(target, value, stmt.pos)
+            elif isinstance(stmt, ir.Return):
+                if stmt.value is not None:
+                    value = rewriter.rewrite_expr(stmt.value)
+                    stmt = ir.Return(value, stmt.pos)
+            elif isinstance(stmt, ir.SingleExpr):
+                value = rewriter.rewrite_expr(stmt.value)
+                stmt = ir.SingleExpr(value, stmt.pos)
+            repl.append(stmt)
+        return repl
+
+
+class DeadAssignElim(BlockRewriter):
+
+    def __init__(self,  ephemeral: Set[ir.NameRef]):
+        self.ephemeral = ephemeral
+
+    def visit_block(self, block: List[ir.StmtBase]):
+        """
+        Checks for assignments to control block scoped variables that are not used in any statement other than
+        a self reference.
+        :param block:
+        :return:
+        """
+
+        if is_entry_point(block[0]):
+            return block
+
+        marker = LiveStatementMarker()
+        for stmt in block:
+            marker.mark(stmt)
+
+        # mark anything that could escape as live
+        marker.mark_potential_live_outs(self.ephemeral)
+
+        # Now rewrite the block
+        repl = []
+
+        for stmt in block:
+            if isinstance(stmt, (ir.Assign, ir.InPlaceOp)):
+                if stmt in marker.live:
+                    repl.append(stmt)
+            else:
+                repl.append(stmt)
+
+        return repl
+
+
+def remove_dead(node: ir.Function, symbols: SymbolTable):
+    # now remove any dead assignments
+    ephemeral = find_ephemeral_references(node.body, symbols)
+    ephemeral.difference_update(node.args)
+    # remove any unreferenced assignments
+    dce = DeadAssignElim(ephemeral)
+    body = dce.visit(node.body)
+    func = ir.Function(node.name, node.args, body)
+    drop_unused_symbols(func, symbols)
+    return func
 
 
 def optimize_statements(node: ir.Function, symbols: SymbolTable):
@@ -305,21 +318,19 @@ def optimize_statements(node: ir.Function, symbols: SymbolTable):
     :return:
     """
     # first expand in place assignments where possible
-    assign_expander = BlockRewriter(expand_assigns)
+    assign_expander = AssignExpander(symbols)
     body = assign_expander.visit(node.body)
     # now remove any dead assignments
     ephemeral = find_ephemeral_references(body, symbols)
     ephemeral.difference_update(node.args)
     # remove any unreferenced assignments
-    dce = BlockRewriter(partial(dead_assign_elim, ephemeral))
+    dce = DeadAssignElim(ephemeral)
     body = dce.visit(body)
-    # rename intermediate references,
-    always_rename = find_ephemeral_references(body, symbols)
-    # We can ignore renamining of any references that are only assigned once
-    always_rename.difference_update(get_uniquely_assigned(body))
-    always_rename.difference_update(node.args)
-    block_renamer = partial(rename_intermediate, symbols, always_rename)
-    renamer = BlockRewriter(block_renamer)
-    body = renamer.visit(body)
+    #
+    rename_targets = find_ephemeral_references(body, symbols)
+    rename_targets.difference_update(get_uniquely_assigned(body))
+    rename_targets.difference_update(node.args)
+    block_renamer = Renamer(symbols, rename_targets)
+    body = block_renamer.visit(body)
 
     return ir.Function(node.name, node.args, body)

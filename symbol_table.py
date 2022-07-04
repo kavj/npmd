@@ -93,19 +93,19 @@ class SymbolTable:
     def from_source(self):
         for s in self.symbols.values():
             if s.is_source_name:
-                yield s
+                yield ir.NameRef(s.name)
 
     @property
     def source_locals(self):
         for sym in self.symbols.values():
             if sym.is_source_name and not sym.is_arg:
-                yield sym
+                yield ir.NameRef(sym.name)
 
     @property
     def all_locals(self):
         for sym in self.symbols.values():
             if sym.is_local:
-                yield sym
+                yield ir.NameRef(sym.name)
 
     @property
     def assigned_names(self):
@@ -117,7 +117,7 @@ class SymbolTable:
     def arguments(self):
         for sym in self.symbols.values():
             if sym.is_arg:
-                yield sym
+                yield ir.NameRef(sym.name)
 
     def bind_type(self, name: ir.NameRef, t):
         existing_sym = self.symbols[name.name]
@@ -153,10 +153,10 @@ class SymbolTable:
         sym = self.symbols[name]
         return sym.is_arg
 
-    def check_type(self, name):
+    def check_type(self, name, allow_none=False):
         name = extract_name(name)
         t = self.symbols[name].type_
-        if t is None:
+        if t is None and not allow_none:
             msg = f"No type declared for symbol '{name}' in namespace '{str(self.namespace)}'."
             raise CompilerError(msg)
         return t
@@ -181,10 +181,7 @@ class SymbolTable:
         This is used to add a unique typed temporary variable name.
         """
         prefix_ = extract_name(name)
-        if type_ is None:
-            msg = f'Failed to retrieve a type for name {prefix_}.'
-            raise CompilerError(msg)
-        elif not is_allowed_identifier(prefix_):
+        if not is_allowed_identifier(prefix_):
             msg = f'Cannot form name from disallowed prefix "{prefix_}"'
             raise CompilerError(msg)
         gen = self._get_name_mangler(prefix_)
