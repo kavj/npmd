@@ -3,16 +3,15 @@ import numpy as np
 
 from collections import defaultdict, Counter
 from contextlib import contextmanager
-from functools import singledispatch, singledispatchmethod
-from typing import List, Optional, Set
+from typing import Iterable, List, Optional
 
 import ir
 
 from errors import CompilerError
 from symbol_table import SymbolTable
-from type_checks import contains_stmt_types, TypeHelper
+from type_checks import TypeHelper
 from utils import is_entry_point, unpack_iterated
-from traversal import depth_first_sequence_blocks, walk_parameters
+from traversal import walk_parameters
 
 # Todo: stub
 specialized = {ir.NameRef("print")}
@@ -46,7 +45,11 @@ class DeclTracker:
     def is_undeclared(self, node: ir.NameRef):
         return not any(node in d for d in reversed(self.declared))
 
-    def check_undeclared(self, expr: ir.ValueRef, current_line):
+    def find_undeclared(self, expr: ir.ValueRef):
+        # collects rather than raising
+        return {p for p in walk_parameters(expr) if isinstance(p, ir.NameRef) and self.is_undeclared(p)}
+
+    def check_undeclared(self, expr: ir.ValueRef, current_line: ir.Position):
         for param in walk_parameters(expr):
             if self.is_undeclared(param):
                 msg = f'Possible unbound local "{param.name}" at line {current_line}.'
@@ -64,27 +67,6 @@ def count_clobbers(block: List[ir.StmtBase]):
                 clobbers[target] += 1
                 break
     return clobbers
-
-
-def count_assigning_blocks(node: List[ir.StmtBase]):
-    """
-    This counts the number of blocks that bind a particular name.
-    Anything with exactly one assigning block that does not appear in arguments can be declared
-    wherever it's first assigned.
-    :param node:
-    :return:
-    """
-
-    seen = set()
-    counts = Counter()
-    for block in depth_first_sequence_blocks(node):
-        for stmt in block:
-            if isinstance(stmt, ir.Assign) and isinstance(stmt.target, ir.NameRef):
-                seen.add(stmt.target)
-        for name in seen:
-            counts[name] += 1
-        seen.clear()
-    return counts
 
 
 def has_nan(node: ir.Expression):
@@ -109,40 +91,6 @@ def get_possible_aliasing(stmts: List[ir.StmtBase], symbols: SymbolTable):
                     aliasing[stmt.target].add(stmt.value)
                     aliasing[stmt.value].add(stmt.target)
     return aliasing
-
-
-@singledispatch
-def is_terminated(node):
-    raise TypeError
-
-
-@is_terminated.register
-def _(node: ir.StmtBase):
-    return isinstance(node, (ir.Break, ir.Continue, ir.Return))
-
-
-@is_terminated.register
-def _(node: ir.IfElse):
-    return is_terminated(node.if_branch) and is_terminated(node.else_branch)
-
-
-@is_terminated.register
-def _(node: ir.WhileLoop):
-    if not isinstance(node.test, ir.CONSTANT):
-        return False
-    if node.test.value:
-        return contains_stmt_types(node.body, (ir.Break,))
-
-
-@is_terminated.register
-def _(body: list):
-    for stmt in reversed(body):
-        if isinstance(stmt, (ir.Break, ir.Continue, ir.Return)):
-            return True
-        elif isinstance(stmt, (ir.IfElse, ir.WhileLoop)):
-            if is_terminated(stmt):
-                return True
-    return False
 
 
 def check_all_declared(block: List[ir.StmtBase], tracker: Optional[DeclTracker] = None):
@@ -182,19 +130,7 @@ def check_all_declared(block: List[ir.StmtBase], tracker: Optional[DeclTracker] 
             tracker.check_undeclared(stmt.value, current_line)
 
 
-def check_all_paths_return(stmts: List[ir.StmtBase]):
-    for stmt in stmts:
-        if isinstance(stmt, ir.Return):
-            return True
-        elif isinstance(stmt, ir.IfElse):
-            if check_all_paths_return(stmt.if_branch) and check_all_paths_return(stmt.else_branch):
-                return True
-        if isinstance(stmt, ir.WhileLoop) and is_terminated(stmt):
-            return True
-    return False
-
-
-def compute_element_count(start: ir.ValueRef, stop: ir.ValueRef, step: ir.ValueRef, typer: TypeHelper):
+def compute_element_count(start: ir.ValueRef, stop: ir.ValueRef, step: ir.ValueRef):
     """
     Single method to compute the number of elements for an iterable expression.
 
@@ -233,7 +169,7 @@ def find_array_length_expression(node: ir.ValueRef, typer: TypeHelper) -> Option
             else:
                 stop = ir.MIN(index.stop, ir.SingleDimRef(node.value, dim=ir.Zero))
             step = index.step
-            return compute_element_count(start, stop, step, typer)
+            return compute_element_count(start, stop, step)
         else:
             # first dim removed
             return ir.SingleDimRef(node.value, dim=ir.One)
@@ -242,57 +178,56 @@ def find_array_length_expression(node: ir.ValueRef, typer: TypeHelper) -> Option
     # other cases handled by analyzing sub-expressions and broadcasting constraints
 
 
-def get_read_first(stmt: ir.StmtBase, clobbers: Set[ir.NameRef]):
-    if isinstance(stmt, (ir.Assign, ir.InPlaceOp)):
-        # Todo: need some other checks for unsupported tuple patterns
-        for name in walk_parameters(stmt.value):
-            if name not in clobbers:
-                yield name
-        if isinstance(stmt, ir.Assign):
-            if isinstance(stmt.target, ir.NameRef):
-                clobbers.add(stmt.target)
-            else:
-                # ensure supported target
-                assert isinstance(stmt.target, ir.Subscript)
-                for name in walk_parameters(stmt.target):
-                    if name not in clobbers:
-                        yield name
-    elif is_entry_point(stmt):
-        # single statement blocks
-        if isinstance(stmt, (ir.IfElse, ir.WhileLoop)):
-            yield from walk_parameters(stmt.test)
-        else:
-            assert isinstance(stmt, ir.ForLoop)
-            yield from walk_parameters(stmt.iterable)
-    elif isinstance(stmt, (ir.SingleExpr, ir.Return)):
-        if stmt.value is not None:
-            yield from walk_parameters(stmt.value)
-
-
-def get_read_first_in_block(stmts: List[ir.StmtBase]):
+def get_read_and_assigned(stmts: Iterable[ir.StmtBase]):
     uevs = set()
-    clobbers = set()
+    assigned = set()
+    referenced = set()
     for stmt in stmts:
-        uevs.update(get_read_first(stmt, clobbers))
-    return uevs
+        if isinstance(stmt, (ir.Assign, ir.InPlaceOp)):
+            for name in walk_parameters(stmt.value):
+                if name not in assigned:
+                    uevs.add(name)
+                referenced.add(name)
+            if isinstance(stmt, ir.Assign):
+                if isinstance(stmt.target, ir.NameRef):
+                    assigned.add(stmt.target)
+                else:
+                    # ensure supported target
+                    assert isinstance(stmt.target, ir.Subscript)
+                    for name in walk_parameters(stmt.target):
+                        if name not in assigned:
+                            uevs.add(name)
+                        referenced.add(name)
+        elif isinstance(stmt, (ir.SingleExpr, ir.Return)):
+            for name in walk_parameters(stmt.value):
+                if name not in assigned:
+                    uevs.add(name)
+                referenced.add(name)
+        elif is_entry_point(stmt):
+            # single statement blocks
+            if isinstance(stmt, (ir.IfElse, ir.WhileLoop)):
+                for name in walk_parameters(stmt.test):
+                    if name not in assigned:
+                        uevs.add(name)
+                    referenced.add(name)
+            else:
+                assert isinstance(stmt, ir.ForLoop)
+                for target, value in unpack_iterated(stmt.target, stmt.iterable):
+                    for p in walk_parameters(value):
+                        if p not in assigned:
+                            uevs.add(p)
+                        referenced.add(p)
+                    if isinstance(target, ir.NameRef):
+                        assigned.add(target)
+                    else:
+                        for p in walk_parameters(target):
+                            if p not in assigned:
+                                uevs.add(p)
+                            referenced.add(p)
+    return assigned, referenced, uevs
 
 
-def find_ephemeral_references(node: List[ir.StmtBase], symbols: SymbolTable) -> Set[ir.NameRef]:
-    """
-    Ephemeral targets are variables that whose assignments can all be localized. This is always decidable in cases
-    where a variable is always always bound within a block prior to its first use.
-
-    This looks for ephemeral target references. We consider a reference decidedly ephemeral if it is bound
-    first in any block where it is read.
-    :return:
-    """
-    uevs = set()
-    for block in depth_first_sequence_blocks(node):
-        uevs.update(get_read_first_in_block(block))
-    # remove anything is explictly bound and remove everything that
-    # is read first in any block.
-    bound = set(symbols.assigned_names)
-    bound.difference_update(uevs)
-    bound.difference_update(symbols.arguments)
-
-    return bound
+def get_names(node: Iterable[ir.StmtBase]):
+    assigned, referenced, _ = get_read_and_assigned(node)
+    referenced.update(assigned)
+    return referenced

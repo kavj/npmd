@@ -26,7 +26,7 @@ class Broadcast(ir.Expression):
     """
     broadcast of some scalar. This
     """
-    value: Union[ir.NameRef, ir.Constant]
+    value: Union[ir.NameRef, ir.CONSTANT]
 
 
 @dataclass(frozen=True)

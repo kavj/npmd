@@ -1,4 +1,5 @@
 def both_term(a, b, c, d, e, f, n):
+    g = 0
     if a > b:
         for k in c:
             print(k)
@@ -11,9 +12,9 @@ def both_term(a, b, c, d, e, f, n):
                 for m in n:
                     print(m)
                 break
-            for m in n:
+            for p in n:
                 print("should not appear")
-        return
+        return g
     else:
         g = 0
         for e in f:

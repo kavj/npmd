@@ -381,6 +381,7 @@ class TreeBuilder(ast.NodeVisitor):
             # this could be done better with pretty printing
             formatted = self.formatter(value)
             msg = f'Nested subscripts are not currently supported: "{formatted}".'
+            raise CompilerError(msg)
         return value
 
     def visit_Index(self, node: ast.Index) -> typing.Union[ir.ValueRef, ir.NameRef, ir.CONSTANT]:

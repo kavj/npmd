@@ -1,10 +1,10 @@
+from typing import List
+
 import ir
 
-from analysis import check_all_paths_return
 from errors import CompilerError
 from pretty_printing import PrettyFormatter
-from symbol_table import SymbolTable
-from type_checks import check_return_type
+
 from utils import extract_name
 
 
@@ -15,7 +15,7 @@ def replace_call(node: ir.Call):
     elif func_name == "numpy.zeros":
         node = ir.ArrayInitializer(*node.args, ir.Zero)
     elif func_name == "numpy.empty":
-        node = ir.ArrayInitializer(*node.args, ir.NoneRef)
+        node = ir.ArrayInitializer(*node.args, ir.NoneRef())
     elif func_name == "zip":
         node = ir.Zip(*node.args)
     elif func_name == "enumerate":
@@ -39,24 +39,61 @@ def replace_call(node: ir.Call):
     return node
 
 
-def patch_return(node: ir.Function, symbols: SymbolTable):
-    always_terminated = check_all_paths_return(node.body)
-    if not always_terminated:
-        return_type = check_return_type(node, symbols)
-        if isinstance(return_type, ir.NoneRef):
-            if node.body:
-                last_pos = node.body[-1].pos
-                pos = ir.Position(last_pos.line_end + 1, last_pos.line_end + 2, col_begin=1, col_end=74)
+def flatten_branch(node: ir.IfElse):
+    """
+    :param node:
+    :return:
+    """
+
+    flattenable = []
+    branch = node
+
+    while len(branch.else_branch) == 1 and isinstance(branch.else_branch[0], ir.IfElse):
+        flattenable.append(branch)
+        branch = branch.else_branch[0]
+
+    if not flattenable:
+        return node
+
+    conditions = [b.test for b in flattenable]
+    conditions.append(branch.test)
+    if_branches = [b.if_branch for b in flattenable]
+    if_branches.append(branch.if_branch)
+    default_ = branch.else_branch
+    return ir.Case(conditions, if_branches, default_)
+
+
+def rewrite_branches(node: List[ir.StmtBase]):
+    """
+    Converts nested branches to cases.
+    :param node:
+    :return:
+    """
+    if isinstance(node, ir.Function):
+        body = rewrite_branches(node.body)
+        return ir.Function(node.name, node.args, body)
+    repl = []
+    for stmt in node:
+        if isinstance(stmt, ir.IfElse):
+            stmt = flatten_branch(stmt)
+            if isinstance(stmt, ir.Case):
+                branches = [rewrite_branches(b) for b in stmt.branches]
+                stmt.branches = branches
+                repl.append(stmt)
             else:
-                # Todo: not quite right but will revisit
-                pos = ir.Position(1, 1, 1, 74)
-            body = node.body.copy()
-            body.append(ir.Return(value=ir.NoneRef(), pos=pos))
-            repl = ir.Function(name=node.name, args=node.args, body=body)
-            return repl
+                assert isinstance(stmt, ir.IfElse)
+                if_branch = rewrite_branches(stmt.if_branch)
+                else_branch = rewrite_branches(stmt.else_branch)
+                stmt = ir.IfElse(stmt.test, if_branch, else_branch, stmt.pos)
+                repl.append(stmt)
+        elif isinstance(stmt, ir.ForLoop):
+            body = rewrite_branches(stmt.body)
+            stmt = ir.ForLoop(stmt.target, stmt.iterable, body, stmt.pos)
+            repl.append(stmt)
+        elif isinstance(stmt, ir.WhileLoop):
+            body = rewrite_branches(stmt.body)
+            stmt = ir.WhileLoop(stmt.test, body, stmt.pos)
+            repl.append(stmt)
         else:
-            # If return type is anything other than None and we don't explicitly return along
-            # all paths, then this is unsafe
-            msg = f"Function {node.name} does not return a value along all paths."
-            raise CompilerError(msg)
-    return node
+            repl.append(stmt)
+    return repl

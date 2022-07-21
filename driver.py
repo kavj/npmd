@@ -5,14 +5,15 @@ from pathlib import Path
 
 from pybind_gen import gen_module, gen_setup, Emitter
 
-from analysis import check_all_declared, DeclTracker
 from ast_conversion import build_module_ir_and_symbols
-from canonicalize import patch_return
+from blocks import build_function_graph, graph_to_pydot, render_pydot, patch_missing_return
+from dead_code import remove_unreachable_blocks, remove_statements_following_terminals, remove_trivial_continues, strip_continues
 from errors import CompilerError
-from loop_simplify import LoopLowering, remove_unreachable
-from lvn import remove_dead, optimize_statements
+from liveness import check_all_assigned, dump_live_info, find_live_in_out, remove_dead_statements
+from loop_simplify import lower_loops, sanitize_loop_iterables
 from pprint import pformat
-from type_checks import TypeInference
+from pretty_printing import PrettyPrinter
+from type_checks import dump_symbol_type_info, TypeInference
 
 
 version = sys.version_info
@@ -47,7 +48,7 @@ def name_and_source_from_path(file_path):
 
 # Todo: Add explicit entry points
 
-def compile_module(file_path, types,  out_dir, verbose=False, print_result=True, allow_inference=True):
+def compile_module(file_path, types,  out_dir, verbose=False, print_result=True, allow_inference=True, debug=False):
     out_dir = Path(out_dir).absolute()
     if "." in str(out_dir):
         msg = f"Expected a directory path, received: {out_dir} ."
@@ -66,22 +67,41 @@ def compile_module(file_path, types,  out_dir, verbose=False, print_result=True,
     funcs = []
     for func in mod_ir.functions:
         func_symbols = symbols.get(func.name)
-        loop_lowering = LoopLowering(func_symbols)
-        tracker = DeclTracker()
-        with tracker.scope():
-            for arg in func.args:
-                tracker.declare(arg)
-            check_all_declared(func.body, tracker)
-        func.body = remove_unreachable(func.body)
-        func = remove_dead(func, func_symbols)
-        func = optimize_statements(func, func_symbols)
         TypeInference(func_symbols).visit(func)
-        func = loop_lowering.visit(func)
-        func = remove_dead(func, func_symbols)
-        func = patch_return(func, func_symbols)
+        func = remove_dead_statements(func, func_symbols)
+        remove_statements_following_terminals(func)
+        # more aggressive
+        strip_continues(func)
+        sanitize_loop_iterables(func, func_symbols)
+        func_graph = build_function_graph(func)
+        lower_loops(func.body, func_symbols, func_graph)
+        func = remove_dead_statements(func, func_symbols)
+        func_graph = build_function_graph(func)
+        func_graph = remove_unreachable_blocks(func_graph)
+
+        patch_missing_return(func_graph)
+
+        if debug:
+            file_path_ = Path(out_dir)
+            assert file_path_.is_dir()
+            file_dir = file_path_.parent
+            dot_name = graph_to_pydot(func_graph, func.name, modname, file_dir)
+            render_path = Path(out_dir)
+            render_pydot(dot_name, render_path)
+            func_graph = remove_unreachable_blocks(func_graph)
+            patch_missing_return(func_graph)
+
+            liveness = find_live_in_out(func_graph)
+            check_all_assigned(func_graph)
+            dump_live_info(liveness, ignores=func.args)
+            dot_name = graph_to_pydot(func_graph, func.name + '_after_dce', modname, file_dir)
+            render_path = Path(out_dir)
+            render_pydot(dot_name, render_path)
 
         if print_result:
-            from pretty_printing import PrettyPrinter
+            print('type info..')
+            dump_symbol_type_info(func_symbols)
+            print()
             pp = PrettyPrinter()
             pp(func, func_symbols)
 

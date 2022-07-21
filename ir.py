@@ -22,7 +22,7 @@ float64 = np.dtype('float64')
 bool_type = np.dtype('bool')
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, order=True)
 class Position:
     line_begin: int
     line_end: int
@@ -42,6 +42,7 @@ class StmtBase:
 
 
 Statement = typing.TypeVar('Statement', bound=StmtBase)
+StatementList = typing.Union[typing.List[Statement], typing.Tuple[Statement]]
 
 
 class ValueRef(ABC):
@@ -56,8 +57,7 @@ class ValueRef(ABC):
 
     """
 
-    constant: clscond = False
-
+    pass
 
 class Expression(ValueRef):
     """
@@ -414,6 +414,18 @@ class Module:
         for func in self.functions:
             if func.name == func_name:
                 return func
+
+
+# needed to flatten nested if else
+@dataclass
+class Case(StmtBase):
+    conditions: typing.List[ValueRef]
+    branches: typing.List[typing.List[StmtBase]]
+    default: typing.List[StmtBase]
+
+    def __post_init__(self):
+        assert len(self.conditions) > 1
+        assert len(self.conditions) == len(self.branches)
 
 
 @dataclass(frozen=True)
@@ -1214,8 +1226,8 @@ class ForLoop(StmtBase):
 @dataclass
 class IfElse(StmtBase):
     test: ValueRef
-    if_branch: typing.List[Statement]
-    else_branch: typing.List[Statement]
+    if_branch: StatementList
+    else_branch: StatementList
     pos: Position
 
     def __post_init__(self):

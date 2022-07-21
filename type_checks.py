@@ -348,3 +348,39 @@ class TypeInference:
                     else:
                         raise CompilerError("bad type for iterable")
         self.visit(node.body)
+
+
+dtype_pretty_lookup = {
+    np.dtype('bool'): 'numpy.bool_',
+    np.dtype('uint8'): 'numpy.uint8',
+    np.dtype('int8'): 'numpy.int8',
+    np.dtype('int32'): 'numpy.int32',
+    np.dtype('int64'): 'numpy.int64',
+    np.dtype('float32'): 'numpy.float64',
+    np.dtype('float64'): 'numpy.float64',
+    np.dtype('complex64'): 'numpy.complex64',
+    np.dtype('complex128'): 'numpy.complex128'
+}
+
+
+def dump_symbol_type_info(symbols: SymbolTable):
+    print(f'Function: {symbols.namespace} arguments\n')
+    for name in symbols.arguments:
+        t = symbols.check_type(name)
+        if isinstance(t, ir.ArrayType):
+            dtype_formatted = dtype_pretty_lookup[t.dtype]
+            formatted_type = f'numpy.ndarray[{dtype_formatted}]'
+        else:
+            formatted_type = dtype_pretty_lookup[t]
+        name_to_type = f'{name.name}: {formatted_type}'
+        print(name_to_type)
+    print(f'Function: {symbols.namespace} local variables\n')
+    for name in symbols.all_locals:
+        t = symbols.check_type(name)
+        if isinstance(t, ir.ArrayType):
+            dtype_formatted = dtype_pretty_lookup[t.dtype]
+            formatted_type = f'numpy.ndarray[{dtype_formatted}]'
+        else:
+            formatted_type = dtype_pretty_lookup[t]
+        name_to_type = f'{name.name}: {formatted_type}'
+        print(name_to_type)

@@ -1,4 +1,5 @@
 import logging
+import os
 import pathlib
 import numpy as np
 
@@ -8,11 +9,25 @@ import ir
 from errors import CompilerError
 
 
-tests = ("test_forifcont.py", "test_nested.py", "test_cascade_if.py", "test_dead.py", "test_dead2.py",
-         "test_while.py", "test_cascade_assign.py", "test_for.py", "test_forif.py", "test_retval.py",
-         "test_pass.py", "test_conditional_terminated.py", "test_bothterminated.py", "test_chained_comparisons.py",
-         "test_folding.py", "test_fold_unreachable.py", "test_normalize_return_flow.py", "test_unpack_with_subscripts.py",
-         "test_nested_if.py")
+tests = ('test_forifcont.py',
+         'test_nested.py',
+         'test_cascade_if.py',
+         'test_dead.py',
+         'test_dead2.py',
+         'test_while.py',
+         'test_cascade_assign.py',
+         'test_for.py',
+         'test_forif.py',
+         'test_retval.py',
+         'test_pass.py',
+         'test_conditional_terminated.py',
+         'test_bothterminated.py',
+         'test_chained_comparisons.py',
+         'test_folding.py',
+         'test_fold_unreachable.py',
+         'test_normalize_return_flow.py',
+         'test_unpack_with_subscripts.py',
+         'test_nested_if.py')
 
 
 array_2d = ir.ArrayType(ndims=2, dtype=ir.float64)
@@ -81,7 +96,16 @@ uws_types = {"test_forifcont.py": {"something": {"x": array_1d, "y": array_1d, "
              "test_double_nested.py":
                  {"double_nesting":
                       {"a": array_2d, "b": array_1d}
-                  }
+                  },
+             "test_branch_nesting.py":
+                 {
+                     'nested': {
+                          'a': np.dtype('float64'),
+                          'b': np.dtype('float64'),
+                          'c': np.dtype('float64'),
+                          'd': np.dtype('float64')
+                     }
+                 }
              }
 
 failed_tests = []
@@ -90,7 +114,8 @@ for i, t in enumerate(tests):
     print(t)
     basepath = pathlib.Path("tests")
     inpath = basepath.joinpath(t)
-    outpath = basepath.joinpath(f"test_{i}")
+    basename, _ = os.path.splitext(t)
+    outpath = basepath.joinpath(f"{basename}_{i}")
     print("\n\nSOURCE\n\n")
     with open(inpath) as reader:
         src = reader.read()
@@ -98,7 +123,7 @@ for i, t in enumerate(tests):
     print("\n\nOUTPUT\n\n")
     types = uws_types.get(t, {})
     try:
-        module = driver.compile_module(inpath, types, print_result=True, out_dir=outpath)
+        module = driver.compile_module(inpath, types, print_result=True, out_dir=outpath, debug=True)
     except CompilerError as ce:
         msg = f"Failed test: {t}: {ce.args[0]}"
         failed_tests.append(msg)

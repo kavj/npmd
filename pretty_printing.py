@@ -1,3 +1,4 @@
+import itertools
 import typing
 
 import numpy as np
@@ -59,8 +60,11 @@ class PrettyFormatter:
 
     """
 
-    def __call__(self, node):
+    def __call__(self, node, truncate_after=None):
         expr = self.visit(node)
+        if truncate_after is not None and len(expr) > truncate_after:
+            # Todo: check how this renders with parentheses
+            expr = f'{expr[:truncate_after]}...'
         return expr
 
     def parenthesized(self, expr):
@@ -71,6 +75,67 @@ class PrettyFormatter:
     def visit(self, node):
         msg = f"No method to format node: {node}."
         raise NotImplementedError(msg)
+
+    # adding formatting support for non-branching statements in order to print graph nodes
+    @visit.register
+    def _(self, node: ir.Assign):
+        target = self.visit(node.target)
+        value = self.visit(node.value)
+        formatted = f'{target} = {value}'
+        return formatted
+
+    @visit.register
+    def _(self, node: ir.Function):
+        args = ', '.join(arg.name for arg in node.args)
+        return f'def {node.name}({args})'
+
+    @visit.register
+    def _(self, node: ir.IfElse):
+        test = self.visit(node.test)
+        return f'if {test}'
+
+    @visit.register
+    def _(self, node: ir.ForLoop):
+        target = self.visit(node.target)
+        iterable = self.visit(node.iterable)
+        return f'for {target} in {iterable}'
+
+    @visit.register
+    def _(self, node: ir.WhileLoop):
+        test = self.visit(node.test)
+        return f'while {test}'
+
+    @visit.register
+    def _(self, node: ir.InPlaceOp):
+        left = node.target
+        right = None
+        for right in node.value.subexprs:
+            # if there's a distinct one, pick it
+            if right is not left:
+                break
+        assert right is not None
+        op = binop_ops[type(node.value)]
+        left = self.visit(left)
+        right = self.visit(right)
+        formatted = f'{left} {op}= {right}'
+        return formatted
+
+    @visit.register
+    def _(self, node: ir.SingleExpr):
+        return self.visit(node.value)
+
+    @visit.register
+    def _(self, node: ir.Break):
+        return 'break'
+
+    @visit.register
+    def _(self, node: ir.Continue):
+        return 'continue'
+
+    @visit.register
+    def _(self, node: ir.Return):
+        value = self.visit(node.value)
+        return f'return {value}'
 
     @visit.register
     def _(self, node: ir.NoneRef):
@@ -120,14 +185,6 @@ class PrettyFormatter:
                                           for term in (node.predicate, node.on_true, node.on_false))
         expr = f"{on_true} if {predicate} else {on_false}"
         return expr
-
-    @visit.register
-    def _(self, node: ir.CONSTANT):
-        return str(node.value)
-
-    @visit.register
-    def _(self, node: ir.CONSTANT):
-        return str(node.value)
 
     @visit.register
     def _(self, node: ir.CONSTANT):
@@ -460,6 +517,26 @@ class PrettyPrinter:
         self.print_line(stmt)
 
     @visit.register
+    def _(self, node: ir.Case):
+        first_cond = self.format(node.conditions[0])
+        first_cond = f'if {first_cond}:'
+        self.print_line(first_cond)
+        with self.indented():
+            self.print_line(node.branches[0])
+        for cond, branch in zip(itertools.islice(node.conditions, 1), itertools.islice(node.branches, 1)):
+            cond = self.format(cond)
+            cond = f'elif {cond}:'
+            self.print_line(cond)
+            with self.indented():
+                self.visit(branch)
+        self.print_line("else:")
+        with self.indented():
+            if node.default:
+                self.visit(node.default)
+            else:
+                self.print_line('pass')
+
+    @visit.register
     def _(self, node: ir.InPlaceOp):
         left = node.target
         right = None
@@ -471,7 +548,7 @@ class PrettyPrinter:
         op = binop_ops[type(node.value)]
         left = self.format(left)
         right = self.format(right)
-        formatted = f'{left} {op}= {right};'
+        formatted = f'{left} {op}= {right}'
         # Todo: needs update
         self.print_line(formatted)
 

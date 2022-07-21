@@ -376,7 +376,14 @@ class ExprFormatter:
     def _(self, node: ir.Subscript):
         index = self.render(node.index)
         base = self.render(node.value)
-        rendered = f'{base}[{index}]'
+        base_type = self.type_helper.check_type(node.value)
+        subscr_type = self.type_helper.check_type(node)
+        # this should be good enough for now. Need to actually make
+        # loop local pointer access somewhere for cheaper subscripting
+        if isinstance(subscr_type, ir.ArrayType):
+            rendered = f'{base}[{index}]'
+        else:
+            rendered = f'{base}.mutable_at({index})'
         return rendered
 
 
@@ -453,14 +460,20 @@ class FuncWriter:
         # no declaration
         assert isinstance(node.value, ir.BinOp)
         if isinstance(node.value, ir.POW):
-            expr = self.render(node.value)
-            target = self.render(node.target)
-            stmt = f'{target} = {expr};'
+            raise CompilerError('currently broken path..')
         else:
             op = arithmetic_ops[type(node.value)]
             op = f'{op}='
-            target = self.render(node.target)
-            value = self.render(node.value)
+            target, value = node.value.subexprs
+            # binop expressions are sorted for consistent hashing,
+            # but here we need to check the actual target
+            if target is not node.target:
+                # swap if left and right are not the same expression
+                # and they are misordered
+                assert value is node.target
+                target, value = value, target
+            target = self.render(target)
+            value = self.render(value)
             stmt = f'{target} {op} {value};'
         self.emitter.print_line(stmt)
 
