@@ -573,6 +573,16 @@ def populate_func_symbols(func_table, types, allow_inference=True, ignore_unboun
     func_name = func_table.get_name()
     symbols = {}
     missing = []
+    missing_arg_types = []
+    for s in func_table.get_symbols():
+        if s.is_parameter():
+            type_ = types.get(s.get_name())
+            if type_ is None:
+                missing_arg_types.append(s.get_name())
+    if missing_arg_types:
+        missing_arg_types = ', '.join(s for s in missing_arg_types)
+        msg = f'Misisng type information for arguments "{missing_arg_types}"'
+        raise CompilerError(msg)
     for s in func_table.get_symbols():
         name = s.get_name()
         if s.is_imported():
@@ -641,7 +651,7 @@ def populate_symbol_tables(module_name, src, types):
             msg = f"Function {name} contains nested namespaces, which are unsupported."
             raise CompilerError(msg)
         func_names.add(name)
-        func_types = types.get(name)
+        func_types = types.get(name, dict())
         # declare a header file to avoid worrying about declaration order
         func_tables[name] = populate_func_symbols(func_table, func_types, allow_inference=True, ignore_unbound=False)
     return func_tables

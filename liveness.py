@@ -171,7 +171,7 @@ def find_live_in_out(graph: nx.DiGraph) -> Dict[BasicBlock, BlockLiveness]:
 
 
 def get_clobbers(blocks: Iterable[BasicBlock]):
-    for stmt in itertools.chain(blocks):
+    for stmt in itertools.chain(*blocks):
         if isinstance(stmt, (ir.Assign, ir.InPlaceOp)):
             if isinstance(stmt.target, ir.NameRef):
                 yield stmt.target

@@ -7,7 +7,7 @@ from pybind_gen import gen_module, gen_setup, Emitter
 
 from ast_conversion import build_module_ir_and_symbols
 from blocks import build_function_graph, graph_to_pydot, render_pydot, patch_missing_return
-from dead_code import remove_unreachable_blocks, remove_statements_following_terminals, remove_trivial_continues, strip_continues
+from dead_code import remove_unreachable_blocks, remove_statements_following_terminals, strip_continues
 from errors import CompilerError
 from liveness import check_all_assigned, dump_live_info, find_live_in_out, remove_dead_statements
 from loop_simplify import lower_loops, sanitize_loop_iterables

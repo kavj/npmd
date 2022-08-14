@@ -3,17 +3,18 @@ import itertools
 import numpy
 
 from collections import defaultdict
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Set
 
 import ir
 
 from analysis import compute_element_count
-from blocks import FlowGraph, build_function_graph, get_loop_exit_block
+from blocks import FlowGraph, build_function_graph, get_loop_exit_block, get_blocks_in_loop
 from folding import simplify_arithmetic, fold_constants
-from liveness import get_loop_header_block, find_loop_iterables_clobbered_by_body, find_live_in_out
+from liveness import get_clobbers, get_loop_header_block, find_loop_iterables_clobbered_by_body, find_live_in_out
 from lvn import ExprRewriter
 from symbol_table import SymbolTable
 from traversal import walk_nodes
+from type_checks import TypeHelper
 from utils import unpack_iterated
 
 
@@ -156,6 +157,7 @@ def make_single_index_loop(header: ir.ForLoop, symbols, noescape):
 
     """
 
+    typer = TypeHelper(symbols)
     by_iterable = {}
     target_to_iterable = {}
     for target, iterable in unpack_iterated(header.target, header.iterable):
@@ -166,7 +168,6 @@ def make_single_index_loop(header: ir.ForLoop, symbols, noescape):
     by_step = defaultdict(set)
     for interval in by_iterable.values():
         by_step[interval.step].add((interval.start, interval.stop))
-
     exprs = []
     for step, start_and_stop in by_step.items():
         exprs.append(make_min_affine_seq(step, start_and_stop))
@@ -199,21 +200,42 @@ def make_single_index_loop(header: ir.ForLoop, symbols, noescape):
     for target, iterable in unpack_iterated(header.target, header.iterable):
         if target is loop_index:
             continue
-        seq = by_iterable[iterable]
-        if seq.start == loop_expr.start:
-            if seq.step == loop_expr.step:
+        if isinstance(iterable, ir.AffineSeq):
+            # we can reuse
+            target_type = symbols.check_type(target)
+            index_type = symbols.check_type(loop_index)
+            if target_type == index_type:
                 value = loop_index
             else:
-                assert loop_expr.start == ir.Zero and loop_expr.step == ir.One
-                value = ir.MULT(iterable.step, loop_index)
-                value = fold_constants(value)
-        elif iterable.step == loop_expr.step:
-            assert loop_expr.start == ir.Zero
-            value = ir.ADD(iterable.start, loop_index)
+                value = ir.CAST(loop_index, target_type)
+        elif isinstance(iterable, ir.NameRef):
+            value = ir.Subscript(iterable, loop_index)
         else:
-            assert loop_expr.start == ir.Zero and loop_expr.step == ir.One
-            offset = ir.MULT(iterable.step, loop_index)
-            value = ir.ADD(iterable.start, offset)
+            assert isinstance(iterable, ir.Subscript)
+            if isinstance(iterable.index, ir.Slice):
+                iterable_index = iterable.index
+                if iterable_index.start == loop_index.start and iterable_index.step == loop_index.step:
+                    value = ir.Subscript(iterable.value, loop_index)
+                else:
+                    assert loop_expr.step == ir.One and loop_expr.start == ir.Zero
+                    if iterable_index.step != ir.One:
+                        offset = ir.MULT(loop_index, iterable_index.step)
+                        if iterable_index.start != ir.Zero:
+                            offset = ir.ADD(offset, iterable_index.start)
+                    elif iterable_index.start != ir.Zero:
+                        offset = ir.ADD(loop_index, iterable_index.start)
+                    else:
+                        # slice doesn't augment start or step
+                        offset = loop_index
+                    value = ir.Subscript(iterable.value, offset)
+            else:
+                # single index, which means it's double sliced
+                t = typer.check_type(iterable)
+                name = symbols.make_unique_name_like(iterable, t)
+                stmt = ir.Assign(name, iterable, pos)
+                body.append(stmt)
+                assert loop_expr.start == ir.Zero and loop_expr.step == ir.One
+                value = ir.Subscript(name, loop_index)
         assign = ir.Assign(target, value, pos)
         body.append(assign)
     body.extend(header.body)
@@ -222,18 +244,29 @@ def make_single_index_loop(header: ir.ForLoop, symbols, noescape):
     return header
 
 
+def get_safe_loop_indices(stmt: ir.ForLoop, graph: FlowGraph, live_on_exit: Set[ir.NameRef]):
+    header = get_loop_header_block(graph, stmt)
+    blocks = set(get_blocks_in_loop(graph, header, include_header=False))
+    cannot_use = live_on_exit.union(get_clobbers(blocks))
+    safe_targets = []
+    for target, iterable in unpack_iterated(stmt.target, stmt.iterable):
+        if target not in cannot_use:
+            safe_targets.append(target)
+    return safe_targets
+
+
 def lower_loops(stmts: Iterable[ir.Statement], symbols: SymbolTable, graph: FlowGraph):
     liveness = find_live_in_out(graph)
     headers = [node for node in walk_nodes(stmts) if isinstance(node, ir.ForLoop)]
     # graph is invalidated by changes, so we have to get all nodes in advance
-    no_escapes = []
+    safe_target_lists = []
     for header in headers:
         exit_block = get_loop_exit_block(graph, header)
         live_on_exit = liveness[exit_block].live_in
-        no_escape_targets = {t for (t, i) in unpack_iterated(header.target, header.iterable) if t not in live_on_exit}
-        no_escapes.append(no_escape_targets)
+        safe_targets = get_safe_loop_indices(header, graph, live_on_exit)
+        safe_target_lists.append(safe_targets)
 
-    for header, no_escape in zip(headers, no_escapes):
+    for header, no_escape in zip(headers, safe_target_lists):
         repl = make_single_index_loop(header, symbols, no_escape)
         header.target = repl.target
         header.iterable = repl.iterable

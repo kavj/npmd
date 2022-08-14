@@ -80,8 +80,6 @@ uws_types = {"test_forifcont.py": {"something": {"x": array_1d, "y": array_1d, "
                  {"folding": {}},
              "test_fold_unreachable.py":
                  {"divergent": {"a": array_1d, "b": array_1d, "c": array_1d, }},
-             "test_sym.py":
-                 {"f": {"x": np.dtype('int64'), "y": np.dtype('int32')}},
              "test_normalize_return_flow.py":
                  {"something": {"a": np.dtype('int64'), "b": np.dtype('int32')}},
              "test_unpack_with_subscripts.py":
@@ -112,7 +110,7 @@ failed_tests = []
 
 for i, t in enumerate(tests):
     print(t)
-    basepath = pathlib.Path("tests")
+    basepath = pathlib.Path("tree_tests")
     inpath = basepath.joinpath(t)
     basename, _ = os.path.splitext(t)
     outpath = basepath.joinpath(f"{basename}_{i}")

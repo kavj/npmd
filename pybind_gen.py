@@ -221,6 +221,19 @@ class ExprFormatter:
         return 'py::none()'
 
     @render.register
+    def _(self, node: ir.CAST):
+        src_type = self.type_helper.check_type(node.value)
+        target_type = node.target_type
+        static_cast_allowed = not isinstance(target_type, ir.ArrayType)
+        if not static_cast_allowed:
+            msg = f'Casts from {target_type} to {src_type} are unsupported.'
+            raise CompilerError(msg)
+        expr_str = self.render(node.value)
+        c_target_type = get_c_type_name(target_type)
+        expr_str = f'static_cast<{c_target_type}>({expr_str})'
+        return expr_str
+
+    @render.register
     def _(self, node: ir.CONSTANT):
         return str(node.value)
 

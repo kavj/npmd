@@ -187,6 +187,13 @@ class PrettyFormatter:
         return expr
 
     @visit.register
+    def _(self, node: ir.CAST):
+        type_info = node.target_type
+        value = self.visit(node.value)
+        output = f'{str(type_info)}({value})'
+        return output
+
+    @visit.register
     def _(self, node: ir.CONSTANT):
         return str(node.value)
 

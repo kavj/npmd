@@ -43,8 +43,12 @@ class symbol:
             # this should be caught elsewhere, where function information is available
             assert self.is_local
         if self.is_arg:
-            assert self.type_ is not None
-        assert is_allowed_identifier(self.name)
+            if self.type_ is None:
+                msg = f'No type declared for argument "{self.name}"'
+                raise CompilerError(msg)
+            elif not is_allowed_identifier(self.name):
+                msg = f'"{self.name}" is not an allowed identifier.'
+                raise CompilerError(msg)
 
     name: str
     type_: Optional[ir.TypeBase]

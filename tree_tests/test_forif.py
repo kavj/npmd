@@ -1,5 +1,3 @@
-# cython: control_flow.dot_output=blah2.dot
-
 import numpy as np
 
 
@@ -10,4 +8,5 @@ def something(x, y, z):
         else:
             i += 10
             u *= 2
+        z[i] = u + v
     return 42
