@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+import math
 import numbers
 import operator
 import typing
@@ -10,7 +11,7 @@ import numpy as np
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from errors import CompilerError
+from npmd.errors import CompilerError
 
 supported_builtins = frozenset({'iter', 'range', 'enumerate', 'zip', 'all', 'any', 'max', 'min', 'abs', 'pow',
                                 'round', 'reversed'})
@@ -59,6 +60,7 @@ class ValueRef(ABC):
 
     pass
 
+
 class Expression(ValueRef):
     """
 
@@ -98,42 +100,26 @@ class CONSTANT(ValueRef):
     ir type for numeric constant
     """
     value: np.number
-    predicate: np.bool_ = False
-
-    def __post_init__(self):
-        assert np.isnan(self.value) or hasattr(self, 'dtype')
-        if self.is_integer:
-            if not (-2 ** 63 <= self.value < 2 ** 63 - 1):
-                msg = f"value {self.value} overflows the supported integer range"
-                raise CompilerError(msg)
-
-    @property
-    def dtype(self):
-        if self.is_nan:
-            return type(self.value)
-        return self.value.dtype
+    dtype: typing.Union[np.dtype, type]
+    predicate: bool
 
     def __bool__(self):
         return operator.truth(self.value)
 
     def can_negate(self):
         if self.is_integer:
-            if not (-2 ** 63 <= (-self.value) < 2 ** 63 - 1):
+            if not (-2 ** 63 <= (-self.value) <= 2 ** 63 - 1):
                 return False
         return True
 
-    def __eq__(self, other):
-        if not isinstance(other, CONSTANT):
-            msg = f"Unsupported comparison between Constant type and {other}."
-            raise TypeError(msg)
-        # don't allow treating (True, False) as (0, 1), too messy
-        return self.value == other.value and self.is_bool == other.is_bool
+    def matches(self, other: CONSTANT):
+        if self.is_nan:
+            return other.is_nan
+        return self.value == other.value and self.predicate == other.predicate
 
-    def __ne__(self, other):
-        if not isinstance(other, CONSTANT):
-            msg = f"Unsupported comparison between Constant type and {other}."
-            raise TypeError(msg)
-        return self.value != other.value or self.is_bool != other.is_bool
+    @property
+    def negative(self):
+        return self.value < 0
 
     @property
     def is_nan(self):
@@ -168,22 +154,27 @@ class StringConst(ValueRef):
         return operator.truth(self.value)
 
 
-def wrap_constant(c: typing.Union[str, bool, np.bool_, numbers.Number]):
+def wrap_constant(c: typing.Union[str, bool, np.bool_, numbers.Number], is_predicate: bool = False):
     # check if we have a supported type
     if isinstance(c, str):
         value = StringConst(c)
-    elif np.isnan(c):
+    elif math.isnan(c):
         # numpy uses a different nan object than math.nan
-        value = CONSTANT(np.nan)
+        # but np.isnan is somewhat too strict as we don't want type coercion to float. We only need to know
+        # that the input was not a floating point nan.
+        value = CONSTANT(np.nan, type(np.nan), is_predicate)
     elif isinstance(c, (bool, np.bool_)):
         # ensure we wrap the numpy bool_ type
         c = np.bool_(c)
-        value = CONSTANT(c)
+        value = CONSTANT(c, np.bool_, is_predicate)
     else:
         assert isinstance(c, numbers.Number)
         min_scalar_type: np.dtype = np.min_scalar_type(c)
+        if min_scalar_type == np.dtype('O'):
+            msg = f'Cannot map "{c}" to non-object type'
+            raise CompilerError(msg)
         raw_value = min_scalar_type.type(c)
-        value = CONSTANT(raw_value)
+        value = CONSTANT(raw_value, min_scalar_type, is_predicate)
     return value
 
 
@@ -274,6 +265,9 @@ class SingleDimRef(Expression):
         if not isinstance(self.dim, CONSTANT) or not isinstance(self.dim.value, numbers.Integral):
             msg = f'Expected integer constant, received {self.dim} of type {type(self.dim)}.'
             raise TypeError(msg)
+        elif self.dim.value < 0:
+            msg = f'Negative indices are unsupported: "{self.dim}"'
+            raise CompilerError(msg)
 
     @property
     def subexprs(self):
@@ -301,6 +295,10 @@ class Subscript(Expression):
         elif not isinstance(self.index, ValueRef):
             msg = f'Expected ValueRef, got {self.index}, type: {type(self.index)}.'
             raise TypeError(msg)
+        elif isinstance(self.index, CONSTANT):
+            if self.index.value < 0:
+                msg = f'Negative indices are unsupported: "{self.index.value}"'
+                raise CompilerError(msg)
 
     @property
     def subexprs(self):
@@ -361,7 +359,10 @@ class MinReduction(Expression):
 
     def __init__(self, *values):
         assert len(values) > 0
-        assert all(isinstance(v, ValueRef) for v in values)
+        for v in values:
+            if not isinstance(v, ValueRef):
+                msg = f'Cannot apply min reduction over "{v}"'
+                raise TypeError(msg)
         object.__setattr__(self, 'values', frozenset(values))
 
     @property
@@ -385,8 +386,12 @@ class MaxReduction(Expression):
     values: typing.FrozenSet[ValueRef, ...]
 
     def __init__(self, *values):
-        object.__setattr__(self, 'values', frozenset(values))
         assert len(self.values) > 0
+        for v in values:
+            if not isinstance(v, ValueRef):
+                msg = f'Canot apply min reduction over "{v}"'
+                raise TypeError(msg)
+        object.__setattr__(self, 'values', frozenset(values))
 
     @property
     def subexprs(self):
@@ -419,13 +424,12 @@ class Module:
 # needed to flatten nested if else
 @dataclass
 class Case(StmtBase):
-    conditions: typing.List[ValueRef]
-    branches: typing.List[typing.List[StmtBase]]
+    conditions: typing.List[typing.Tuple[ValueRef, typing.List[StmtBase]]]
     default: typing.List[StmtBase]
+    pos: Position
 
     def __post_init__(self):
         assert len(self.conditions) > 1
-        assert len(self.conditions) == len(self.branches)
 
 
 @dataclass(frozen=True)
@@ -437,14 +441,17 @@ class Slice(Expression):
 
     """
 
-    start: typing.Union[NameRef, CONSTANT]
-    stop: typing.Optional[typing.Union[NameRef, CONSTANT]]
-    step: typing.Union[NameRef, CONSTANT]
+    start: ValueRef
+    stop: ValueRef
+    step: ValueRef
 
     def __post_init__(self):
-        assert isinstance(self.start, (NameRef, CONSTANT))
-        assert isinstance(self.stop, (NameRef, CONSTANT))
-        assert isinstance(self.step, (NameRef, CONSTANT))
+        for t in (self.start, self.stop, self.step):
+            assert isinstance(t, ValueRef)
+            if isinstance(t, CONSTANT):
+                if t.value < 0:
+                    msg = f'Slicing with negative parameters is unsupported'
+                    raise CompilerError(msg)
 
     @property
     def subexprs(self):
@@ -793,15 +800,6 @@ class BITAND(BinOp):
 class MATMULT(BinOp):
     left: ValueRef
     right: ValueRef
-
-
-@dataclass(frozen=True)
-class Length(Expression):
-    operand: ValueRef
-
-    @property
-    def subexprs(self):
-        yield self.operand
 
 
 # Compare ops are once again their own class,

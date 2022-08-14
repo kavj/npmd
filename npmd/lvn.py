@@ -3,14 +3,14 @@ import itertools
 from functools import singledispatchmethod
 from typing import Dict, Iterable, Optional, Union
 
-import ir
+import npmd.ir as ir
 
-from blocks import sequence_block_intervals
-from liveness import BlockLiveness
-from symbol_table import SymbolTable
-from traversal import walk_nodes
-from type_checks import TypeHelper
-from utils import is_entry_point
+from npmd.blocks import sequence_block_intervals
+from npmd.liveness import BlockLiveness
+from npmd.symbol_table import SymbolTable
+from npmd.traversal import walk_nodes
+from npmd.type_checks import TypeHelper
+from npmd.utils import is_entry_point
 
 
 def get_last_assign_to_name(block: Iterable[ir.StmtBase]):
@@ -125,7 +125,7 @@ class ExprInliner:
     def bind_target(self, target: ir.NameRef, value: ir.ValueRef):
         assert isinstance(target, ir.NameRef)
         target_type = self.symbols.check_type(target, allow_none=True)
-        value_type = self.typer.check_type(value)
+        value_type = self.typer(value)
         if target_type != value_type:
             # Todo: need can cast validation for these things..
             value = ir.CAST(value, target_type)

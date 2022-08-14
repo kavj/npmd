@@ -7,14 +7,15 @@ from contextlib import contextmanager
 from functools import singledispatchmethod
 from typing import Dict, List, Optional, Set
 
-import ir
+import npmd.ir as ir
 
-from analysis import check_all_declared, DeclTracker
-from errors import CompilerError
-from reductions import serialize_min_max
-from symbol_table import SymbolTable
-from type_checks import TypeHelper, check_return_type
-from utils import extract_name
+from npmd.analysis import check_all_declared, DeclTracker
+from npmd.errors import CompilerError
+from npmd.reductions import serialize_min_max
+from npmd.symbol_table import SymbolTable
+from npmd.type_checks import TypeHelper, check_return_type
+from npmd.utils import extract_name
+
 
 npy_c_type_codes = {
     np.dtype('bool'): 'NPY_BOOL',
@@ -26,6 +27,7 @@ npy_c_type_codes = {
     np.dtype('float64'): 'NPY_FLOAT64',
 }
 
+
 npy_map = {np.dtype('bool'): 'bool',
            np.dtype('int8'): 'int8_t',
            np.dtype('uint8'): 'uint8_t',
@@ -33,6 +35,7 @@ npy_map = {np.dtype('bool'): 'bool',
            np.dtype('int64'): 'int64_t',
            np.dtype('float32'): 'float',
            np.dtype('float64'): 'double'}
+
 
 compare_ops = {ir.GT: '>',
                ir.GE: '>=',
@@ -42,6 +45,7 @@ compare_ops = {ir.GT: '>',
                ir.NE: '!=',
                ir.IN: 'in',
                ir.NOTIN: 'not in'}
+
 
 arithmetic_ops = {ir.ADD: '+',
                   ir.SUB: '-',
@@ -222,7 +226,7 @@ class ExprFormatter:
 
     @render.register
     def _(self, node: ir.CAST):
-        src_type = self.type_helper.check_type(node.value)
+        src_type = self.type_helper(node.value)
         target_type = node.target_type
         static_cast_allowed = not isinstance(target_type, ir.ArrayType)
         if not static_cast_allowed:
@@ -282,12 +286,12 @@ class ExprFormatter:
     def _(self, node: ir.TRUEDIV):
         left, right = node.subexprs
         # need casts here for consistency
-        left_type = self.type_helper.check_type(left)
+        left_type = self.type_helper(left)
         f64 = np.dtype('float64')
         left = self.render(left)
         if left_type == f64:
             left = f'static_cast<double>({left})'
-        right_type = self.type_helper.check_type(right)
+        right_type = self.type_helper(right)
         right = self.render(right)
         if right_type == f64:
             # Todo: an earlier pass should instrument cast nodes..
@@ -389,8 +393,8 @@ class ExprFormatter:
     def _(self, node: ir.Subscript):
         index = self.render(node.index)
         base = self.render(node.value)
-        base_type = self.type_helper.check_type(node.value)
-        subscr_type = self.type_helper.check_type(node)
+        base_type = self.type_helper(node.value)
+        subscr_type = self.type_helper(node)
         # this should be good enough for now. Need to actually make
         # loop local pointer access somewhere for cheaper subscripting
         if isinstance(subscr_type, ir.ArrayType):
@@ -401,13 +405,12 @@ class ExprFormatter:
 
 
 class FuncWriter:
-    # too dangerous to inherit here.. as it'll just leave a blank on unsupported
     def __init__(self, emitter: Emitter, symbols: SymbolTable, mangled_name: Optional[str] = None):
         self.emitter = emitter
         self.cached_exprs = {}
         self.mangled_name = mangled_name
         self.symbols = symbols
-        self.type_helper = TypeHelper(symbols, allow_none=False)
+        self.type_helper = TypeHelper(symbols)
         self.formatter = ExprFormatter(self.symbols)
 
     def __call__(self, node: ir.Function):
@@ -515,6 +518,19 @@ class FuncWriter:
                 self.visit(node.else_branch)
 
     @visit.register
+    def _(self, node: ir.Case):
+        for index, (predicate, branch) in enumerate(node.conditions):
+            test_str = self.render(predicate)
+            if index == 0:
+                header = f'if({test_str})'
+            else:
+                header = f'else if({test_str})'
+            with self.emitter.scope(line=header, semicolon=False):
+                self.visit(branch)
+        with self.emitter.scope(line='else', semicolon=False):
+            self.visit(node.default)
+
+    @visit.register
     def _(self, node: ir.ForLoop):
         # this should be reduced to a simple range loop
         if not isinstance(node.iterable, ir.AffineSeq) or not isinstance(node.target, ir.NameRef):
@@ -556,12 +572,12 @@ class FuncWriter:
         # check if declared
         # check if types compatible
         target_str = self.format_target(node.target)
-        target_type = self.type_helper.check_type(node.target)
+        target_type = self.type_helper(node.target)
         if isinstance(node.target, ir.NameRef):
             if not self.emitter.is_declared(node.target):
                 self.emitter.declare(node.target)
                 target_str = f'{target_type} {target_str}'
-        value_type = self.type_helper.check_type(node.value)
+        value_type = self.type_helper(node.value)
         value_str = self.format_cast(node.value, value_type, target_type)
         stmt = f'{target_str} = {value_str};'
         self.emitter.print_line(stmt)

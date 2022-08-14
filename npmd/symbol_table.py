@@ -3,13 +3,15 @@ import builtins
 import itertools
 import keyword
 
+import numpy as np
+
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-import ir
+import npmd.ir as ir
 
-from errors import CompilerError
-from utils import extract_name
+from npmd.errors import CompilerError
+from npmd.utils import extract_name
 
 
 reserved_names = frozenset(set(dir(builtins)).union(set(keyword.kwlist)))
@@ -79,14 +81,15 @@ class SymbolTable:
     Per function symbol table with type information and disambiguation of original source vs implementation names.
     """
 
-    def __init__(self, namespace: str, symbols: Dict[str, symbol]):
+    def __init__(self, namespace: str, symbols: Dict[str, symbol], default_index_type=np.dtype(np.int_)):
         self.namespace = namespace
-        untyped_args = [name for (name, symbol) in symbols.items() if symbol.is_arg and symbol.type_ is None]
+        untyped_args = [name for (name, sym) in symbols.items() if sym.is_arg and sym.type_ is None]
         if untyped_args:
             msg = f'Arguments "{untyped_args}" are missing type annotations'
             raise CompilerError(msg)
         self.symbols = symbols
         self.name_manglers = {}
+        self.default_index_type = default_index_type
 
     def drop_symbol(self, name):
         name = extract_name(name)
@@ -123,8 +126,25 @@ class SymbolTable:
             if sym.is_arg:
                 yield ir.NameRef(sym.name)
 
+    @property
+    def untyped(self):
+        for sym in self.symbols.values():
+            if sym.type_ is None:
+                yield ir.NameRef(sym.name)
+
+    def has_declared_type(self, name: ir.NameRef):
+        sym = self.lookup(name)
+        return sym.type_ is not None and not sym.type_is_inferred
+
+    def has_inferred_type(self, name: ir.NameRef):
+        sym = self.lookup(name)
+        return sym.type_is_inferred
+
     def bind_type(self, name: ir.NameRef, t):
         existing_sym = self.symbols[name.name]
+        if existing_sym.type_ is not None and t != existing_sym.type_:
+            msg = f'Conflicting types "{existing_sym.type_}" and "{t}" for "{name.name}".'
+            raise CompilerError(msg)
         updated_sym = existing_sym.with_inferred_type(t)
         self.symbols[name.name] = updated_sym
 

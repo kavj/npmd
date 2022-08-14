@@ -1,8 +1,9 @@
 from functools import singledispatch
 
-import ir
+import npmd.ir as ir
 
-from errors import CompilerError
+from npmd.errors import CompilerError
+from npmd.pretty_printing import PrettyFormatter
 
 
 def is_entry_point(stmt: ir.StmtBase):
@@ -35,7 +36,7 @@ def _(node: ir.Call):
     return node.func.name
 
 
-def unpack_iterated(target, iterable, include_enumerate_indices=True):
+def unpack_iterated(target, iterable):
     if isinstance(iterable, ir.Zip):
         # must unpack
         if isinstance(target, ir.TUPLE):
@@ -47,18 +48,20 @@ def unpack_iterated(target, iterable, include_enumerate_indices=True):
                       f"and {(len(iterable.elements))}."
                 raise CompilerError(msg)
         else:
-            msg = f"Zip construct {iterable} requires a tuple for unpacking."
+            formatter = PrettyFormatter()
+            fiterable = formatter(iterable)
+            ftarget = formatter(target)
+            msg = f"Zip constructs must be fully unpacked. \"{fiterable}\" cannot be unpacked to \"{ftarget}\"."
             raise CompilerError(msg)
     elif isinstance(iterable, ir.Enumerate):
         if isinstance(target, ir.TUPLE):
             first_target, sec_target = target.elements
-            if include_enumerate_indices:
-                # enumerate is special, because it doesn't add
-                # constraints
-                yield first_target, ir.AffineSeq(iterable.start, None, ir.One)
+            yield first_target, ir.AffineSeq(iterable.start, None, ir.One)
             yield from unpack_iterated(sec_target, iterable.iterable)
         else:
-            msg = f"Only tuples are supported unpacking targets. Received {type(target)}."
+            formatter = PrettyFormatter()
+            ftarget = formatter(target)
+            msg = f"Only tuples are supported unpacking targets. Received \"{ftarget}\" with type {type(target)}."
             raise CompilerError(msg)
     else:
         # Array or sequence reference, with a single opaque target.

@@ -3,10 +3,12 @@ import typing
 
 import numpy as np
 
+from npmd.errors import CompilerError
+
 from functools import singledispatchmethod
 from contextlib import contextmanager
 
-import ir
+import npmd.ir as ir
 
 
 #     https://docs.python.org/3/reference/expressions.html#operator-precedence
@@ -31,6 +33,7 @@ binop_ops = {ir.ADD: "+",
              ir.MULT: "*",
              ir.TRUEDIV: "/",
              ir.FLOORDIV: "//",
+             ir.MOD: '%',
              ir.POW: "**",
              }
 
@@ -67,9 +70,11 @@ class PrettyFormatter:
             expr = f'{expr[:truncate_after]}...'
         return expr
 
-    def parenthesized(self, expr):
-        expr = self.visit(expr)
-        return f"({expr})"
+    def parenthesized(self, expr: ir.ValueRef):
+        formatted = self.visit(expr)
+        if isinstance(expr, ir.Expression):
+            formatted = f'({formatted})'
+        return formatted
 
     @singledispatchmethod
     def visit(self, node):
@@ -88,6 +93,12 @@ class PrettyFormatter:
     def _(self, node: ir.Function):
         args = ', '.join(arg.name for arg in node.args)
         return f'def {node.name}({args})'
+
+    @visit.register
+    def _(self, node: ir.Case):
+        predicate, _ = next(iter(node.conditions))
+        test = self.visit(predicate)
+        return f'if {test}'
 
     @visit.register
     def _(self, node: ir.IfElse):
@@ -156,7 +167,10 @@ class PrettyFormatter:
             return f"len({expr})"
         else:
             dim = self.visit(node.dim)
-            return f"{expr}.shape[{dim}]"
+            if isinstance(node.base, ir.NameRef):
+                formatted = f"{expr}.shape[{dim}]"
+            else:
+                formatted = f'({expr}).shape[{dim}]'
 
     @visit.register
     def _(self, node: ir.MaxReduction):
@@ -179,6 +193,13 @@ class PrettyFormatter:
         return f"min({args})"
 
     @visit.register
+    def _(self, node: ir.Slice):
+        start = '' if isinstance(node.start, ir.NoneRef) else self.visit(node.start)
+        stop = '' if isinstance(node.stop, ir.NoneRef) else self.visit(node.stop)
+        step = '' if isinstance(node.step, ir.NoneRef) else self.visit(node.step)
+        return f'Slice({start}:{stop}:{step})'
+
+    @visit.register
     def _(self, node: ir.SELECT):
         (predicate, on_true, on_false) = (self.parenthesized(term)
                                           if isinstance(term, (ir.SELECT, ir.TUPLE)) else self.visit(term)
@@ -189,8 +210,7 @@ class PrettyFormatter:
     @visit.register
     def _(self, node: ir.CAST):
         type_info = node.target_type
-        value = self.visit(node.value)
-        output = f'{str(type_info)}({value})'
+        output = f'{str(type_info)}({node.value})'
         return output
 
     @visit.register
@@ -208,7 +228,8 @@ class PrettyFormatter:
         terms = []
         for term in node.subexprs:
             if isinstance(term, ir.BinOp):
-                if op_ordering < binop_ordering[op]:
+                term_op = binop_ops[type(term)]
+                if op_ordering < binop_ordering[term_op]:
                     term = self.parenthesized(term)
                 else:
                     term = self.visit(term)
@@ -410,27 +431,6 @@ class PrettyPrinter:
         line = f"{self.indent}{as_str}"
         print(line)
 
-    def make_elif(self, node: ir.IfElse):
-        assert isinstance(node, ir.IfElse)
-        test = self.format(node.test)
-        on_true = f"elif {test}:"
-        self.print_line(on_true)
-        with self.indented():
-            if node.if_branch:
-                self.visit(node.if_branch)
-            else:
-                self.print_line("pass")
-        if node.else_branch:
-            # Make another elif if all conditions are met
-            if len(node.else_branch) == 1:
-                first, = node.else_branch
-                if isinstance(first, ir.IfElse):
-                    self.make_elif(first)
-                    return
-            self.print_line("else:")
-            with self.indented():
-                self.visit(node.else_branch)
-
     @singledispatchmethod
     def visit(self, node):
         msg = f"No method to pretty print node {node}."
@@ -498,16 +498,12 @@ class PrettyPrinter:
                 self.visit(node.if_branch)
             else:
                 self.print_line("pass")
-        if node.else_branch:
-            # Make elif if all conditions are met
-            if len(node.else_branch) == 1:
-                first, = node.else_branch
-                if isinstance(first, ir.IfElse):
-                    self.make_elif(first)
-                    return
-            self.print_line("else:")
-            with self.indented():
+        self.print_line("else:")
+        with self.indented():
+            if node.else_branch:
                 self.visit(node.else_branch)
+            else:
+                self.print_line("pass")
 
     @visit.register
     def _(self, node: ir.Assign):
@@ -525,12 +521,14 @@ class PrettyPrinter:
 
     @visit.register
     def _(self, node: ir.Case):
-        first_cond = self.format(node.conditions[0])
-        first_cond = f'if {first_cond}:'
-        self.print_line(first_cond)
+        # Todo: this implementation precedes recent changes..
+        cond, branch = node.conditions[0]
+        cond = self.format(cond)
+        cond = f'if {cond}:'
+        self.print_line(cond)
         with self.indented():
-            self.print_line(node.branches[0])
-        for cond, branch in zip(itertools.islice(node.conditions, 1), itertools.islice(node.branches, 1)):
+            self.print_line(branch)
+        for cond, branch in itertools.islice(node.conditions, 1, None):
             cond = self.format(cond)
             cond = f'elif {cond}:'
             self.print_line(cond)
@@ -571,3 +569,36 @@ class PrettyPrinter:
     def _(self, node: ir.SingleExpr):
         expr = self.format(node.value)
         self.print_line(expr)
+
+
+class DebugPrinter:
+
+    def __init__(self, max_len: int = 40):
+        self.max_len = max_len
+        self.formatter = PrettyFormatter()
+
+    def format(self, node):
+        return self.formatter.visit(node)
+
+    def visit(self, node: typing.Union[ir.StmtBase, ir.Function], indent='    '):
+        if not isinstance(node, (ir.StmtBase, ir.Function)):
+            msg = f'Debug printer expects a statement or function. Received: "{node}"'
+            raise CompilerError(msg)
+        if isinstance(node, ir.Function):
+            # Todo: Functions could get a position attributes..
+            args = [arg.name for arg in node.args]
+            arg_str = ", ".join(args)
+            formatted = f'{node.name}({arg_str})'
+        else:
+            formatted = self.format(node)
+
+        if len(formatted) > self.max_len:
+            formatted = f'{formatted[:self.max_len]}...'
+        # Todo: adding this to func later..
+        pos = node.pos.line_begin if isinstance(node, ir.StmtBase) else ''
+        formatted = f'{indent}line: {pos}, {formatted}'
+        print(formatted)
+
+    def print_block(self, block: typing.Iterable[ir.StmtBase]):
+        for stmt in block:
+            self.visit(stmt)

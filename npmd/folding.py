@@ -2,15 +2,15 @@ import itertools
 import math
 import operator
 
-from functools import singledispatch
-from typing import Iterable, Iterator, Union
+from functools import singledispatch, singledispatchmethod
+from typing import Iterable, Iterator, List, Union
 
 import numpy as np
 
-import ir
+import npmd.ir as ir
 
-from errors import CompilerError
-from type_checks import is_integer, TypeHelper
+from npmd.errors import CompilerError
+from npmd.type_checks import is_integer, TypeHelper
 
 
 def concatenate(args: Union[Iterable[ir.Expression], Iterator]):
@@ -121,7 +121,7 @@ class ExprContract:
     float_dtypes = (np.dtype('float32'), np.dtype('float64'))
 
     def is_float(self, expr: ir.ValueRef) -> bool:
-        t = self.typer.check_type(expr)
+        t = self.typer(expr)
         if isinstance(t, ir.ArrayType):
             return t.dtype in self.float_dtypes
         return t in self.float_dtypes
@@ -242,19 +242,6 @@ def _(node: ir.USUB):
     return ir.USUB(operand)
 
 
-def test_reduction_is_integer(node: Union[ir.MinReduction, ir.MaxReduction], typer: TypeHelper):
-    if not isinstance(node, (ir.MinReduction, ir.MaxReduction)):
-        msg = f"Cannot treat node {node} as min/max reduction."
-        raise TypeError(msg)
-    for subexpr in node.subexprs:
-        t = typer.check_type(subexpr)
-        if isinstance(t, ir.ArrayType):
-            t = t.dtype
-        if not is_integer(t):
-            return False
-    return True
-
-
 @singledispatch
 def simplify_integer_reduction(node, typer: TypeHelper):
     return node
@@ -265,6 +252,7 @@ def _(node: ir.MinReduction, typer: TypeHelper):
     # numpy won't coerce sets correctly
     constants = []
     varying = []
+    # check
     for v in node.values:
         if isinstance(v, ir.CONSTANT):
             constants.append(v.value)
@@ -279,7 +267,7 @@ def _(node: ir.MinReduction, typer: TypeHelper):
 def _(node: ir.MaxReduction, typer: TypeHelper):
     # Check for non-integer
     for subexpr in node.subexprs:
-        t = typer.check_type(subexpr)
+        t = typer(subexpr)
         if isinstance(t, ir.ArrayType):
             if is_integer(t.dtype):
                 msg = f"Array reference {subexpr} found in scalar reduction."

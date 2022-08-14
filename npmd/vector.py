@@ -1,14 +1,11 @@
 import numpy as np
 
 from dataclasses import dataclass
-from functools import singledispatch
-from typing import Dict, Union
+from typing import Union
 
-import ir
+import npmd.ir as ir
 
 from symbol_table import SymbolTable
-from traversal import Exp
-from type_checks import TypeHelper
 
 
 @dataclass(frozen=True)

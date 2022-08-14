@@ -1,21 +1,24 @@
 import itertools
-
 import numpy
 
+import networkx as nx
+
 from collections import defaultdict
-from typing import Iterable, Optional, Set
+from typing import Optional, Set
 
-import ir
+import npmd.ir as ir
 
-from analysis import compute_element_count
-from blocks import FlowGraph, build_function_graph, get_loop_exit_block, get_blocks_in_loop
-from folding import simplify_arithmetic, fold_constants
-from liveness import get_clobbers, get_loop_header_block, find_loop_iterables_clobbered_by_body, find_live_in_out
-from lvn import ExprRewriter
-from symbol_table import SymbolTable
-from traversal import walk_nodes
-from type_checks import TypeHelper
-from utils import unpack_iterated
+from npmd.analysis import compute_element_count
+from npmd.blocks import FlowGraph, build_function_graph, get_loop_exit_block, get_blocks_in_loop
+from npmd.errors import CompilerError
+from npmd.folding import fold_constants, simplify_arithmetic
+from npmd.liveness import get_clobbers, get_loop_header_block, find_loop_iterables_clobbered_by_body, find_live_in_out
+from npmd.lvn import ExprRewriter
+from npmd.pretty_printing import PrettyFormatter
+from npmd.reductions import NormalizeMinMax
+from npmd.symbol_table import SymbolTable
+from npmd.type_checks import invalid_loop_iterables, TypeHelper
+from npmd.utils import unpack_iterated
 
 
 def rename_clobbered_loop_iterables(graph: FlowGraph, loop: ir.ForLoop, symbols: SymbolTable, verbose: bool = True):
@@ -54,7 +57,7 @@ def rename_clobbered_loop_iterables(graph: FlowGraph, loop: ir.ForLoop, symbols:
             repl.append(stmt)
         repl.append(loop)
         # add remainder
-        repl.extend(itertools.islice(header_stmt_list, header.stop))
+        repl.extend(itertools.islice(header_stmt_list, header.stop, None))
         # now replace the original statements the first list
         header_stmt_list.clear()
         header_stmt_list.extend(repl)
@@ -75,7 +78,7 @@ def sanitize_loop_iterables(node: ir.Function,
     """
     if graph is None:
         graph = build_function_graph(node)
-    loops = [stmt for stmt in walk_nodes(node.body) if isinstance(stmt, ir.ForLoop)]
+    loops = [block.first for block in nx.descendants(graph.graph, graph.entry_block) if isinstance(block.first, ir.ForLoop)]
     for loop in loops:
         rename_clobbered_loop_iterables(graph, loop, symbols, verbose)
 
@@ -110,11 +113,9 @@ def make_min_affine_seq(step, start_and_stops):
         return ir.AffineSeq(ir.Zero, min_diff, step)
 
 
-def affine_sequence_from_iterable(node: ir.ValueRef):
+def make_affine_seq(node: ir.ValueRef):
     if isinstance(node, ir.AffineSeq):
         return node
-    elif isinstance(node, ir.NameRef):
-        return ir.AffineSeq(ir.Zero, ir.SingleDimRef(node, ir.Zero), ir.One)
     elif isinstance(node, ir.Subscript):
         index = node.index
         value = node.value
@@ -122,7 +123,7 @@ def affine_sequence_from_iterable(node: ir.ValueRef):
             start = index.start
             step = index.step
             stop = ir.SingleDimRef(value, ir.Zero)
-            if index.stop is not None:
+            if index.stop != ir.SingleDimRef(node.value, ir.Zero):
                 stop = ir.MIN(index.stop, stop)
         else:
             start = ir.Zero
@@ -130,8 +131,7 @@ def affine_sequence_from_iterable(node: ir.ValueRef):
             step = ir.One
         return ir.AffineSeq(start, stop, step)
     else:
-        msg = f'No method to make affine sequence from "{node}".'
-        raise TypeError(msg)
+        return ir.AffineSeq(ir.Zero, ir.SingleDimRef(node, ir.Zero), ir.One)
 
 
 def make_single_index_loop(header: ir.ForLoop, symbols, noescape):
@@ -158,10 +158,12 @@ def make_single_index_loop(header: ir.ForLoop, symbols, noescape):
     """
 
     typer = TypeHelper(symbols)
+    normalize = NormalizeMinMax(symbols)
+
     by_iterable = {}
     target_to_iterable = {}
     for target, iterable in unpack_iterated(header.target, header.iterable):
-        interval = affine_sequence_from_iterable(iterable)
+        interval = make_affine_seq(iterable)
         by_iterable[iterable] = interval
         target_to_iterable[target] = iterable
 
@@ -174,15 +176,18 @@ def make_single_index_loop(header: ir.ForLoop, symbols, noescape):
 
     if len(exprs) == 1:
         # we can avoid normalizing
-        loop_expr = exprs.pop()
+        affine_expr: ir.AffineSeq = exprs.pop()
     else:
         iterable_lens = []
-        for loop_expr in exprs:
-            c = compute_element_count(loop_expr.start, loop_expr.stop, loop_expr.step)
+        for expr in exprs:
+            c = compute_element_count(expr.start, expr.stop, expr.step)
             iterable_lens.append(c)
-        count = ir.MinReduction(*iterable_lens)
-        loop_expr = ir.AffineSeq(ir.Zero, count, ir.One)
 
+        count = ir.MinReduction(*iterable_lens)
+        affine_expr = ir.AffineSeq(ir.Zero, count, ir.One)
+
+    loop_expr = normalize(affine_expr)
+    assert isinstance(loop_expr, ir.AffineSeq)
     loop_index = None
     for target in target_to_iterable:
         iterable = target_to_iterable[target]
@@ -214,7 +219,7 @@ def make_single_index_loop(header: ir.ForLoop, symbols, noescape):
             assert isinstance(iterable, ir.Subscript)
             if isinstance(iterable.index, ir.Slice):
                 iterable_index = iterable.index
-                if iterable_index.start == loop_index.start and iterable_index.step == loop_index.step:
+                if iterable_index.start == loop_expr.start and iterable_index.step == loop_expr.step:
                     value = ir.Subscript(iterable.value, loop_index)
                 else:
                     assert loop_expr.step == ir.One and loop_expr.start == ir.Zero
@@ -230,7 +235,7 @@ def make_single_index_loop(header: ir.ForLoop, symbols, noescape):
                     value = ir.Subscript(iterable.value, offset)
             else:
                 # single index, which means it's double sliced
-                t = typer.check_type(iterable)
+                t = typer(iterable)
                 name = symbols.make_unique_name_like(iterable, t)
                 stmt = ir.Assign(name, iterable, pos)
                 body.append(stmt)
@@ -246,7 +251,7 @@ def make_single_index_loop(header: ir.ForLoop, symbols, noescape):
 
 def get_safe_loop_indices(stmt: ir.ForLoop, graph: FlowGraph, live_on_exit: Set[ir.NameRef]):
     header = get_loop_header_block(graph, stmt)
-    blocks = set(get_blocks_in_loop(graph, header, include_header=False))
+    blocks = get_blocks_in_loop(graph, header)
     cannot_use = live_on_exit.union(get_clobbers(blocks))
     safe_targets = []
     for target, iterable in unpack_iterated(stmt.target, stmt.iterable):
@@ -255,13 +260,24 @@ def get_safe_loop_indices(stmt: ir.ForLoop, graph: FlowGraph, live_on_exit: Set[
     return safe_targets
 
 
-def lower_loops(stmts: Iterable[ir.Statement], symbols: SymbolTable, graph: FlowGraph):
+def lower_loops(graph: FlowGraph, symbols: SymbolTable):
     liveness = find_live_in_out(graph)
-    headers = [node for node in walk_nodes(stmts) if isinstance(node, ir.ForLoop)]
-    # graph is invalidated by changes, so we have to get all nodes in advance
+    loop_blocks = [block for block in graph.nodes() if block.is_loop_block and isinstance(block.first, ir.ForLoop)]
+    headers = []
+    # our graph is a volatile view rather than a transformable CFG, as this sidesteps issues of maintaining
+    # full structure
     safe_target_lists = []
-    for header in headers:
-        exit_block = get_loop_exit_block(graph, header)
+    for block in loop_blocks:
+        # grab loop setup statement and any variables that are safe to use as loop indices
+        header = block.first
+        invalid_iterables = [*invalid_loop_iterables(header, symbols)]
+        if invalid_iterables:
+            formatter = PrettyFormatter()
+            formatted = ', '.join(formatter(iterable) for iterable in invalid_iterables)
+            msg = f'Non iterable references: {formatted} in for loop, line: {header.pos.line_begin}.'
+            raise CompilerError(msg)
+        headers.append(header)
+        exit_block = get_loop_exit_block(graph, block)
         live_on_exit = liveness[exit_block].live_in
         safe_targets = get_safe_loop_indices(header, graph, live_on_exit)
         safe_target_lists.append(safe_targets)

@@ -2,19 +2,51 @@ from __future__ import annotations
 import numpy as np
 
 from collections import defaultdict, Counter
+from copy import copy
 from contextlib import contextmanager
 from typing import Iterable, List, Optional
 
-import ir
+import npmd.ir as ir
 
-from errors import CompilerError
-from symbol_table import SymbolTable
-from type_checks import TypeHelper
-from utils import is_entry_point, unpack_iterated
-from traversal import walk_parameters
+from npmd.errors import CompilerError
+from npmd.symbol_table import SymbolTable
+from npmd.type_checks import TypeHelper
+from npmd.utils import is_entry_point, unpack_iterated
+from npmd.traversal import walk_parameters
 
 # Todo: stub
 specialized = {ir.NameRef("print")}
+
+
+def map_ids_to_statements(*stmt_seqs: Iterable[ir.StmtBase]):
+    id_to_stmt = {}
+    groups = []
+    for group in stmt_seqs:
+        in_group = set()
+        for stmt in group:
+            stmt_id = id(stmt)
+            in_group.add(stmt_id)
+            if stmt_id not in id_to_stmt:
+                id_to_stmt[stmt_id] = copy(stmt)
+        groups.append(in_group)
+    return id_to_stmt, groups
+
+
+def statement_intersection(a: Iterable[ir.StmtBase], b: Iterable[ir.StmtBase]):
+    id_to_stmt, groups = map_ids_to_statements(a,b)
+    in_a, in_b = groups
+    inter = [id_to_stmt[id_] for id_ in in_a.intersection(in_b)]
+    return inter
+
+
+def statement_difference(a: Iterable[ir.StmtBase], b: Iterable[ir.StmtBase]):
+    id_to_stmt, groups = map_ids_to_statements(a,b)
+    in_a, in_b = groups
+    in_first_only = []
+    for stmt_id in in_a:
+        if stmt_id not in in_b:
+            in_first_only.append(id_to_stmt[stmt_id])
+    return in_first_only
 
 
 class DeclTracker:
@@ -140,15 +172,18 @@ def compute_element_count(start: ir.ValueRef, stop: ir.ValueRef, step: ir.ValueR
     :return:
     """
 
-    diff = ir.SUB(stop, start)
-    base_count = (ir.FLOORDIV(diff, step))
+    if start == ir.Zero:
+        diff = stop
+    else:
+        diff = ir.MAX(ir.SUB(stop, start), ir.Zero)
+    base_count = ir.FLOORDIV(diff, step)
     test = ir.MOD(diff, step)
     fringe = ir.SELECT(predicate=test, on_true=ir.One, on_false=ir.Zero)
     count = ir.ADD(base_count, fringe)
     return count
 
 
-def find_array_length_expression(node: ir.ValueRef, typer: TypeHelper) -> Optional[ir.ValueRef]:
+def find_array_length_expression(node: ir.ValueRef) -> Optional[ir.ValueRef]:
     """
       Find an expression for array length if countable. Otherwise returns None.
       For example:
@@ -164,10 +199,13 @@ def find_array_length_expression(node: ir.ValueRef, typer: TypeHelper) -> Option
         if isinstance(node.index, ir.Slice):
             index = node.index
             start = index.start
+            max_stop = ir.SingleDimRef(node.value, dim=ir.Zero)
             if index.stop is None:
                 stop = ir.SingleDimRef(node.value, dim=ir.Zero)
+            elif index.stop == max_stop:
+                stop = index.stop
             else:
-                stop = ir.MIN(index.stop, ir.SingleDimRef(node.value, dim=ir.Zero))
+                stop = ir.MIN(index.stop, max_stop)
             step = index.step
             return compute_element_count(start, stop, step)
         else:

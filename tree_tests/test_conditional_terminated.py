@@ -1,7 +1,7 @@
 def divergent(a, b, c):
-    for i in a:
-        for j in b:
-            if not j:
+    for u in a:
+        for v in b:
+            if not v:
                 continue
             print("should be nested")
         for h in c:

@@ -8,14 +8,14 @@ from contextlib import contextmanager
 from itertools import islice
 from pathlib import Path
 
-import ir
+import npmd.ir as ir
 
-from canonicalize import replace_call
-from errors import CompilerError
-from folding import fold_constants, simplify_arithmetic
-from pretty_printing import PrettyFormatter
-from symbol_table import symbol, SymbolTable
-from utils import unpack_iterated
+from npmd.canonicalize import replace_call
+from npmd.errors import CompilerError
+from npmd.folding import fold_constants, simplify_arithmetic
+from npmd.pretty_printing import PrettyFormatter
+from npmd.symbol_table import symbol, SymbolTable
+from npmd.utils import unpack_iterated
 
 
 binary_op_strs = {ast.Add: "+",
@@ -376,21 +376,28 @@ class TreeBuilder(ast.NodeVisitor):
     def visit_Subscript(self, node: ast.Subscript) -> typing.Union[ir.Subscript, ir.Slice]:
         target = self.visit(node.value)
         s = self.visit(node.slice)
-        value = ir.Subscript(target, s)
-        if isinstance(target, ir.Subscript):
-            # this could be done better with pretty printing
-            formatted = self.formatter(value)
-            msg = f'Nested subscripts are not currently supported: "{formatted}".'
-            raise CompilerError(msg)
-        return value
+        if isinstance(s, ir.Slice):
+            if all(isinstance(sl, ir.NoneRef) for sl in s.subexprs):
+                return target
+            # sanitize any Nones so that we don't need the full subscript to interpret this
+            if any(isinstance(sl, ir.NoneRef) for sl in s.subexprs):
+                start, stop, step = s.subexprs
+                if isinstance(start, ir.NoneRef):
+                    start = ir.Zero
+                if isinstance(stop, ir.NoneRef):
+                    stop = ir.SingleDimRef(target, ir.Zero)
+                if isinstance(step, ir.NoneRef):
+                    step = ir.One
+                s = ir.Slice(start, stop, step)
+        return ir.Subscript(target, s)
 
     def visit_Index(self, node: ast.Index) -> typing.Union[ir.ValueRef, ir.NameRef, ir.CONSTANT]:
         return self.visit(node.value)
 
     def visit_Slice(self, node: ast.Slice) -> ir.Slice:
-        lower = self.visit(node.lower) if node.lower is not None else None
-        upper = self.visit(node.upper) if node.upper is not None else None
-        step = self.visit(node.step) if node.step is not None else None
+        lower = self.visit(node.lower) if node.lower is not None else ir.NoneRef()
+        upper = self.visit(node.upper) if node.upper is not None else ir.NoneRef()
+        step = self.visit(node.step) if node.step is not None else ir.NoneRef()
         return ir.Slice(lower, upper, step)
 
     def visit_ExtSlice(self, node: ast.ExtSlice):
@@ -480,7 +487,7 @@ class TreeBuilder(ast.NodeVisitor):
         # additional arithmetic and not all variable types may be fully known
         # at this point.
         try:
-            for target, iterable in unpack_iterated(target_node, iter_node, include_enumerate_indices=True):
+            for target, iterable in unpack_iterated(target_node, iter_node):
                 # check for some things that aren't currently supported
                 if isinstance(target, ir.Subscript):
                     msg = f'Setting a subscript target in a for loop iterator is currently unsupported: line{pos.line_begin}.'
@@ -581,7 +588,7 @@ def populate_func_symbols(func_table, types, allow_inference=True, ignore_unboun
                 missing_arg_types.append(s.get_name())
     if missing_arg_types:
         missing_arg_types = ', '.join(s for s in missing_arg_types)
-        msg = f'Misisng type information for arguments "{missing_arg_types}"'
+        msg = f'In function: "{func_name}", missing type information for arguments "{missing_arg_types}"'
         raise CompilerError(msg)
     for s in func_table.get_symbols():
         name = s.get_name()

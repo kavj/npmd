@@ -1,17 +1,20 @@
 from __future__ import annotations
 import itertools
+
+import networkx as nx
+
 from collections import defaultdict
 from functools import singledispatchmethod
-import networkx as nx
-from analysis import get_names, get_read_and_assigned
-from blocks import BasicBlock, build_function_graph, get_blocks_in_loop, get_loop_header_block
-from errors import CompilerError
-from symbol_table import SymbolTable
-from traversal import walk_parameters
-from utils import is_entry_point, unpack_iterated
-from typing import Dict, Iterable, List, Set, Union
+from typing import Dict, Iterable, List, Set
 
-import ir
+import npmd.ir as ir
+
+from npmd.analysis import get_names, get_read_and_assigned
+from npmd.blocks import BasicBlock, build_function_graph, FlowGraph, get_blocks_in_loop, get_loop_header_block
+from npmd.errors import CompilerError
+from npmd.symbol_table import SymbolTable
+from npmd.traversal import walk_parameters
+from npmd.utils import is_entry_point, unpack_iterated
 
 
 # Most of this work ended up being done elsewhere in controlflow now. This can now do slightly more precise liveness
@@ -149,7 +152,12 @@ class BlockLiveness:
         return changed
 
 
-def propagate_liveness(graph: nx.DiGraph, block_liveness: Dict[BasicBlock, BlockLiveness]):
+def find_live_in_out(graph: FlowGraph) -> Dict[BasicBlock, BlockLiveness]:
+    block_liveness = {}
+    for node in graph.nodes():
+        kills, referenced, live_in = get_read_and_assigned(node)
+        single_block_liveness = BlockLiveness(live_in, kills)
+        block_liveness[node] = single_block_liveness
     changed = True
     # mark basic live
     while changed:
@@ -158,15 +166,6 @@ def propagate_liveness(graph: nx.DiGraph, block_liveness: Dict[BasicBlock, Block
             single_block_liveness = block_liveness[node]
             succ_liveness = (block_liveness[s] for s in graph.successors(node))
             changed |= single_block_liveness.update_liveness(succ_liveness)
-
-
-def find_live_in_out(graph: nx.DiGraph) -> Dict[BasicBlock, BlockLiveness]:
-    block_liveness = {}
-    for node in graph.nodes():
-        kills, referenced, live_in = get_read_and_assigned(node)
-        single_block_liveness = BlockLiveness(live_in, kills)
-        block_liveness[node] = single_block_liveness
-    propagate_liveness(graph, block_liveness)
     return block_liveness
 
 
@@ -182,7 +181,7 @@ def get_clobbers(blocks: Iterable[BasicBlock]):
                     yield target
 
 
-def find_loop_iterables_clobbered_by_body(graph: nx.DiGraph, node: Union[ir.ForLoop, BasicBlock]):
+def find_loop_iterables_clobbered_by_body(graph: FlowGraph, node: BasicBlock):
     """
 
     :param graph:
@@ -192,10 +191,9 @@ def find_loop_iterables_clobbered_by_body(graph: nx.DiGraph, node: Union[ir.ForL
 
     # Todo: we'll need a check for array augmentation as well later to see whether it's easily provable
     # that writes match the read pattern at entry
-    header = node if isinstance(node, BasicBlock) else get_loop_header_block(graph, node)
-    blocks = set(get_blocks_in_loop(graph, header, include_header=False))
+    blocks = get_blocks_in_loop(graph, node)
     assigned = set(get_clobbers(blocks))
-    loop_header_stmt = header.first
+    loop_header_stmt = node.first
     clobbered = set()
     for _, iterable in unpack_iterated(loop_header_stmt.target, loop_header_stmt.iterable):
         # This is used so that we can rename clobbered names before processing the loop header.
@@ -206,7 +204,7 @@ def find_loop_iterables_clobbered_by_body(graph: nx.DiGraph, node: Union[ir.ForL
     return clobbered
 
 
-def find_loop_local_liveness(graph: nx.DiGraph, node: ir.ForLoop):
+def find_loop_local_liveness(graph: FlowGraph, node: ir.ForLoop):
     """
     :param graph:
     :param node:
@@ -222,7 +220,7 @@ def find_loop_local_liveness(graph: nx.DiGraph, node: ir.ForLoop):
         raise ValueError(msg)
     blocks = set(get_blocks_in_loop(graph, header))
     blocks.add(header)
-    loop_graph = graph.subgraph(blocks)
+    loop_graph = graph.graph.subgraph(blocks)
     block_liveness = {}
     clobbers = get_clobbers(loop_graph.nodes())
     for node in loop_graph.nodes():
@@ -240,7 +238,7 @@ def find_loop_local_liveness(graph: nx.DiGraph, node: ir.ForLoop):
     return block_liveness
 
 
-def check_all_assigned(graph: nx.DiGraph):
+def check_all_assigned(graph: FlowGraph):
     liveness = find_live_in_out(graph.graph)
     entry = graph.entry_block
     visited = {entry}

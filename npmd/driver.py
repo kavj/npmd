@@ -2,18 +2,19 @@ import os
 import sys
 
 from pathlib import Path
-
-from pybind_gen import gen_module, gen_setup, Emitter
-
-from ast_conversion import build_module_ir_and_symbols
-from blocks import build_function_graph, graph_to_pydot, render_pydot, patch_missing_return
-from dead_code import remove_unreachable_blocks, remove_statements_following_terminals, strip_continues
-from errors import CompilerError
-from liveness import check_all_assigned, dump_live_info, find_live_in_out, remove_dead_statements
-from loop_simplify import lower_loops, sanitize_loop_iterables
 from pprint import pformat
-from pretty_printing import PrettyPrinter
-from type_checks import dump_symbol_type_info, TypeInference
+
+
+from npmd.ast_conversion import build_module_ir_and_symbols
+from npmd.blocks import build_function_graph, render_dot_graph, render_dominator_tree, patch_missing_return
+# from npmd.branch_optimizers import flatten_branches
+from npmd.dead_code import inline_const_branches, remove_unreachable_blocks, remove_statements_following_terminals, strip_continues
+from npmd.errors import CompilerError
+from npmd.liveness import check_all_assigned, dump_live_info, find_live_in_out, remove_dead_statements
+from npmd.loop_simplify import lower_loops, sanitize_loop_iterables
+from npmd.pretty_printing import PrettyPrinter
+from npmd.pybind_gen import gen_module, gen_setup, Emitter
+from npmd.type_checks import dump_symbol_type_info, infer_types
 
 
 version = sys.version_info
@@ -32,10 +33,7 @@ def make_setup_module(exts, path):
         emitter.print_line("import numpy")
         emitter.print_line(line=f"exts={pformat(exts)}")
         emitter.print_line(line=f"processed_exts=make_extensions(exts)")
-        # temporary measure
-        utils_include = str((Path.cwd().joinpath("runtime")))
-
-        setup_str = f'setup(name="{path.name}", ext_modules=processed_exts, include_dirs=[numpy.get_include(), \"{utils_include}\"])'
+        setup_str = f'setup(name="{path.name}", ext_modules=processed_exts, include_dirs=[numpy.get_include()])'
         emitter.print_line(setup_str)
 
 
@@ -67,36 +65,32 @@ def compile_module(file_path, types,  out_dir, verbose=False, print_result=True,
     funcs = []
     for func in mod_ir.functions:
         func_symbols = symbols.get(func.name)
-        TypeInference(func_symbols).visit(func)
+        func.body = inline_const_branches(func.body)
         func = remove_dead_statements(func, func_symbols)
         remove_statements_following_terminals(func)
         # more aggressive
         strip_continues(func)
         sanitize_loop_iterables(func, func_symbols)
         func_graph = build_function_graph(func)
-        lower_loops(func.body, func_symbols, func_graph)
-        func = remove_dead_statements(func, func_symbols)
+        remove_unreachable_blocks(func_graph)
+        infer_types(func, func_symbols)
+        func_graph = build_function_graph(func)
+        lower_loops(func_graph, func_symbols)
+        patch_missing_return(func_graph)
+        # Todo: this needs CFG support
+        # flatten_branches(func_graph)
         func_graph = build_function_graph(func)
         func_graph = remove_unreachable_blocks(func_graph)
-
-        patch_missing_return(func_graph)
-
+        render_path = Path(out_dir)
+        assert render_path.is_dir()
         if debug:
-            file_path_ = Path(out_dir)
-            assert file_path_.is_dir()
-            file_dir = file_path_.parent
-            dot_name = graph_to_pydot(func_graph, func.name, modname, file_dir)
-            render_path = Path(out_dir)
-            render_pydot(dot_name, render_path)
-            func_graph = remove_unreachable_blocks(func_graph)
-            patch_missing_return(func_graph)
-
             liveness = find_live_in_out(func_graph)
             check_all_assigned(func_graph)
+            func_graph = build_function_graph(func)
             dump_live_info(liveness, ignores=func.args)
-            dot_name = graph_to_pydot(func_graph, func.name + '_after_dce', modname, file_dir)
-            render_path = Path(out_dir)
-            render_pydot(dot_name, render_path)
+            func_graph = remove_unreachable_blocks(func_graph)
+            render_dot_graph(func_graph.graph, func_graph.func_name, render_path)
+            render_dominator_tree(func_graph, render_path)
 
         if print_result:
             print('type info..')
