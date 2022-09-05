@@ -2,8 +2,8 @@ import itertools
 import math
 import operator
 
-from functools import singledispatch, singledispatchmethod
-from typing import Iterable, Iterator, List, Union
+from functools import singledispatch
+from typing import Iterable, Iterator, Union
 
 import numpy as np
 

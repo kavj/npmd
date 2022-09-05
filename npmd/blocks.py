@@ -182,21 +182,6 @@ class FlowGraph:
         raise CompilerError(msg)
 
 
-
-def match_block_to_entry_point(graph: FlowGraph, node: Union[ir.Function, ir.ForLoop, ir.WhileLoop, ir.IfElse]):
-    if isinstance(node, ir.Function):
-        entry_point = graph.entry_block
-        assert entry_point.first is node
-        return entry_point
-    else:
-        for block in graph.nodes():
-            if block.is_entry_point:
-                if block.first is node:
-                    return block
-    msg = f'Statement "{node}" is not in graph'
-    raise ValueError(msg)
-
-
 def sequence_block_intervals(stmts: Iterable[ir.Statement]):
     """
     For reversal, cast to list and reverse.
@@ -308,17 +293,11 @@ def build_graph_recursive(statements: List[ir.Statement], builder: CFGBuilder, e
     deferrals = []  # last_block determines if we have deferrals to this one
     for start, stop in sequence_block_intervals(statements):
         block = builder.create_block(statements, start, stop, builder.depth)
-        for stmt in block:
-            if stmt.pos.line_begin == 23:
-                print('')
         if prior_block is entry_point:
             builder.add_edge(entry_point, block)
         elif prior_block.is_branch_block:
             # If we have blocks exiting a branch, which do not contain a terminating statement
             # then add incoming edges to this block
-            if deferrals:
-                # mark this as a branch convergence point
-                prior_block.first.branch_converge = block
             for d in deferrals.pop():
                 builder.add_edge(d, block)
         else:
@@ -344,15 +323,13 @@ def build_graph_recursive(statements: List[ir.Statement], builder: CFGBuilder, e
             else_body = if_stmt.else_branch
             if_exit_block = build_graph_recursive(if_body, builder, block)
             # patch initial entry point
-            branch_stmt = block.first
             if_entry_block, = builder.graph.successors(block)
-            branch_stmt.branch_true = if_entry_block
             if if_exit_block.unterminated:
                 branch_exit_points.append(if_exit_block)
             else_exit_block = build_graph_recursive(else_body, builder, block)
             for s in builder.graph.successors(block):
+                assert isinstance(s, BasicBlock)
                 if s is not if_entry_block:
-                    branch_stmt.branch_false = s
                     break
             else:
                 msg = f'No else entry block found for {statements[start]}'
@@ -364,6 +341,27 @@ def build_graph_recursive(statements: List[ir.Statement], builder: CFGBuilder, e
             builder.register_block_terminator(block)
         prior_block = block
     return prior_block
+
+
+def remove_trivial_empty_blocks(graph: FlowGraph):
+    """
+    merge blocks with single in and out degree into their predecessor if the predecessor
+    has out degree one and is not a control flow entry point.
+    :param graph:
+    :return:
+    """
+
+    # Since this is only a view of the underlying tree, only merge empty blocks.
+    worklist = [node for node in graph.nodes() if not node
+                and graph.in_degree(node) == 1 and graph.out_degree(node) == 1]
+
+    while worklist:
+        node = worklist.pop()
+        predecessor, = graph.predecessors(node)
+        if graph.out_degree(predecessor) == 1 and not predecessor.is_entry_point:
+            successor, = graph.successors(node)
+            graph.graph.remove_node(node)
+            graph.graph.add_edge(predecessor, successor)
 
 
 def build_function_graph(func: ir.Function) -> FlowGraph:
@@ -381,7 +379,10 @@ def build_function_graph(func: ir.Function) -> FlowGraph:
         for block in break_blocks:
             builder.add_edge(block, loop_exit_block)
 
-    return builder.graph
+    graph = builder.graph
+    remove_trivial_empty_blocks(graph)
+
+    return graph
 
 
 def get_loop_header_block(graph: FlowGraph, node: ir.ForLoop) -> BasicBlock:
@@ -418,7 +419,6 @@ def get_blocks_in_loop(graph: FlowGraph, block: BasicBlock):
     """
     :param graph:
     :param block:
-    :param include_header:
     :return:
     """
 
@@ -436,33 +436,6 @@ def get_blocks_in_loop(graph: FlowGraph, block: BasicBlock):
     loop_blocks = set(nx.descendants(cfg, block))
 
     return loop_blocks
-
-
-def patch_missing_return(graph: FlowGraph):
-    missing = []
-    for node, degree in graph.out_degree():
-        if degree == 0:
-            if node:
-                if not isinstance(node.last, ir.Return):
-                    missing.append(node)
-            else:
-                missing.append(node)
-    # now extract statmenet lists, should be only one
-    if not missing:
-        return
-    if len(missing) > 1:
-        msg = f'Multiple unterminated exit blocks.. somehow..'
-        raise ValueError(msg)
-    block = missing.pop()
-    # verify that this is the terminal block on this statement list
-    if block:
-        line = block.last.pos.line_begin
-        pos = ir.Position(line, line, 0, 10)
-    else:
-        pos = ir.Position(-1, -1, 0, 10)
-    stmt = ir.Return(ir.NoneRef(), pos)
-    # Todo: do we need to switch to deque for appendleft?
-    block.append_to_block(stmt)
 
 
 def render_dot_graph(graph: nx.DiGraph, name: str, out_path: Path):

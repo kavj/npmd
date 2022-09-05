@@ -3,7 +3,7 @@ import numpy as np
 
 from contextlib import contextmanager
 from functools import singledispatchmethod
-from typing import Any, Iterable, List, Union
+from typing import Any, List, Union
 
 import npmd.ir as ir
 

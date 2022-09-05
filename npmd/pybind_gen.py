@@ -393,7 +393,6 @@ class ExprFormatter:
     def _(self, node: ir.Subscript):
         index = self.render(node.index)
         base = self.render(node.value)
-        base_type = self.type_helper(node.value)
         subscr_type = self.type_helper(node)
         # this should be good enough for now. Need to actually make
         # loop local pointer access somewhere for cheaper subscripting

@@ -10,7 +10,6 @@ import npmd.ir as ir
 
 from npmd.errors import CompilerError
 from npmd.symbol_table import SymbolTable
-from npmd.type_checks import TypeHelper
 from npmd.utils import is_entry_point, unpack_iterated
 from npmd.traversal import walk_parameters
 
@@ -263,9 +262,3 @@ def get_read_and_assigned(stmts: Iterable[ir.StmtBase]):
                                 uevs.add(p)
                             referenced.add(p)
     return assigned, referenced, uevs
-
-
-def get_names(node: Iterable[ir.StmtBase]):
-    assigned, referenced, _ = get_read_and_assigned(node)
-    referenced.update(assigned)
-    return referenced

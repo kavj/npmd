@@ -9,8 +9,8 @@ from typing import Dict, Iterable, List, Set
 
 import npmd.ir as ir
 
-from npmd.analysis import get_names, get_read_and_assigned
-from npmd.blocks import BasicBlock, build_function_graph, FlowGraph, get_blocks_in_loop, get_loop_header_block
+from npmd.analysis import get_read_and_assigned
+from npmd.blocks import BasicBlock, build_function_graph, FlowGraph
 from npmd.errors import CompilerError
 from npmd.symbol_table import SymbolTable
 from npmd.traversal import walk_parameters
@@ -31,9 +31,9 @@ def drop_unused_symbols(stmts: Iterable[ir.StmtBase], args: Iterable[ir.NameRef]
     :param symbols:
     :return:
     """
-    # Todo: this doesn't capture referenced... how did it ever work?
-    # stmt_list = list(stmts)
-    referenced = get_names(stmts)
+
+    assigned, referenced, _ = get_read_and_assigned(stmts)
+    referenced.update(assigned)
     referenced.update(args)
     dead_names = set()
     for sym_name in symbols.all_locals:
@@ -181,63 +181,6 @@ def get_clobbers(blocks: Iterable[BasicBlock]):
                     yield target
 
 
-def find_loop_iterables_clobbered_by_body(graph: FlowGraph, node: BasicBlock):
-    """
-
-    :param graph:
-    :param node:
-    :return:
-    """
-
-    # Todo: we'll need a check for array augmentation as well later to see whether it's easily provable
-    # that writes match the read pattern at entry
-    blocks = get_blocks_in_loop(graph, node)
-    assigned = set(get_clobbers(blocks))
-    loop_header_stmt = node.first
-    clobbered = set()
-    for _, iterable in unpack_iterated(loop_header_stmt.target, loop_header_stmt.iterable):
-        # This is used so that we can rename clobbered names before processing the loop header.
-        # generally they shouldn't come up in the first place
-        for p in walk_parameters(iterable):
-            if p in assigned:
-                clobbered.add(p)
-    return clobbered
-
-
-def find_loop_local_liveness(graph: FlowGraph, node: ir.ForLoop):
-    """
-    :param graph:
-    :param node:
-    :return:
-    """
-
-    header = node if isinstance(node, BasicBlock) else get_loop_header_block(graph, node)
-    # To avoid complicating analysis, ensure nothing declared in the header is clobbered in the body
-    clobbered_iterables = find_loop_iterables_clobbered_by_body(graph, header)
-    if clobbered_iterables:
-        clobber_str = ", ".join(c.name for c in clobbered_iterables)
-        msg = f'The following names are iterated over and clobbered by the loop body: "{clobber_str}"'
-        raise ValueError(msg)
-    blocks = set(get_blocks_in_loop(graph, header))
-    blocks.add(header)
-    loop_graph = graph.graph.subgraph(blocks)
-    block_liveness = {}
-    clobbers = get_clobbers(loop_graph.nodes())
-    for node in loop_graph.nodes():
-        kills, referenced, live_in = get_read_and_assigned(node)
-        refs = kills.union(referenced)
-        refs.update(live_in)
-        for r in refs:
-            if r not in clobbers:
-                kills.discard(r)
-                referenced.discard(r)
-                live_in.discard(r)
-        single_block_liveness = BlockLiveness(live_in, kills)
-        block_liveness[node] = single_block_liveness
-    # Now mark anything that could be kept alive by a live alias
-    return block_liveness
-
-
 def check_all_assigned(graph: FlowGraph):
     liveness = find_live_in_out(graph.graph)
     entry = graph.entry_block
@@ -341,8 +284,7 @@ def remove_dead_statements(func: ir.Function, symbols: SymbolTable):
     liveness = find_live_in_out(graph)
     dead = mark_dead_statements(liveness, symbols)
     body = remove_statements_from(func.body, dead)
-    func = ir.Function(func.name, func.args, body)
+    func.body = body
     graph = build_function_graph(func)
     stmts = itertools.chain(*(block for block in graph.nodes()))
     drop_unused_symbols(stmts, func.args, symbols)
-    return func

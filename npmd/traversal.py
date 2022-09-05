@@ -1,9 +1,10 @@
+from collections import deque
 from functools import singledispatchmethod
-from typing import Iterable, Union
+from typing import Generator, Iterable, List, Union
 
 import npmd.ir as ir
 
-from npmd.utils import unpack_iterated
+from npmd.utils import is_entry_point, unpack_iterated
 
 
 def get_nested(node: Union[ir.IfElse, ir.ForLoop, ir.WhileLoop]):
@@ -78,6 +79,36 @@ def walk_nodes(stmts: Iterable[ir.StmtBase]):
                 break
         else:
             queued.pop()
+
+
+def get_statement_lists(node: Union[ir.Function, ir.IfElse, ir.ForLoop, ir.WhileLoop, list]) -> Generator[List[ir.StmtBase], None, None]:
+    """
+    yields all statement lists by pre-ordering, breadth first
+    :param node:
+    :return:
+    """
+
+    queued = deque()
+    if isinstance(node, ir.Function):
+        queued.append(node.body)
+    elif isinstance(node, ir.IfElse):
+        queued.append(node.else_branch)
+        queued.append(node.if_branch)
+    elif isinstance(node, (ir.ForLoop, ir.WhileLoop)):
+        queued.append(node.body)
+    else:  # statement list
+        queued.append(node)
+    while queued:
+        stmts = queued.pop()
+        # yield in case caller modifies trim
+        yield stmts
+        for stmt in stmts:
+            if is_entry_point(stmt):
+                if isinstance(stmt, ir.IfElse):
+                    queued.appendleft(stmt.if_branch)
+                    queued.appendleft(stmt.else_branch)
+                else:
+                    queued.appendleft(stmt.body)
 
 
 def all_entry_points(stmts: Iterable[ir.StmtBase]):

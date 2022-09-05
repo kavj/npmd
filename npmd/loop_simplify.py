@@ -1,86 +1,106 @@
-import itertools
 import numpy
 
-import networkx as nx
 
 from collections import defaultdict
-from typing import Optional, Set
+from typing import Set
 
 import npmd.ir as ir
 
 from npmd.analysis import compute_element_count
-from npmd.blocks import FlowGraph, build_function_graph, get_loop_exit_block, get_blocks_in_loop
+from npmd.blocks import FlowGraph, get_loop_header_block, get_loop_exit_block, get_blocks_in_loop
 from npmd.errors import CompilerError
 from npmd.folding import fold_constants, simplify_arithmetic
-from npmd.liveness import get_clobbers, get_loop_header_block, find_loop_iterables_clobbered_by_body, find_live_in_out
+from npmd.liveness import get_clobbers, find_live_in_out
 from npmd.lvn import ExprRewriter
 from npmd.pretty_printing import PrettyFormatter
 from npmd.reductions import NormalizeMinMax
 from npmd.symbol_table import SymbolTable
+from npmd.traversal import get_statement_lists, walk_nodes, walk_parameters
 from npmd.type_checks import invalid_loop_iterables, TypeHelper
 from npmd.utils import unpack_iterated
 
 
-def rename_clobbered_loop_iterables(graph: FlowGraph, loop: ir.ForLoop, symbols: SymbolTable, verbose: bool = True):
+def find_loop_clobbered_iterables(node: ir.ForLoop, typer: TypeHelper):
+    """
+
+    :param node:
+    :param typer:
+    :return:
+    """
+
+    # Todo: we'll need a check for array augmentation as well later to see whether it's easily provable
+    # that writes match the read pattern at entry
+
+    clobbered_in_body = set()
+    augmented_in_body = set()
+    for stmt in walk_nodes(node.body):
+        if isinstance(stmt, ir.Assign):
+            if isinstance(stmt.target, ir.NameRef):
+                clobbered_in_body.add(stmt.target)
+            else:
+                augmented_in_body.add(stmt.target)
+
+        elif isinstance(stmt, ir.InPlaceOp):
+            if isinstance(stmt.target, ir.NameRef):
+                augmented_in_body.add(stmt.target)
+            else:
+                assert isinstance(stmt.target, ir.NameRef)
+
+        elif isinstance(stmt, ir.ForLoop):
+            for target, _ in unpack_iterated(stmt.target, stmt.iterable):
+                assert isinstance(target, ir.NameRef)
+                clobbered_in_body.add(target)
+
+    must_rename = set()
+
+    for target, iterable in unpack_iterated(node.target, node.iterable):
+        for param in walk_parameters(iterable):
+            if param in clobbered_in_body:
+                must_rename.add(param)
+            elif param in augmented_in_body and not isinstance(typer(param), ir.ArrayType):
+                # augmented scalar variable name, not a subscript
+                must_rename.add(param)
+
+    return must_rename
+
+
+def rename_clobbered_loop_iterables(func: ir.Function, symbols: SymbolTable, verbose: bool = True):
     """
     This makes a copy of cases where the name used by the loop header is overwritten in the body,
     which makes analyzing their liveness much less confusing, particularly in the absence of LCSSA.
 
-    :param graph:
-    :param loop:
+    :param func:
     :param symbols:
     :param verbose:
     :return:
     """
     # Todo: do we actually want this as a CFG dependent pass?
-    header = get_loop_header_block(graph, loop)
-    clobbered = find_loop_iterables_clobbered_by_body(graph, header)
-    if clobbered:
-        renamed = {}
-        if verbose:
-            clobber_str = ', '.join(c.name for c in clobbered)
-            msg = f'The following names appear in the list of loop iterables and are completely ' \
-                  f'overwritten in the loop body: "{clobber_str}"'
-            print(msg)
-        for c in clobbered:
-            renamed[c] = symbols.make_versioned(c)
-        rewriter = ExprRewriter(symbols, renamed)
-        iterable_expr = rewriter.rewrite_expr(loop.iterable)
-        loop.iterable = iterable_expr
-        pos = loop.pos
-        header_stmt_list = header.statements
-        start = header.start
-        # reinsert everything up to the loop
-        repl = header_stmt_list[:start]
-        for original, rename in renamed.items():
-            stmt = ir.Assign(target=rename, value=original, pos=pos)
-            repl.append(stmt)
-        repl.append(loop)
-        # add remainder
-        repl.extend(itertools.islice(header_stmt_list, header.stop, None))
-        # now replace the original statements the first list
-        header_stmt_list.clear()
-        header_stmt_list.extend(repl)
-
-
-def sanitize_loop_iterables(node: ir.Function,
-                            symbols: SymbolTable,
-                            graph: Optional[FlowGraph] = None,
-                            verbose: bool = True):
-    """
-    This shallow copies any iterables clobbered by a loop body, prior to loop body entry and substitutes
-    the copy name in the header references.
-    :param node:
-    :param symbols:
-    :param graph:
-    :param verbose:
-    :return:
-    """
-    if graph is None:
-        graph = build_function_graph(node)
-    loops = [block.first for block in nx.descendants(graph.graph, graph.entry_block) if isinstance(block.first, ir.ForLoop)]
-    for loop in loops:
-        rename_clobbered_loop_iterables(graph, loop, symbols, verbose)
+    typer = TypeHelper(symbols)
+    for stmt_list in get_statement_lists(func):
+        if any(isinstance(stmt, ir.ForLoop) for stmt in stmt_list):
+            repl = []
+            for stmt in stmt_list:
+                if isinstance(stmt, ir.ForLoop):
+                    clobbered = find_loop_clobbered_iterables(stmt, typer)
+                    if clobbered:
+                        renamed = {}
+                        if verbose:
+                            clobber_str = ', '.join(c.name for c in clobbered)
+                            msg = f'The following names appear in the list of loop iterables and are completely ' \
+                                  f'overwritten in the loop body: "{clobber_str}"'
+                            print(msg)
+                        for c in clobbered:
+                            renamed[c] = symbols.make_versioned(c)
+                        rewriter = ExprRewriter(symbols, renamed)
+                        iterable_expr = rewriter.rewrite_expr(stmt.iterable)
+                        stmt.iterable = iterable_expr
+                        pos = stmt.pos
+                        for original, rename in renamed.items():
+                            copy_stmt = ir.Assign(target=rename, value=original, pos=pos)
+                            repl.append(copy_stmt)
+                repl.append(stmt)
+            stmt_list.clear()
+            stmt_list.extend(repl)
 
 
 def make_min_affine_seq(step, start_and_stops):

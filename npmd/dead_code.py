@@ -5,29 +5,25 @@ from typing import Dict, Iterable, List, Optional
 
 import npmd.ir as ir
 from npmd.blocks import build_function_graph, BasicBlock, FlowGraph
-from npmd.traversal import walk_nodes
+from npmd.liveness import drop_unused_symbols
+from npmd.symbol_table import SymbolTable
+from npmd.traversal import get_statement_lists, walk_nodes
 
 
-def inline_const_branches(stmts: List[ir.StmtBase]):
-    repl = []
-    for stmt in stmts:
-        if isinstance(stmt, ir.IfElse):
-            if isinstance(stmt.test, ir.CONSTANT):
-                if operator.truth(stmt.test):
-                    live_branch = inline_const_branches(stmt.if_branch)
-                    repl.extend(live_branch)
+def inline_const_branches(func: ir.Function):
+    for stmt_list in get_statement_lists(func):
+        if any(isinstance(stmt, ir.IfElse) and isinstance(stmt.test, ir.CONSTANT) for stmt in stmt_list):
+            repl = []
+            for stmt in stmt_list:
+                if isinstance(stmt, ir.IfElse) and isinstance(stmt.test, ir.CONSTANT):
+                    if operator.truth(stmt.test):
+                        repl.extend(stmt.if_branch)
+                    else:
+                        repl.extend(stmt.else_branch)
                 else:
-                    live_branch = inline_const_branches(stmt.else_branch)
-                    repl.extend(live_branch)
-            else:
-                stmt.if_branch = inline_const_branches(stmt.if_branch)
-                stmt.else_branch = inline_const_branches(stmt.else_branch)
-                repl.append(stmt)
-        else:
-            if isinstance(stmt, (ir.ForLoop, ir.WhileLoop)):
-                stmt.body = inline_const_branches(stmt.body)
-            repl.append(stmt)
-    return repl
+                    repl.append(stmt)
+            stmt_list.clear()
+            stmt_list.extend(repl)
 
 
 def get_unreachable_blocks(graph: FlowGraph):
@@ -114,67 +110,28 @@ def remove_dead_edges(graph: FlowGraph):
                     graph.remove_edge(node, entry_block)
 
 
-def all_terminated(node: List[ir.Statement]):
-    if node:
-        last =  node[-1]
-        if isinstance(last, (ir.Break, ir.Continue, ir.Return)):
-            return True
-        elif isinstance(last, ir.IfElse):
-            if all_terminated(last.if_branch) and all_terminated(last.else_branch):
-                return True
-    return False
-
-
-def get_continue_terminated_branches(node: List[ir.Statement]):
-    if node:
-        last = node[-1]
-        if isinstance(last, ir.Continue):
-            yield node
-        elif isinstance(last, ir.IfElse):
-            yield from get_continue_terminated_branches(last.if_branch)
-            yield from get_continue_terminated_branches(last.else_branch)
-
-
-def strip_continues(node: ir.Function):
-    # gather loop nodes
-    loop_nodes = [n for n in walk_nodes(node.body) if isinstance(n, (ir.ForLoop, ir.WhileLoop))]
-    # first grab trivial
-    for node in loop_nodes:
-        body = node.body
-        if body:
-            last = body[-1]
-            if isinstance(last, ir.Continue):
-                body.pop()
-    for node in loop_nodes:
-        if all_terminated(node.body):
-            terminated = [*get_continue_terminated_branches(node.body)]
-            for stmts in terminated:
-                assert stmts and isinstance(stmts[-1], ir.Continue)
-                stmts.pop()
-
-
 def remove_trivial_continues(node: ir.Function):
-    for node in walk_nodes(node.body):
-        if isinstance(node, (ir.ForLoop, ir.WhileLoop)):
-            if node.body and isinstance(node.body[-1], ir.Continue):
-                node.body.pop()
+    for stmts in get_statement_lists(node):
+        for stmt in stmts:
+            if isinstance(stmt, (ir.ForLoop, ir.WhileLoop)):
+                while stmt.body and isinstance(stmt.body[-1], ir.Continue):
+                    stmt.body.pop()
 
 
-def remove_statements_following_terminals(node: ir.Function):
-    to_trim = [node.body]
-    for stmt in walk_nodes(node.body):
-        if isinstance(stmt, (ir.ForLoop, ir.WhileLoop)):
-            to_trim.append(stmt.body)
-        elif isinstance(stmt, ir.IfElse):
-            to_trim.append(stmt.if_branch)
-            to_trim.append(stmt.else_branch)
-    for stmts in to_trim:
-        keepcount = 0
-        for keepcount, stmt in enumerate(stmts, 1):
+def remove_statements_following_terminals(node: ir.Function, symbols: SymbolTable):
+    """
+     Removes any statements following a break, continue, or return statement in any statement list
+     :param symbols:
+     :param node:
+     :return:
+     """
+    for stmt_list in get_statement_lists(node):
+        for i, stmt in enumerate(stmt_list):
             if isinstance(stmt, (ir.Break, ir.Continue, ir.Return)):
+                for j in range(len(stmt_list) - i - 1):
+                    stmt_list.pop()
                 break
-        for i in range(len(stmts) - keepcount):
-            stmts.pop()
+    drop_unused_symbols(walk_nodes(node.body), node.args, symbols)
 
 
 def remove_unreachable_blocks(graph: FlowGraph):

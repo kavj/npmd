@@ -6,8 +6,8 @@ import networkx as nx
 
 import npmd.ir as ir
 
-from npmd.blocks import build_function_graph, dominator_tree, FlowGraph
-from npmd.traversal import walk_nodes, walk_parameters
+from npmd.blocks import dominator_tree, FlowGraph
+from npmd.traversal import get_statement_lists, walk_nodes, walk_parameters
 from npmd.utils import is_entry_point
 
 
@@ -144,27 +144,8 @@ def try_flatten_branch_nest(node: ir.IfElse):
     return ir.Case(predicates, default_branch, node.pos)
 
 
-def flatten_branches(graph: FlowGraph):
-    all_branches = (block.first for block in graph.nodes() if block.is_branch_block)
-    outermost = find_outermost_branches(graph)
-    repls = []
-    for branch in outermost:
-        repl = try_flatten_branch_nest(branch)
-        if repl is not branch:
-            # couple original and updated
-            repls.append((branch, repl))
-    # Now locate the corresponding blocks
-    # For each of these blocks, we're going to replace the original statement in that list
-    # will invalidate the control flow graph...
-    originals = [b for (b, _) in repls]
-    blocks = [block for block in graph.nodes() if block.is_branch_block and block.first in originals]
-    for original, repl in repls:
-        for block in blocks:
-            if block.first is original:
-                block.statements[block.start] = repl
-                break
-        else:
-            raise ValueError
-    # Since the CFG is just a view, these transforms can invalidate it. rebuild and return
-    graph = build_function_graph(graph.entry_block.first)
-    return graph
+def flatten_branches(node: ir.Function):
+    for stmt_list in get_statement_lists(node):
+        for index, stmt in enumerate(stmt_list):
+            if isinstance(stmt, ir.IfElse):
+                stmt_list[index] = try_flatten_branch_nest(stmt)

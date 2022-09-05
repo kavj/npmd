@@ -6,12 +6,13 @@ from pprint import pformat
 
 
 from npmd.ast_conversion import build_module_ir_and_symbols
-from npmd.blocks import build_function_graph, render_dot_graph, render_dominator_tree, patch_missing_return
-# from npmd.branch_optimizers import flatten_branches
-from npmd.dead_code import inline_const_branches, remove_unreachable_blocks, remove_statements_following_terminals, strip_continues
+from npmd.blocks import build_function_graph, render_dot_graph, render_dominator_tree
+from npmd.canonicalize import add_trivial_return, hoist_control_flow
+from npmd.dead_code import inline_const_branches, remove_trivial_continues, remove_unreachable_blocks, \
+    remove_statements_following_terminals
 from npmd.errors import CompilerError
 from npmd.liveness import check_all_assigned, dump_live_info, find_live_in_out, remove_dead_statements
-from npmd.loop_simplify import lower_loops, sanitize_loop_iterables
+from npmd.loop_simplify import lower_loops, rename_clobbered_loop_iterables
 from npmd.pretty_printing import PrettyPrinter
 from npmd.pybind_gen import gen_module, gen_setup, Emitter
 from npmd.type_checks import dump_symbol_type_info, infer_types
@@ -65,20 +66,20 @@ def compile_module(file_path, types,  out_dir, verbose=False, print_result=True,
     funcs = []
     for func in mod_ir.functions:
         func_symbols = symbols.get(func.name)
-        func.body = inline_const_branches(func.body)
-        func = remove_dead_statements(func, func_symbols)
-        remove_statements_following_terminals(func)
-        # more aggressive
-        strip_continues(func)
-        sanitize_loop_iterables(func, func_symbols)
+        add_trivial_return(func)
+        inline_const_branches(func)
+        remove_dead_statements(func, func_symbols)
         func_graph = build_function_graph(func)
         remove_unreachable_blocks(func_graph)
+        remove_statements_following_terminals(func, func_symbols)
+        hoist_control_flow(func)
+        remove_statements_following_terminals(func, func_symbols)
+        remove_trivial_continues(func)
         infer_types(func, func_symbols)
+        rename_clobbered_loop_iterables(func, func_symbols)
         func_graph = build_function_graph(func)
+        remove_unreachable_blocks(func_graph)
         lower_loops(func_graph, func_symbols)
-        patch_missing_return(func_graph)
-        # Todo: this needs CFG support
-        # flatten_branches(func_graph)
         func_graph = build_function_graph(func)
         func_graph = remove_unreachable_blocks(func_graph)
         render_path = Path(out_dir)
@@ -86,7 +87,6 @@ def compile_module(file_path, types,  out_dir, verbose=False, print_result=True,
         if debug:
             liveness = find_live_in_out(func_graph)
             check_all_assigned(func_graph)
-            func_graph = build_function_graph(func)
             dump_live_info(liveness, ignores=func.args)
             func_graph = remove_unreachable_blocks(func_graph)
             render_dot_graph(func_graph.graph, func_graph.func_name, render_path)
