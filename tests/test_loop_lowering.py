@@ -7,9 +7,8 @@ import npmd.ir as ir
 
 from npmd.analysis import compute_element_count
 from npmd.ast_conversion import build_module_ir_and_symbols
-from npmd.blocks import build_function_graph
+from npmd.canonicalize import lower_loops, rename_clobbered_loop_parameters
 from npmd.errors import CompilerError
-from npmd.loop_simplify import lower_loops, sanitize_loop_iterables
 from npmd.traversal import all_loops, walk_nodes
 from npmd.type_checks import infer_types
 from npmd.utils import unpack_iterated
@@ -22,11 +21,10 @@ mod, symbol_tables = build_module_ir_and_symbols(src, types)
 
 
 def get_single_for_loop(func: ir.Function):
-    graph = build_function_graph(func)
     symbols = symbol_tables[func.name]
-    sanitize_loop_iterables(func, symbols)
+    rename_clobbered_loop_parameters(func, symbols)
     infer_types(func, symbols)
-    lower_loops(graph, symbols)
+    lower_loops(func, symbols)
     # There should be a single loop, indexed with variable i
     loops = [*all_loops(func.body)]
     assert len(loops) == 1

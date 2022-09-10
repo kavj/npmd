@@ -1,18 +1,10 @@
 from collections import deque
-from functools import singledispatchmethod
-from typing import Generator, Iterable, List, Union
+from functools import singledispatch
+from typing import Iterable, Iterator, List, Union
 
 import npmd.ir as ir
 
 from npmd.utils import is_entry_point, unpack_iterated
-
-
-def get_nested(node: Union[ir.IfElse, ir.ForLoop, ir.WhileLoop]):
-    if isinstance(node, ir.IfElse):
-        yield node.if_branch
-        yield node.else_branch
-    elif isinstance(node, (ir.ForLoop, ir.WhileLoop)):
-        yield node.body
 
 
 def walk(node: ir.ValueRef):
@@ -81,7 +73,7 @@ def walk_nodes(stmts: Iterable[ir.StmtBase]):
             queued.pop()
 
 
-def get_statement_lists(node: Union[ir.Function, ir.IfElse, ir.ForLoop, ir.WhileLoop, list]) -> Generator[List[ir.StmtBase], None, None]:
+def get_statement_lists(node: Union[ir.Function, ir.IfElse, ir.ForLoop, ir.WhileLoop, list]) -> Iterator[List[ir.StmtBase]]:
     """
     yields all statement lists by pre-ordering, breadth first
     :param node:
@@ -123,55 +115,56 @@ def all_loops(stmts: Iterable[ir.StmtBase]):
             yield stmt
 
 
-class ExtractExprs:
+@singledispatch
+def extract_expressions(node):
+    msg = f'No method to extract expressions from {node}'
+    raise TypeError(msg)
 
-    def __call__(self, node):
-        return self.visit(node)
 
-    @singledispatchmethod
-    def visit(self, node):
-        msg = f'No method to extract expressions from {node}'
-        raise TypeError(msg)
+@extract_expressions.register
+def _(node: ir.StmtBase):
+    yield
 
-    @visit.register
-    def _(self, node: ir.StmtBase):
-        yield
 
-    @visit.register
-    def _(self, node: ir.Assign):
-        if isinstance(node.value, ir.Expression):
-            yield node.value
-        if isinstance(node.target, ir.Expression):
-            yield node.target
+@extract_expressions.register
+def _(node: ir.Assign):
+    yield node.value
+    yield node.target
 
-    @visit.register
-    def _(self, node: ir.InPlaceOp):
-        if isinstance(node.value, ir.Expression):
-            yield node.value
 
-    @visit.register
-    def _(self, node: ir.SingleExpr):
-        if isinstance(node.value, ir.Expression):
-            yield node.value
+@extract_expressions.register
+def _(node: ir.Case):
+    for test in node.conditions:
+        yield test
 
-    @visit.register
-    def _(self, node: ir.IfElse):
-        if isinstance(node.test, ir.Expression):
-            yield node.test
 
-    @visit.register
-    def _(self, node: ir.ForLoop):
-        for _, iterable in unpack_iterated(node.target, node.iterable):
-            if isinstance(iterable, ir.Expression):
-                yield iterable
+@extract_expressions.register
+def _(node: ir.ForLoop):
+    for target, iterable in unpack_iterated(node.target, node.iterable):
+        yield iterable
+        yield target
 
-    @visit.register
-    def _(self, node: ir.WhileLoop):
-        if isinstance(node.test, ir.Expression):
-            yield node.test
 
-    @visit.register
-    def _(self, node: ir.Case):
-        for test in node.conditions:
-            if isinstance(test, ir.Expression):
-                yield test
+@extract_expressions.register
+def _(node: ir.IfElse):
+    yield node.test
+
+
+@extract_expressions.register
+def _(node: ir.InPlaceOp):
+    yield node.value
+
+
+@extract_expressions.register
+def _(node: ir.SingleExpr):
+    yield node.value
+
+
+@extract_expressions.register
+def _(node: ir.Return):
+    yield node.value
+
+
+@extract_expressions.register
+def _(node: ir.WhileLoop):
+    yield node.test

@@ -10,8 +10,8 @@ from typing import Dict, List, Optional, Set
 import npmd.ir as ir
 
 from npmd.analysis import check_all_declared, DeclTracker
+from npmd.canonicalize import serialize_min_max
 from npmd.errors import CompilerError
-from npmd.reductions import serialize_min_max
 from npmd.symbol_table import SymbolTable
 from npmd.type_checks import TypeHelper, check_return_type
 from npmd.utils import extract_name
@@ -540,7 +540,6 @@ class FuncWriter:
             start_value_str = self.render(start)
             target_decl = self.format_target(node.target)
             # first is in case of declaration here
-            target = self.format_target(node.target)
             start_str = f'{target_decl} = {start_value_str}'
             stop_value_str = self.render(stop)
             stop_str = f'{node.target.name} < {stop_value_str}'

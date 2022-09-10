@@ -1,4 +1,6 @@
+from copy import copy
 from functools import singledispatch
+from typing import Iterable
 
 import npmd.ir as ir
 
@@ -6,8 +8,49 @@ from npmd.errors import CompilerError
 from npmd.pretty_printing import PrettyFormatter
 
 
+def map_ids_to_statements(*stmt_seqs: Iterable[ir.StmtBase]):
+    id_to_stmt = {}
+    groups = []
+    for group in stmt_seqs:
+        in_group = set()
+        for stmt in group:
+            stmt_id = id(stmt)
+            in_group.add(stmt_id)
+            if stmt_id not in id_to_stmt:
+                id_to_stmt[stmt_id] = copy(stmt)
+        groups.append(in_group)
+    return id_to_stmt, groups
+
+
+def statement_intersection(a: Iterable[ir.StmtBase], b: Iterable[ir.StmtBase]):
+    id_to_stmt, groups = map_ids_to_statements(a, b)
+    in_a, in_b = groups
+    inter = [id_to_stmt[id_] for id_ in in_a.intersection(in_b)]
+    return inter
+
+
+def statement_difference(a: Iterable[ir.StmtBase], b: Iterable[ir.StmtBase]):
+    id_to_stmt, groups = map_ids_to_statements(a, b)
+    in_a, in_b = groups
+    in_first_only = []
+    for stmt_id in in_a:
+        if stmt_id not in in_b:
+            in_first_only.append(id_to_stmt[stmt_id])
+    return in_first_only
+
+
 def is_entry_point(stmt: ir.StmtBase):
     return isinstance(stmt, (ir.IfElse, ir.ForLoop, ir.WhileLoop))
+
+
+def is_simple_assign(stmt: ir.StmtBase) -> bool:
+    """
+    Returns True if this is both an assignment and a simple binding operation.
+
+    :param stmt:
+    :return:
+    """
+    return isinstance(stmt, ir.Assign) and isinstance(stmt.target, ir.NameRef)
 
 
 @singledispatch

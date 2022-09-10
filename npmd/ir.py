@@ -446,6 +446,9 @@ class Slice(Expression):
     step: ValueRef
 
     def __post_init__(self):
+        if self.step == Zero:
+            msg = f'Detected a step size of zero in "{self}".'
+            raise ValueError(msg)
         for t in (self.start, self.stop, self.step):
             assert isinstance(t, ValueRef)
             if isinstance(t, CONSTANT):
@@ -1034,6 +1037,8 @@ class AffineSeq(Expression):
     This captures range, enumerate, and some generated access functions.
     """
     start: ValueRef
+    # we can't completely avoid the possibility of None here, since it's possible
+    # to encounter cases with zip where len() is unsupported, yet enumerate is
     stop: typing.Optional[ValueRef]
     step: ValueRef
 
@@ -1041,11 +1046,14 @@ class AffineSeq(Expression):
         if not isinstance(self.start, ValueRef):
             msg = f'Start param of affine sequence must be a value reference. Received: "{self.start}".'
             raise ValueError(msg)
-        if self.stop is not None and not isinstance(self.stop, ValueRef):
+        elif self.stop is not None and not isinstance(self.stop, ValueRef):
             msg = f'Stop param of affine sequence must be a value reference. Received: "{self.stop}".'
             raise ValueError(msg)
-        if not isinstance(self.step, ValueRef):
+        elif not isinstance(self.step, ValueRef):
             msg = f'Step param of affine sequence must be a value reference. Received: "{self.step}".'
+            raise ValueError(msg)
+        elif self.step == Zero:
+            msg = f'Step size of zero detected in "{self}".'
             raise ValueError(msg)
 
     @property

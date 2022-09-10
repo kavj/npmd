@@ -171,6 +171,7 @@ class PrettyFormatter:
                 formatted = f"{expr}.shape[{dim}]"
             else:
                 formatted = f'({expr}).shape[{dim}]'
+            return formatted
 
     @visit.register
     def _(self, node: ir.MaxReduction):
@@ -281,12 +282,11 @@ class PrettyFormatter:
     @visit.register
     def _(self, node: ir.TRUTH):
         formatted = self.visit(node.operand)
-        if node.constant:
-            if not isinstance(node, ir.CONSTANT):
-                # We don't distinguish between bools and predicates here in
-                # truth testing, since Python doesn't have any notion of
-                # predicate types.
-                formatted = f"bool({formatted})"
+        if not isinstance(node, ir.CONSTANT):
+            # We don't distinguish between bools and predicates here in
+            # truth testing, since Python doesn't have any notion of
+            # predicate types.
+            formatted = f"bool({formatted})"
         return formatted
 
     @visit.register

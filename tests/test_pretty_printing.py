@@ -1,7 +1,7 @@
 
 import npmd.ir as ir
 
-from npmd.analysis import compute_element_count, find_array_length_expression
+from npmd.analysis import find_array_length_expression
 from npmd.pretty_printing import PrettyFormatter
 
 formatter = PrettyFormatter()

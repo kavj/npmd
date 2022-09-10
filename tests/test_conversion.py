@@ -2,7 +2,7 @@ import pathlib
 import pytest
 
 # Todo: this could be made into a more complete class
-from npmd.analysis import statement_difference, statement_intersection
+from npmd.utils import statement_difference, statement_intersection
 from npmd.ast_conversion import build_module_ir_and_symbols
 from npmd.blocks import build_function_graph
 from npmd.errors import CompilerError

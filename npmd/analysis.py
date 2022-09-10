@@ -1,51 +1,17 @@
 from __future__ import annotations
-import numpy as np
 
-from collections import defaultdict, Counter
-from copy import copy
+from collections import Counter, deque
 from contextlib import contextmanager
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Set, Tuple
 
 import npmd.ir as ir
 
 from npmd.errors import CompilerError
-from npmd.symbol_table import SymbolTable
 from npmd.utils import is_entry_point, unpack_iterated
-from npmd.traversal import walk_parameters
+from npmd.traversal import walk_nodes, walk_parameters
 
 # Todo: stub
 specialized = {ir.NameRef("print")}
-
-
-def map_ids_to_statements(*stmt_seqs: Iterable[ir.StmtBase]):
-    id_to_stmt = {}
-    groups = []
-    for group in stmt_seqs:
-        in_group = set()
-        for stmt in group:
-            stmt_id = id(stmt)
-            in_group.add(stmt_id)
-            if stmt_id not in id_to_stmt:
-                id_to_stmt[stmt_id] = copy(stmt)
-        groups.append(in_group)
-    return id_to_stmt, groups
-
-
-def statement_intersection(a: Iterable[ir.StmtBase], b: Iterable[ir.StmtBase]):
-    id_to_stmt, groups = map_ids_to_statements(a,b)
-    in_a, in_b = groups
-    inter = [id_to_stmt[id_] for id_ in in_a.intersection(in_b)]
-    return inter
-
-
-def statement_difference(a: Iterable[ir.StmtBase], b: Iterable[ir.StmtBase]):
-    id_to_stmt, groups = map_ids_to_statements(a,b)
-    in_a, in_b = groups
-    in_first_only = []
-    for stmt_id in in_a:
-        if stmt_id not in in_b:
-            in_first_only.append(id_to_stmt[stmt_id])
-    return in_first_only
 
 
 class DeclTracker:
@@ -85,43 +51,6 @@ class DeclTracker:
             if self.is_undeclared(param):
                 msg = f'Possible unbound local "{param.name}" at line {current_line}.'
                 raise CompilerError(msg)
-
-
-def count_clobbers(block: List[ir.StmtBase]):
-    clobbers = Counter()
-    for index, stmt in enumerate(block):
-        if isinstance(stmt, ir.Assign) and isinstance(stmt.target, ir.NameRef):
-            clobbers[stmt.target] += 1
-        elif isinstance(stmt, ir.ForLoop):
-            assert index == 0
-            for target, _ in unpack_iterated(stmt.target, stmt.iterable):
-                clobbers[target] += 1
-                break
-    return clobbers
-
-
-def has_nan(node: ir.Expression):
-    for subexpr in node.subexprs:
-        if isinstance(subexpr, ir.CONSTANT):
-            if np.isnan(subexpr.value):
-                return True
-
-
-def get_possible_aliasing(stmts: List[ir.StmtBase], symbols: SymbolTable):
-    """
-    Get sub-array references that may be linked to an array name
-    :param stmts:
-    :param symbols:
-    :return:
-    """
-    aliasing = defaultdict(set)
-    for stmt in stmts:
-        if isinstance(stmt, ir.Assign):
-            if isinstance(stmt.target, ir.NameRef) and isinstance(stmt.value, ir.Subscript):
-                if isinstance(symbols.check_type(stmt.target), ir.ArrayType):
-                    aliasing[stmt.target].add(stmt.value)
-                    aliasing[stmt.value].add(stmt.target)
-    return aliasing
 
 
 def check_all_declared(block: List[ir.StmtBase], tracker: Optional[DeclTracker] = None):
@@ -174,7 +103,10 @@ def compute_element_count(start: ir.ValueRef, stop: ir.ValueRef, step: ir.ValueR
     if start == ir.Zero:
         diff = stop
     else:
-        diff = ir.MAX(ir.SUB(stop, start), ir.Zero)
+        # It's safer to put the max around start, since this doesn't risk overflow
+        diff = ir.SUB(stop, ir.MAX(ir.Zero, start))
+    if step == ir.One:
+        return diff
     base_count = ir.FLOORDIV(diff, step)
     test = ir.MOD(diff, step)
     fringe = ir.SELECT(predicate=test, on_true=ir.One, on_false=ir.Zero)
@@ -198,24 +130,49 @@ def find_array_length_expression(node: ir.ValueRef) -> Optional[ir.ValueRef]:
         if isinstance(node.index, ir.Slice):
             index = node.index
             start = index.start
-            max_stop = ir.SingleDimRef(node.value, dim=ir.Zero)
-            if index.stop is None:
-                stop = ir.SingleDimRef(node.value, dim=ir.Zero)
-            elif index.stop == max_stop:
-                stop = index.stop
-            else:
-                stop = ir.MIN(index.stop, max_stop)
-            step = index.step
-            return compute_element_count(start, stop, step)
+            stop = index.stop
+            base_len = ir.SingleDimRef(node.value, dim=ir.Zero)
+            if stop is not None and stop != base_len:
+                stop = ir.MIN(stop, base_len)
+            return compute_element_count(start, stop, index.step)
         else:
             # first dim removed
             return ir.SingleDimRef(node.value, dim=ir.One)
     elif isinstance(node, ir.NameRef):
         return ir.SingleDimRef(node, dim=ir.Zero)
-    # other cases handled by analyzing sub-expressions and broadcasting constraints
 
 
-def get_read_and_assigned(stmts: Iterable[ir.StmtBase]):
+def get_branch_predicate_pairs(node: ir.IfElse):
+    """
+    If this branch is perfectly nested, convert it to a case statement
+
+    Note: this makes further if conversion much simpler
+    Note: we may want to break along loop uniform conditions
+
+    :param node:
+    :return:
+    """
+
+    predicates = deque()
+
+    # Note, we only care about the first true instance of any unique predicate
+    # Any duplicates become dead branches, and we need to avoid overwriting their corresponding entries
+
+    queued = [node]
+
+    while queued:
+        stmt = queued.pop()
+        predicate = stmt.test
+        predicates.append((predicate, stmt.if_branch, stmt.pos))
+        if len(stmt.else_branch) == 1 and isinstance(stmt.else_branch[0], ir.IfElse):
+            queued.append(stmt.else_branch[0])
+        else:
+            assert not queued
+            predicates.append((None, stmt.else_branch, None))
+    return predicates
+
+
+def get_read_and_assigned(stmts: Iterable[ir.StmtBase]) -> Tuple[Set[ir.NameRef], Set[ir.NameRef], Set[ir.NameRef]]:
     uevs = set()
     assigned = set()
     referenced = set()
@@ -262,3 +219,20 @@ def get_read_and_assigned(stmts: Iterable[ir.StmtBase]):
                                 uevs.add(p)
                             referenced.add(p)
     return assigned, referenced, uevs
+
+
+def get_assign_counts(node: ir.Function):
+    """
+    Count the number of times each variable is assigned within the function body
+    :param node:
+    :return:
+    """
+    assign_counts = Counter()
+    for stmt in walk_nodes(node.body):
+        if isinstance(stmt, ir.Assign) and isinstance(stmt.target, ir.NameRef):
+            assign_counts[stmt.target] += 1
+        elif isinstance(stmt, ir.ForLoop):
+            for target, _ in unpack_iterated(stmt.target, stmt.iterable):
+                # it's okay to count duplicates in unpacking
+                assign_counts[target] += 1
+    return assign_counts

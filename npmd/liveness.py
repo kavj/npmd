@@ -1,46 +1,26 @@
 from __future__ import annotations
 import itertools
+import operator
 
 import networkx as nx
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from functools import singledispatchmethod
-from typing import Dict, Iterable, List, Set
+from typing import Dict, Iterable, Set
 
 import npmd.ir as ir
 
-from npmd.analysis import get_read_and_assigned
-from npmd.blocks import BasicBlock, build_function_graph, FlowGraph
+from npmd.analysis import get_branch_predicate_pairs, get_read_and_assigned
+from npmd.blocks import BasicBlock, FlowGraph, build_function_graph
 from npmd.errors import CompilerError
 from npmd.symbol_table import SymbolTable
-from npmd.traversal import walk_parameters
-from npmd.utils import is_entry_point, unpack_iterated
+from npmd.traversal import get_statement_lists, walk_nodes, walk_parameters
+from npmd.utils import is_entry_point
 
 
 # Most of this work ended up being done elsewhere in controlflow now. This can now do slightly more precise liveness
 # The intention here is to better understand what assignments may not escape and can therefore be localized or removed
 # if dead.
-
-
-def drop_unused_symbols(stmts: Iterable[ir.StmtBase], args: Iterable[ir.NameRef], symbols: SymbolTable):
-    """
-    Purges any dead symbols from the symbol table. This is useful to remove non-ephemeral variables
-    that are simply unused, so that they are not declared.
-    :param stmts:
-    :param args:
-    :param symbols:
-    :return:
-    """
-
-    assigned, referenced, _ = get_read_and_assigned(stmts)
-    referenced.update(assigned)
-    referenced.update(args)
-    dead_names = set()
-    for sym_name in symbols.all_locals:
-        if sym_name not in referenced:
-            dead_names.add(sym_name)
-    for name in dead_names:
-        symbols.drop_symbol(name)
 
 
 class LiveStatementMarker:
@@ -169,16 +149,29 @@ def find_live_in_out(graph: FlowGraph) -> Dict[BasicBlock, BlockLiveness]:
     return block_liveness
 
 
-def get_clobbers(blocks: Iterable[BasicBlock]):
-    for stmt in itertools.chain(*blocks):
-        if isinstance(stmt, (ir.Assign, ir.InPlaceOp)):
-            if isinstance(stmt.target, ir.NameRef):
-                yield stmt.target
-        elif isinstance(stmt, ir.ForLoop):
-            # nested loop should not clobber
-            for target, _ in unpack_iterated(stmt.target, stmt.iterable):
-                if isinstance(target, ir.NameRef):
-                    yield target
+def find_ephemeral_assigns(liveness: Dict[BasicBlock, BlockLiveness]) -> Set[ir.Assign]:
+    """
+    :param liveness:
+    :return:
+    """
+    ephemeral = set()
+    for block, liveness_info in liveness.items():
+        # find assign counts by name
+        counts = Counter()
+        for stmt in block:
+            if isinstance(stmt, ir.Assign) and isinstance(stmt.target, ir.NameRef):
+                # pure clobber
+                counts[stmt.target] += 1
+        seen_counts = Counter()
+        for stmt in block:
+            if isinstance(stmt, ir.Assign) and isinstance(stmt.target, ir.NameRef):
+                seen_counts[stmt.target] += 1
+                if seen_counts[stmt.target] < counts[stmt.target]:
+                    # intermediate assignment
+                    ephemeral.add(stmt)
+                elif stmt.target not in liveness_info.live_in and stmt.target not in liveness_info.live_out:
+                    ephemeral.add(stmt)
+    return ephemeral
 
 
 def check_all_assigned(graph: FlowGraph):
@@ -216,6 +209,223 @@ def dump_live_info(info: Dict[BasicBlock, BlockLiveness], ignores=()):
         print(f'live in:\n    {live_ins}')
         print(f'live outs:\n    {live_outs}')
         print(f'kills:\n    {kills}')
+
+
+def drop_unused_symbols(stmts: Iterable[ir.StmtBase], args: Iterable[ir.NameRef], symbols: SymbolTable):
+    """
+    Purges any dead symbols from the symbol table. This is useful to remove non-ephemeral variables
+    that are simply unused, so that they are not declared.
+    :param stmts:
+    :param args:
+    :param symbols:
+    :return:
+    """
+
+    assigned, referenced, _ = get_read_and_assigned(stmts)
+    referenced.update(assigned)
+    referenced.update(args)
+    dead_names = set()
+    for sym_name in symbols.all_locals:
+        if sym_name not in referenced:
+            dead_names.add(sym_name)
+    for name in dead_names:
+        symbols.drop_symbol(name)
+
+
+def inline_constant_branches(func: ir.Function):
+    for stmt_list in get_statement_lists(func):
+        if any(isinstance(stmt, ir.IfElse) and isinstance(stmt.test, ir.CONSTANT) for stmt in stmt_list):
+            repl = []
+            for stmt in stmt_list:
+                if isinstance(stmt, ir.IfElse) and isinstance(stmt.test, ir.CONSTANT):
+                    if operator.truth(stmt.test):
+                        repl.extend(stmt.if_branch)
+                    else:
+                        repl.extend(stmt.else_branch)
+                else:
+                    repl.append(stmt)
+            stmt_list.clear()
+            stmt_list.extend(repl)
+
+
+def remove_dead_branches(func: ir.Function):
+    # first get rid of anything of the form If True:... if any
+    inline_constant_branches(func)
+    # Now look for branch nests where the predicate may be simplified due to repeated or inverse predicates
+    for stmt_list in get_statement_lists(func):
+        repl = []
+        for stmt in stmt_list:
+            if isinstance(stmt, ir.IfElse):
+                branches = get_branch_predicate_pairs(stmt)
+                # this could have just two branches but still be simplified
+                last_predicate, default_branch, _ = branches.pop()
+                assert last_predicate is None
+                assert len(branches) > 0
+                predicate, branch, pos = branches.pop()
+                innermost = ir.IfElse(predicate, branch, [], pos)
+                seen = {predicate}
+                inverse = {ir.NOT(predicate)}
+                repl.append(innermost)
+                while branches:
+                    nested_predicate, nested_branch, nested_pos = branches.popleft()
+                    if nested_predicate in seen:
+                        # duplicate if branch condition
+                        continue
+                    elif nested_predicate in inverse:
+                        # If we have seen a provable inverse, this must capture all remaining
+                        assert not innermost.else_branch
+                        innermost.else_branch = nested_branch
+                        break
+                    else:
+                        seen.add(nested_predicate)
+                        inverse.add(ir.NOT(nested_predicate))
+                        nested = ir.IfElse(nested_predicate, nested_branch, [], nested_pos)
+                        innermost.else_branch.append(nested)
+                        innermost = nested
+                else:
+                    # If this doesn't terminate early, then the last branch is reachable
+                    assert not innermost.else_branch
+                    innermost.else_branch = default_branch
+            else:
+                repl.append(stmt)
+        stmt_list.clear()
+        stmt_list.extend(repl)
+
+
+def get_unreachable_blocks(graph: FlowGraph):
+    # Note: we can't just look for in-degree 0, since we can have unreachable loops
+    # This just axes anything that isn't
+    entry_block = graph.entry_block
+    # Todo: might be an issue here.. investigate later..
+    assert entry_block is not None
+    unreachable = set(graph.nodes())
+    unreachable.difference_update(graph.reachable_nodes())
+    return unreachable
+
+
+def group_by_statement_list(blocks: Iterable[BasicBlock]):
+    by_stmt_list = defaultdict(set)
+    id_to_list = {}
+    for block in blocks:
+        statements = block.statements
+        list_id = id(statements)
+        by_stmt_list[list_id].add(block)
+        id_to_list[list_id] = statements
+    return by_stmt_list, id_to_list
+
+
+def get_loop_exit(graph: FlowGraph, node: BasicBlock):
+    assert node.is_loop_block
+    for succ in graph.successors(node):
+        if succ.depth == node.depth:
+            return succ
+
+
+def get_loop_body(graph: FlowGraph, node: BasicBlock):
+    assert node.is_loop_block
+    for succ in graph.successors(node):
+        if succ.depth == node.depth + 1:
+            return succ
+
+
+def remove_dead_edges(graph: FlowGraph):
+    # Todo: gather first.. how did this ever work?
+    nodes_with_dead_edges = set()
+    for node in graph.nodes():
+        if node.is_branch_block:
+            test = node.first.test
+            if isinstance(test, ir.CONSTANT):
+                nodes_with_dead_edges.add(node)
+        elif node.is_loop_block:
+            header = node.first
+            if isinstance(header, ir.WhileLoop) and isinstance(header.test, ir.CONSTANT):
+                nodes_with_dead_edges.add(node)
+    for node in nodes_with_dead_edges:
+        if node.is_branch_block:
+            test = node.first.test
+            if_block, else_block = graph.get_branch_entry_points(node)
+            if operator.truth(test) and graph.graph.has_edge(node, else_block):
+                graph.remove_edge(node, else_block)
+            elif graph.graph.has_edge(node, if_block):
+                graph.remove_edge(node, if_block)
+        else:
+            header = node.first
+            assert isinstance(header, ir.WhileLoop) and isinstance(header.test, ir.CONSTANT)
+            if operator.truth(header.test):
+                exit_block = get_loop_exit(graph, node)
+                if graph.graph.has_edge(node, exit_block):
+                    graph.remove_edge(node, exit_block)
+            else:
+                entry_block = get_loop_body(graph, node)
+                if graph.graph.has_edge(node, entry_block):
+                    graph.remove_edge(node, entry_block)
+
+
+def remove_trivial_continues(node: ir.Function):
+    for stmts in get_statement_lists(node):
+        for stmt in stmts:
+            if isinstance(stmt, (ir.ForLoop, ir.WhileLoop)):
+                while stmt.body and isinstance(stmt.body[-1], ir.Continue):
+                    stmt.body.pop()
+
+
+def remove_statements_following_terminals(node: ir.Function, symbols: SymbolTable):
+    """
+     Removes any statements following a break, continue, or return statement in any statement list
+     :param symbols:
+     :param node:
+     :return:
+     """
+    for stmt_list in get_statement_lists(node):
+        for i, stmt in enumerate(stmt_list):
+            if isinstance(stmt, (ir.Break, ir.Continue, ir.Return)):
+                for j in range(len(stmt_list) - i - 1):
+                    stmt_list.pop()
+                break
+    drop_unused_symbols(walk_nodes(node.body), node.args, symbols)
+
+
+def remove_unreachable_blocks(graph: FlowGraph):
+    # Since the graph represents a view, we want to avoid
+    # having to clear one side of an if statement, if the branch remains intact,
+    # since this has a tendency to result in phantom blocks.
+    for block in graph.nodes():
+        if block.is_branch_block:
+            assert not isinstance(block.first.test, ir.CONSTANT)
+    remove_dead_edges(graph)
+    # get all unreachable nodes
+    entry_block = graph.entry_block
+    assert entry_block is not None
+    func = entry_block.first
+    unreachable = get_unreachable_blocks(graph)
+    unreachable_grouped, unreachable_id_to_list = group_by_statement_list(unreachable)
+    grouped, id_to_list = group_by_statement_list(graph.nodes())
+    # Now find statement lists that are completely unreachable
+
+    for list_id, unreachable_blocks in unreachable_grouped.items():
+        # get total blocks
+        total_blocks = grouped[list_id]
+        reachable_blocks = total_blocks.difference(unreachable_blocks)
+        stmts = unreachable_id_to_list.pop(list_id)
+        if reachable_blocks:
+            # rebuild  from remaininive blocks, then generate the original list
+            repl = []
+            for block in sorted(reachable_blocks, key=lambda b: b.start):
+                repl.extend(block)
+            stmts.clear()
+            stmts.extend(repl)
+        else:
+            # mitigates hidden bugs, since these really are gone from the list
+            stmts.clear()
+    remove_trivial_continues(func)
+    repl_graph = build_function_graph(func)
+    # can be added better later..
+    remove_dead_edges(repl_graph)
+    unreachable = get_unreachable_blocks(repl_graph)
+    for u in unreachable:
+        repl_graph.graph.remove_node(u)
+
+    return repl_graph
 
 
 def mark_dead_statements(block_to_liveness: Dict[BasicBlock, BlockLiveness], symbols: SymbolTable):
@@ -257,34 +467,28 @@ def mark_dead_statements(block_to_liveness: Dict[BasicBlock, BlockLiveness], sym
     return dead
 
 
-def remove_statements_from(body: List[ir.Statement], dead: Iterable[ir.Statement]):
-    repl = []
-    for stmt in body:
-        if isinstance(stmt, ir.IfElse):
-            if_branch = remove_statements_from(stmt.if_branch, dead) if stmt.if_branch else []
-            else_branch = remove_statements_from(stmt.else_branch, dead) if stmt.else_branch else []
-            stmt = ir.IfElse(stmt.test, if_branch, else_branch, stmt.pos)
-            if if_branch or else_branch:
-                repl.append(stmt)
-        elif isinstance(stmt, ir.ForLoop):
-            body = remove_statements_from(stmt.body, dead)
-            stmt = ir.ForLoop(stmt.target, stmt.iterable, body, stmt.pos)
-            repl.append(stmt)
-        elif isinstance(stmt, ir.WhileLoop):
-            body = remove_statements_from(stmt.body, dead)
-            stmt = ir.WhileLoop(stmt.test, body, stmt.pos)
-            repl.append(stmt)
-        elif stmt not in dead:
-            repl.append(stmt)
-    return repl
-
-
-def remove_dead_statements(func: ir.Function, symbols: SymbolTable):
-    graph = build_function_graph(func)
+def remove_dead_statements(node: ir.Function, symbols: SymbolTable):
+    graph = build_function_graph(node)
     liveness = find_live_in_out(graph)
     dead = mark_dead_statements(liveness, symbols)
-    body = remove_statements_from(func.body, dead)
-    func.body = body
-    graph = build_function_graph(func)
-    stmts = itertools.chain(*(block for block in graph.nodes()))
-    drop_unused_symbols(stmts, func.args, symbols)
+    repl = []
+    for stmt_list in get_statement_lists(node):
+        changed = False
+        for stmt in stmt_list:
+            if is_entry_point(stmt) or stmt not in dead:
+                repl.append(stmt)
+            else:
+                changed = True
+        if changed:
+            stmt_list.clear()
+            stmt_list.extend(repl)
+        repl.clear()
+    drop_unused_symbols(walk_nodes(node.body), node.args, symbols)
+
+
+def remove_unreachable_statements(func: ir.Function, symbols: SymbolTable):
+    remove_dead_branches(func)
+    remove_dead_statements(func, symbols)
+    func_graph = build_function_graph(func)
+    remove_unreachable_blocks(func_graph)
+    remove_statements_following_terminals(func, symbols)

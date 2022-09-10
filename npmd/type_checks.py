@@ -65,10 +65,6 @@ def is_float(dtype: np.dtype):
     return dtype in float_dtypes
 
 
-def is_real(dtype: np.dtype):
-    return dtype in real_dtypes
-
-
 class TypeHelper:
 
     def __init__(self, symbols: SymbolTable, allow_none=False):
@@ -374,38 +370,3 @@ def check_return_type(node: ir.Function, symbols: SymbolTable):
     else:
         return_type = ir.NoneRef()  # coerce to void at C level outside wrapper
     return return_type
-
-
-dtype_pretty_lookup = {
-    np.dtype('bool'): 'numpy.bool_',
-    np.dtype('uint8'): 'numpy.uint8',
-    np.dtype('int8'): 'numpy.int8',
-    np.dtype('int32'): 'numpy.int32',
-    np.dtype('int64'): 'numpy.int64',
-    np.dtype('float32'): 'numpy.float64',
-    np.dtype('float64'): 'numpy.float64',
-    np.dtype('complex64'): 'numpy.complex64',
-    np.dtype('complex128'): 'numpy.complex128'
-}
-
-
-def dump_symbol_type_info(symbols: SymbolTable):
-    print(f'Function: {symbols.namespace} arguments\n')
-    for name in symbols.arguments:
-        t = symbols.check_type(name)
-        if isinstance(t, ir.ArrayType):
-            dtype_formatted = dtype_pretty_lookup[t.dtype]
-            formatted_type = f'numpy.ndarray[{dtype_formatted}]'
-        else:
-            formatted_type = dtype_pretty_lookup[t]
-        name_to_type = f'{name.name}: {formatted_type}'
-        print(name_to_type)
-
-
-def invalid_loop_iterables(node: ir.ForLoop, symbols: SymbolTable):
-    type_checker = TypeHelper(symbols)
-    for _, iterable in unpack_iterated(node.target, node.iterable):
-        if not isinstance(iterable, ir.AffineSeq):
-            t = type_checker(iterable)
-            if not isinstance(t, ir.ArrayType):
-                yield iterable
