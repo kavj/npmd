@@ -9,7 +9,7 @@ from npmd.analysis import compute_element_count
 from npmd.ast_conversion import build_module_ir_and_symbols
 from npmd.canonicalize import lower_loops, rename_clobbered_loop_parameters
 from npmd.errors import CompilerError
-from npmd.traversal import all_loops, walk_nodes
+from npmd.traversal import get_statement_lists
 from npmd.type_checks import infer_types
 from npmd.utils import unpack_iterated
 from tree_tests import test_indexing
@@ -26,7 +26,7 @@ def get_single_for_loop(func: ir.Function):
     infer_types(func, symbols)
     lower_loops(func, symbols)
     # There should be a single loop, indexed with variable i
-    loops = [*all_loops(func.body)]
+    loops = [stmt for stmt in itertools.chain(*get_statement_lists(func)) if isinstance(stmt, (ir.ForLoop, ir.WhileLoop))]
     assert len(loops) == 1
     loop = loops.pop()
     assert isinstance(loop, ir.ForLoop)
@@ -66,7 +66,7 @@ def test_clobbered_index():
 def test_no_index_strided_array():
     for func in itertools.islice(mod.functions, 3, 5):
         # find initial loop strides
-        headers = [*all_loops(func.body)]
+        headers = [stmt for stmt in itertools.chain(*get_statement_lists(func)) if isinstance(stmt, (ir.ForLoop, ir.WhileLoop))]
         assert len(headers) == 1
         header = headers.pop()
         assert isinstance(header.iterable, ir.Subscript) and isinstance(header.iterable.index, ir.Slice)
@@ -99,7 +99,7 @@ def test_different_step_sizes():
     with pytest.raises(AssertionError):
         func = mod.functions[7]
         # get initial unpack
-        loops = list(all_loops(walk_nodes(func.body)))
+        loops = [stmt for stmt in itertools.chain(*get_statement_lists(func)) if isinstance(stmt, (ir.ForLoop, ir.WhileLoop))]
         assert len(loops) == 1
         loop = loops.pop()
         targets = []

@@ -43,7 +43,7 @@ def is_entry_point(stmt: ir.StmtBase):
     return isinstance(stmt, (ir.IfElse, ir.ForLoop, ir.WhileLoop))
 
 
-def is_simple_assign(stmt: ir.StmtBase) -> bool:
+def is_basic_assign(stmt: ir.StmtBase) -> bool:
     """
     Returns True if this is both an assignment and a simple binding operation.
 
@@ -76,7 +76,7 @@ def _(node: ir.Function):
 
 @extract_name.register
 def _(node: ir.Call):
-    return node.func.name
+    return node.func
 
 
 def unpack_iterated(target, iterable):

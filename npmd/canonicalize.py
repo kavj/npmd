@@ -3,22 +3,22 @@ import math
 import numpy
 
 from collections import defaultdict
-from functools import singledispatchmethod
-from typing import Iterable, List, Set, Tuple, Union
+from functools import singledispatch
+from typing import Dict, List, Set, Tuple, Union
 
 import npmd.ir as ir
 
-from npmd.analysis import compute_element_count, get_branch_predicate_pairs
+from npmd.analysis import compute_element_count, extract_expressions
 from npmd.blocks import build_function_graph, get_loop_exit_block
 from npmd.errors import CompilerError
-from npmd.folding import fold_constants, simplify_arithmetic
-from npmd.liveness import find_live_in_out, remove_dead_branches, remove_unreachable_statements
+from npmd.folding import simplify
+from npmd.liveness import find_live_in_out
 from npmd.lvn import rewrite_expr
 from npmd.pretty_printing import PrettyFormatter
 from npmd.symbol_table import SymbolTable
-from npmd.traversal import get_statement_lists, walk_nodes
+from npmd.traversal import get_statement_lists, walk, walk_parameters
 from npmd.type_checks import is_integer, TypeHelper
-from npmd.utils import extract_name, unpack_iterated
+from npmd.utils import unpack_iterated
 
 
 def invalid_loop_iterables(node: ir.ForLoop, symbols: SymbolTable):
@@ -40,117 +40,6 @@ def invalid_loop_iterables(node: ir.ForLoop, symbols: SymbolTable):
             t = type_checker(iterable)
             if not isinstance(t, ir.ArrayType):
                 yield iterable
-
-
-def unpack_min_terms(terms: Iterable[ir.ValueRef], type_check: TypeHelper) -> List[ir.ValueRef]:
-    repl = []
-    queued = [*terms]
-    seen = set()
-    while queued:
-        term = queued.pop()
-        if term in seen:
-            continue
-        seen.add(term)
-        if isinstance(term, (ir.MIN, ir.MinReduction)):
-            # safety check needed so we don't reorder
-            if all(is_integer(type_check(subexpr)) for subexpr in term.subexprs):
-                queued.extend(term.subexprs)
-            else:
-                repl.append(term)
-        else:
-            repl.append(term)
-    return repl
-
-
-def unpack_max_terms(terms: Iterable[ir.ValueRef], type_check: TypeHelper) -> List[ir.ValueRef]:
-    repl = []
-    queued = [*terms]
-    seen = set()
-    while queued:
-        term = queued.pop()
-        if term in seen:
-            continue
-        seen.add(term)
-        if isinstance(term, (ir.MAX, ir.MaxReduction)):
-            if all(is_integer(type_check(subexpr)) for subexpr in term.subexprs):
-                queued.extend(term.subexprs)
-            else:
-                repl.append(term)
-        else:
-            repl.append(term)
-    return repl
-
-
-def wrap_max_reduction(terms: Iterable[ir.ValueRef], type_check: TypeHelper) -> ir.ValueRef:
-    ordered = frozenset(unpack_max_terms(terms, type_check))
-    if len(ordered) == 1:
-        return next(iter(ordered))
-    elif len(ordered) == 2:
-        return ir.MAX(*ordered)
-    else:
-        return ir.MaxReduction(ordered)
-
-
-def wrap_min_reduction(terms: List[ir.ValueRef], type_check: TypeHelper) -> ir.ValueRef:
-    ordered = frozenset(unpack_min_terms(terms, type_check))
-    if len(ordered) == 1:
-        return next(iter(ordered))
-    elif len(ordered) == 2:
-        return ir.MIN(*ordered)
-    else:
-        return ir.MinReduction(*ordered)
-
-
-class NormalizeMinMax:
-    """
-    Reorders in integer cases, where ordering is arbitrary. Also consolidates identical terms in such cases.
-    """
-
-    def __init__(self, symbols: SymbolTable):
-        self.symbols = symbols
-        self.typer = TypeHelper(symbols)
-
-    def __call__(self, node: ir.ValueRef) -> ir.ValueRef:
-        return self.visit(node)
-
-    @singledispatchmethod
-    def visit(self, node):
-        msg = f'No method to apply normalize integral to "{node}".'
-        raise TypeError(msg)
-
-    @visit.register
-    def _(self, node: ir.ValueRef):
-        return node
-
-    @visit.register
-    def _(self, node: ir.Expression):
-        repl = node.reconstruct(*(self.visit(subexpr) for subexpr in node.subexprs))
-        return repl
-
-    @visit.register
-    def _(self, node: ir.MAX):
-        repl = ir.MAX(*(self.visit(subexpr) for subexpr in node.subexprs))
-        if any(not is_integer(self.typer(subexpr)) for subexpr in repl.subexprs):
-            return repl
-        return wrap_max_reduction(repl.subexprs, self.typer)
-
-    @visit.register
-    def _(self, node: ir.MIN):
-        repl = ir.MIN(*(self.visit(subexpr) for subexpr in node.subexprs))
-        if any(not is_integer(self.typer(subexpr)) for subexpr in repl.subexprs):
-            return repl
-        return wrap_min_reduction(repl.subexprs, self.typer)
-
-    @visit.register
-    def _(self, node: ir.MinReduction):
-        # we don't pay attention to ordering on these
-        repl = ir.MinReduction(*(self.visit(subexpr) for subexpr in node.subexprs))
-        return wrap_min_reduction(repl.subexprs, self.typer)
-
-    @visit.register
-    def _(self, node: ir.MaxReduction):
-        repl = ir.MaxReduction(*(self.visit(subexpr) for subexpr in node.subexprs))
-        return wrap_max_reduction(repl.subexprs, self.typer)
 
 
 def serialize_min_max(node: Union[ir.MinReduction, ir.MaxReduction]):
@@ -195,118 +84,6 @@ def serialize_min_max(node: Union[ir.MinReduction, ir.MaxReduction]):
     return reduced
 
 
-def stmt_matches(a: ir.StmtBase, b: ir.StmtBase):
-    if isinstance(a, ir.Break) and isinstance(b, ir.Break):
-        return True
-    elif isinstance(a, ir.Continue) and isinstance(b, ir.Continue):
-        return True
-    elif isinstance(a, ir.Return) and isinstance(b, ir.Return):
-        return a.value == b.value
-
-
-def hoist_control_flow(node: ir.Function):
-    """
-
-    This moves control flow statements that appear at the beginning or end of both sides of a branch
-    out of that branch.
-
-    :param node:
-    :return:
-    """
-
-    for stmt_list in get_statement_lists(node):
-        if any(isinstance(stmt, ir.IfElse) for stmt in stmt_list):
-            hoisted = False
-            repl = []
-            for stmt in stmt_list:
-                if isinstance(stmt, ir.IfElse):
-                    if_branch = stmt.if_branch
-                    else_branch = stmt.else_branch
-
-                    while if_branch and else_branch:
-                        leading = if_branch[0]
-                        if isinstance(leading, (ir.Break, ir.Continue, ir.Return)):
-                            if stmt_matches(leading, else_branch[0]):
-                                repl.append(leading)
-                                if_branch.pop(0)
-                                else_branch.pop(0)
-                                hoisted = True
-                                continue
-                        break
-
-                    repl.append(stmt)
-
-                    while if_branch and else_branch:
-                        leading = else_branch[-1]
-                        if isinstance(leading, (ir.Break, ir.Continue, ir.Return)):
-                            if stmt_matches(leading, if_branch[-1]):
-                                repl.append(leading)
-                                if_branch.pop()
-                                else_branch.pop()
-                                hoisted = True
-                                continue
-                        break
-                else:
-                    repl.append(stmt)
-
-            if hoisted:
-                # if we hoisted anything from this branch, we have to transfer it.
-                # this won't hoist nested branches or loops. It's mostly to extract
-                # things like common break and continue statements, so that the CFG
-                # doesn't have to deal the resulting divergence.
-                stmt_list.clear()
-                stmt_list.extend(repl)
-            repl.clear()
-
-
-def split_common_branch_statements(node: ir.Function):
-    """
-    splits out statements that are part of a prefix or suffix common to all branches of the branch statement.
-    :param node:
-    :return:
-    """
-    for stmt_list in get_statement_lists(node):
-        hoisted = False
-        repl = []
-        if any(isinstance(stmt, ir.IfElse) for stmt in stmt_list):
-            for stmt in stmt_list:
-                if isinstance(stmt, ir.IfElse):
-                    # first look for a shared prefix
-                    if_branch = stmt.if_branch
-                    else_branch = stmt.else_branch
-
-                    while if_branch and else_branch:
-                        if stmt_matches(if_branch[0], else_branch[0]):
-                            hoisted = True
-                            common = if_branch.pop(0)
-                            repl.append(common)
-                            else_branch.pop(0)
-                        else:
-                            break
-
-                    # now append the rest of the branch
-                    repl.append(stmt)
-
-                    # now look for a remaining common suffix
-                    while if_branch and else_branch:
-                        if stmt_matches(if_branch[-1], else_branch[-1]):
-                            hoisted = True
-                            common = else_branch.pop()
-                            repl.append(common)
-                            if_branch.pop()
-                        else:
-                            break
-
-        if hoisted:
-            # if we hoisted anything from this branch, we have to transfer it.
-            # this won't hoist nested branches or loops. It's mostly to extract
-            # things like common break and continue statements, so that the CFG
-            # doesn't have to deal the resulting divergence.
-            stmt_list.clear()
-            stmt_list.extend(repl)
-            repl.clear()
-
-
 def add_trivial_return(node: ir.Function):
     """
     Method to add a trivial return to function.
@@ -326,50 +103,6 @@ def add_trivial_return(node: ir.Function):
         node.body.append(ir.Return(ir.NoneRef(), pos))
 
 
-def replace_call(node: ir.Call):
-    func_name = extract_name(node)
-    if func_name == "numpy.ones":
-        node = ir.ArrayInitializer(*node.args, ir.One)
-    elif func_name == "numpy.zeros":
-        node = ir.ArrayInitializer(*node.args, ir.Zero)
-    elif func_name == "numpy.empty":
-        node = ir.ArrayInitializer(*node.args, ir.NoneRef())
-    elif func_name == "zip":
-        node = ir.Zip(*node.args)
-    elif func_name == "enumerate":
-        node = ir.Enumerate(*node.args)
-    elif func_name == "range":
-        nargs = len(node.args)
-        if nargs == 3:
-            node = ir.AffineSeq(*node.args)
-        elif nargs == 2:
-            start, stop = node.args
-            node = ir.AffineSeq(start, stop, ir.One)
-        elif nargs == 1:
-            stop, = node.args
-            node = ir.AffineSeq(ir.Zero, stop, ir.One)
-        else:
-            pf = PrettyFormatter()
-            msg = f"bad arg count for call to range {pf(node)}"
-            raise CompilerError(msg)
-    elif func_name == "len":
-        assert len(node.args) == 1
-        node = ir.SingleDimRef(node.args[0], ir.Zero)
-    elif func_name == 'min':
-        assert len(node.args) > 1
-        terms = ir.MIN(node.args[0], node.args[1])
-        for arg in itertools.islice(node.args, 2, None):
-            terms = ir.MIN(terms, arg)
-        node = terms
-    elif func_name == 'max':
-        assert len(node.args) > 1
-        terms = ir.MAX(node.args[0], node.args[1])
-        for arg in itertools.islice(node.args, 2, None):
-            terms = ir.MAX(terms, arg)
-        node = terms
-    return node
-
-
 def preheader_rename_parameters(node: ir.ForLoop):
     """
 
@@ -382,151 +115,34 @@ def preheader_rename_parameters(node: ir.ForLoop):
 
     clobbered_in_body = set()
     augmented_in_body = set()
-    for stmt in walk_nodes(node.body):
-        if isinstance(stmt, ir.Assign):
-            if isinstance(stmt.target, ir.NameRef):
-                clobbered_in_body.add(stmt.target)
-            else:
+    for stmts in get_statement_lists(node):
+        for stmt in stmts:
+            if isinstance(stmt, ir.Assign):
+                if isinstance(stmt.target, ir.NameRef):
+                    clobbered_in_body.add(stmt.target)
+                else:
+                    assert isinstance(stmt.target, ir.Subscript)
+                    augmented_in_body.add(stmt.target.value)
+
+            elif isinstance(stmt, ir.InPlaceOp):
                 augmented_in_body.add(stmt.target)
 
-        elif isinstance(stmt, ir.InPlaceOp):
-            if isinstance(stmt.target, ir.NameRef):
-                augmented_in_body.add(stmt.target)
-            else:
-                assert isinstance(stmt.target, ir.Subscript)
-                augmented_in_body.add(stmt.target.value)
-
-        elif isinstance(stmt, ir.ForLoop):
-            for target, _ in unpack_iterated(stmt.target, stmt.iterable):
-                assert isinstance(target, ir.NameRef)
-                clobbered_in_body.add(target)
-
+            elif isinstance(stmt, ir.ForLoop):
+                for target, _ in unpack_iterated(stmt.target, stmt.iterable):
+                    assert isinstance(target, ir.NameRef)
+                    clobbered_in_body.add(target)
     must_rename = set()
 
     for target, iterable in unpack_iterated(node.target, node.iterable):
         if isinstance(iterable, ir.AffineSeq):
-            for subexpr in iterable.subexprs:
-                if isinstance(subexpr, ir.Expression):
-                    # If this is an expression, it could have array access and that could
-                    # change. For simplicity, just match to a variable in preheader
-                    must_rename.add(subexpr)
-                elif isinstance(subexpr, ir.NameRef):
-                    if subexpr in clobbered_in_body or subexpr in augmented_in_body:
-                        must_rename.add(subexpr)
-        elif isinstance(iterable, ir.Expression):
-            must_rename.add(iterable)
+            for param in walk_parameters(iterable):
+                if param in clobbered_in_body or param in augmented_in_body:
+                    must_rename.add(param)
         else:
-            assert isinstance(iterable, ir.NameRef)
-            if iterable in clobbered_in_body:
-                # ignore augmented only
-                must_rename.add(iterable)
+            for param in walk_parameters(iterable):
+                if param in clobbered_in_body:
+                    must_rename.add(param)
     return must_rename
-
-
-def denest_branches(func: ir.Function):
-    """
-    Given branches like
-
-    if a:
-       if b:
-          ...
-       else:
-          noop
-    else:
-        ...
-
-    transform to
-
-    if a and b:
-        ...
-    else:
-        ...
-
-    """
-
-    repl = []
-    for stmt_list in get_statement_lists(func):
-        changed = False
-        for stmt in stmt_list:
-            if isinstance(stmt, ir.IfElse):
-                if len(stmt.if_branch) == 1 \
-                        and isinstance(stmt.if_branch[0], ir.IfElse) \
-                        and len(stmt.if_branch[0].else_branch) == 0:
-                    changed = True
-                    nested = [stmt.test, stmt.if_branch[0].test]
-                    innermost_list = stmt.if_branch[0].if_branch
-                    while len(innermost_list) == 1 \
-                            and isinstance(innermost_list[0], ir.IfElse) \
-                            and len(stmt.if_branch[0].else_branch) == 0:
-                        nested.append(innermost_list[0].test)
-                        innermost_list = innermost_list[0].if_branch
-                    test = ir.AND(frozenset(nested))
-                    stmt.test = test
-                    stmt.if_branch = innermost_list
-            else:
-                repl.append(stmt)
-        if changed:
-            stmt_list.clear()
-            stmt_list.extend(repl)
-            repl.clear()
-
-
-def leading_statements_match(stmt_lists: List[List[ir.StmtBase]]):
-    if len(stmt_lists) == 0:
-        return False
-    elif len(stmt_lists[0]) == 0:
-        return False
-    lead = stmt_lists[0][0]
-    for stmt_list in stmt_lists:
-        if len(stmt_list) == 0 or not stmt_matches(lead, stmt_list[0]):
-            return False
-    return True
-
-
-def trailing_statements_match(stmt_lists: List[List[ir.StmtBase]]):
-    if len(stmt_lists) == 0:
-        return False
-    elif len(stmt_lists[-1]) == 0:
-        return False
-    lead = stmt_lists[-1][-1]
-    for stmt_list in stmt_lists:
-        if len(stmt_list) == 0 or not stmt_matches(lead, stmt_list[-1]):
-            return False
-    return True
-
-
-def hoist_from_branch_nest(func: ir.Function):
-    for stmt_list in get_statement_lists(func):
-        repl = []
-        maybe_hoisted = False
-        for stmt in stmt_list:
-            if isinstance(stmt, ir.IfElse):
-                maybe_hoisted = True
-                branches_only = [branch for (predicate, branch, pos) in get_branch_predicate_pairs(stmt)]
-                while leading_statements_match(branches_only):
-                    repl.append(branches_only[0][0])
-                    for b in branches_only:
-                        b.pop(0)
-                repl.append(stmt)
-                while trailing_statements_match(branches_only):
-                    repl.append(branches_only[-1][-1])
-                    for b in branches_only:
-                        b.pop()
-            else:
-                repl.append(stmt)
-        if maybe_hoisted:
-            stmt_list.clear()
-            stmt_list.extend(repl)
-
-
-def normalize_flow(func: ir.Function, symbols: SymbolTable):
-    add_trivial_return(func)
-    remove_unreachable_statements(func, symbols)
-    remove_unreachable_statements(func, symbols)
-    denest_branches(func)
-    remove_dead_branches(func)
-    denest_branches(func)
-    hoist_from_branch_nest(func)
 
 
 def rename_clobbered_loop_parameters(func: ir.Function, symbols: SymbolTable, verbose: bool = True):
@@ -541,10 +157,10 @@ def rename_clobbered_loop_parameters(func: ir.Function, symbols: SymbolTable, ve
     """
     # Todo: do we actually want this as a CFG dependent pass?
     typer = TypeHelper(symbols)
-    for stmt_list in get_statement_lists(func):
-        if any(isinstance(stmt, ir.ForLoop) for stmt in stmt_list):
+    for stmts in get_statement_lists(func):
+        if any(isinstance(stmt, ir.ForLoop) for stmt in stmts):
             repl = []
-            for stmt in stmt_list:
+            for stmt in stmts:
                 if isinstance(stmt, ir.ForLoop):
                     clobbered = preheader_rename_parameters(stmt)
                     if clobbered:
@@ -566,11 +182,12 @@ def rename_clobbered_loop_parameters(func: ir.Function, symbols: SymbolTable, ve
                             copy_stmt = ir.Assign(target=rename, value=original, pos=pos)
                             repl.append(copy_stmt)
                 repl.append(stmt)
-            stmt_list.clear()
-            stmt_list.extend(repl)
+            stmts.clear()
+            stmts.extend(repl)
 
 
-def make_min_affine_seq(step, start_and_stops):
+def make_min_affine_seq(step, start_and_stops, symbols: SymbolTable):
+    typer = TypeHelper(symbols)
     starts = set()
     stops = set()
     for start, stop in start_and_stops:
@@ -593,8 +210,7 @@ def make_min_affine_seq(step, start_and_stops):
         diffs = []
         for start, stop in start_and_stops:
             d = ir.SUB(stop, start)
-            d = simplify_arithmetic(d)
-            d = fold_constants(d)
+            d = simplify(d, typer)
             diffs.append(d)
         min_diff = ir.MAX(ir.MinReduction(*diffs), ir.Zero)
         return ir.AffineSeq(ir.Zero, min_diff, step)
@@ -641,11 +257,11 @@ def make_single_index_loop(header: ir.ForLoop, symbols, noescape):
 
         Note: this can complicate range analysis if it forces normalization, so it should be performed late
         # Todo: add reference, think it's a Michael Wolf paper that mentions this
+                if isinstance(stmt.target, ir.NameRef):
 
     """
 
     typer = TypeHelper(symbols)
-    normalize = NormalizeMinMax(symbols)
 
     by_iterable = {}
     target_to_iterable = {}
@@ -659,7 +275,7 @@ def make_single_index_loop(header: ir.ForLoop, symbols, noescape):
         by_step[interval.step].add((interval.start, interval.stop))
     exprs = []
     for step, start_and_stop in by_step.items():
-        exprs.append(make_min_affine_seq(step, start_and_stop))
+        exprs.append(make_min_affine_seq(step, start_and_stop, symbols))
 
     if len(exprs) == 1:
         # we can avoid normalizing
@@ -673,7 +289,7 @@ def make_single_index_loop(header: ir.ForLoop, symbols, noescape):
         count = ir.MinReduction(*iterable_lens)
         affine_expr = ir.AffineSeq(ir.Zero, count, ir.One)
 
-    loop_expr = normalize(affine_expr)
+    loop_expr = simplify(affine_expr, typer)
     assert isinstance(loop_expr, ir.AffineSeq)
     loop_index = None
     for target in target_to_iterable:
@@ -690,7 +306,7 @@ def make_single_index_loop(header: ir.ForLoop, symbols, noescape):
     body = []
     pos = header.pos
     for target, iterable in unpack_iterated(header.target, header.iterable):
-        if target is loop_index:
+        if target == loop_index:
             continue
         if isinstance(iterable, ir.AffineSeq):
             # we can reuse
@@ -736,32 +352,33 @@ def make_single_index_loop(header: ir.ForLoop, symbols, noescape):
     return header
 
 
-def get_assigned_or_augmented(node: Union[ir.StmtBase, List[ir.StmtBase]]) -> Tuple[Set[ir.NameRef], Set[ir.NameRef]]:
+def get_assigned_or_augmented(node: Union[ir.Function, ir.ForLoop, ir.WhileLoop]) -> Tuple[Set[ir.NameRef], Set[ir.NameRef]]:
     bound = set()
     augmented = set()
-    for stmt in walk_nodes(node):
-        if isinstance(stmt, ir.Assign):
-            if isinstance(stmt.target, ir.NameRef):
-                bound.add(stmt.target)
-            elif isinstance(stmt.target, ir.Subscript):
-                augmented.add(stmt.target.value)
-        elif isinstance(stmt, ir.InPlaceOp):
-            if isinstance(stmt.target, ir.NameRef):
-                augmented.add(stmt.target)
-            else:
-                assert isinstance(stmt.target, ir.Subscript)
-                if isinstance(stmt.target.value, ir.NameRef):
+    for stmts in get_statement_lists(node):
+        for stmt in stmts:
+            if isinstance(stmt, ir.Assign):
+                if isinstance(stmt.target, ir.NameRef):
+                    bound.add(stmt.target)
+                elif isinstance(stmt.target, ir.Subscript):
                     augmented.add(stmt.target.value)
-        elif isinstance(stmt, ir.ForLoop):
-            # nested loop should not clobber
-            for target, _ in unpack_iterated(stmt.target, stmt.iterable):
-                if isinstance(target, ir.NameRef):
-                    bound.add(target)
+            elif isinstance(stmt, ir.InPlaceOp):
+                if isinstance(stmt.target, ir.NameRef):
+                    augmented.add(stmt.target)
+                else:
+                    assert isinstance(stmt.target, ir.Subscript)
+                    if isinstance(stmt.target.value, ir.NameRef):
+                        augmented.add(stmt.target.value)
+            elif isinstance(stmt, ir.ForLoop):
+                # nested loop should not clobber
+                for target, _ in unpack_iterated(stmt.target, stmt.iterable):
+                    if isinstance(target, ir.NameRef):
+                        bound.add(target)
     return bound, augmented
 
 
 def get_safe_loop_indices(stmt: ir.ForLoop, live_on_exit: Set[ir.NameRef], symbols: SymbolTable):
-    assigned, augmented = get_assigned_or_augmented(stmt.body)
+    assigned, augmented = get_assigned_or_augmented(stmt)
     # It's technically safe for arrays to be augmented here, but we need to freeze any value
     # used to determine indexing
     assigned.update(augmented)
@@ -809,3 +426,168 @@ def lower_loops(func: ir.Function, symbols: SymbolTable, verbose: bool = False):
         header.iterable = repl.iterable
         header.body.clear()
         header.body.extend(repl.body)
+
+
+def expand_in_place_assignments(entry_point: Union[ir.Function, ir.ForLoop, ir.WhileLoop], typer: TypeHelper):
+    for stmts in get_statement_lists(entry_point):
+        for index, stmt in enumerate(stmts):
+            if isinstance(stmt, ir.InPlaceOp):
+                if not isinstance(typer(stmt.target), ir.ArrayType):
+                    stmts[index] = ir.Assign(stmt.target, stmt.value, stmt.pos)
+
+
+def get_array_inits(stmt: ir.StmtBase):
+    for expr in extract_expressions(stmt):
+        for subexpr in walk(expr):
+            if isinstance(subexpr, ir.ArrayInitializer):
+                yield subexpr
+
+
+def make_array_init_assigns(inits: List[ir.ArrayInitializer], symbols: SymbolTable, pos: ir.Position):
+    typer = TypeHelper(symbols)
+    by_param = defaultdict(list)
+    stmts = []
+    # repl.append(ir.ArrayFill(target, stmt.value.fill_value, pos))
+    for init in inits:
+        t = typer(init)
+        name = symbols.make_unique_name_like('a', t)
+        alloc = ir.ArrayAlloc(init.shape, init.dtype)
+        assign = ir.Assign(name, alloc, pos)
+        stmts.append(assign)
+        by_param[init].append(name)
+        if not isinstance(init.fill_value, ir.NoneRef):
+            stmt = ir.ArrayFill(name, init.fill_value, pos)
+            stmts.append(stmt)
+    return stmts, by_param
+
+
+def substitute_array_refs(node: ir.ValueRef, array_refs: Dict[ir.ArrayInitializer, List[ir.NameRef]]):
+    if isinstance(node, ir.Expression):
+        if isinstance(node, ir.ArrayInitializer):
+            repl = array_refs[node].pop()
+            if not array_refs[node]:
+                array_refs.pop(node)
+            return repl
+        else:
+            return node.reconstruct(*(substitute_array_refs(subexpr, array_refs) for subexpr in node.subexprs))
+    else:
+        return node
+
+
+@singledispatch
+def replace_initializers(node, array_refs: Dict[ir.ArrayInitializer, List[ir.NameRef]]):
+    msg = f'No method to replace initializers for node {node}'
+    raise TypeError(msg)
+
+
+@replace_initializers.register
+def _(node: ir.StmtBase, array_refs: Dict[ir.ArrayInitializer, List[ir.NameRef]]):
+    return node
+
+
+@replace_initializers.register
+def _(node: ir.Assign, array_refs: Dict[ir.ArrayInitializer, List[ir.NameRef]]):
+    if any(isinstance(subexpr, ir.ArrayInitializer) for subexpr in walk(node.target)):
+        # this would have to be something like numpy.zeros(n)[i] = 42
+        msg = f'Array initialization functions cannot be part of an assignment target: line {node.pos}'
+        raise CompilerError(msg)
+    value = substitute_array_refs(node.value, array_refs)
+    if value == node.value:
+        return node
+    else:
+        return ir.Assign(node.target, value, node.pos)
+
+
+@replace_initializers.register
+def _(node: ir.InPlaceOp, array_refs: Dict[ir.ArrayInitializer, List[ir.NameRef]]):
+    if any(isinstance(subexpr, ir.ArrayInitializer) for subexpr in walk(node.target)):
+        # this would have to be something like numpy.zeros(n)[i] = 42
+        msg = f'Array initialization functions cannot be part of an assignment target: line {node.pos}'
+        raise CompilerError(msg)
+    value = substitute_array_refs(node.value, array_refs)
+    if value == node.value:
+        return node
+    else:
+        value = substitute_array_refs(node.value, array_refs)
+        return ir.InPlaceOp(node.target, value, node.pos)
+
+
+@replace_initializers.register
+def _(node: ir.Return, array_refs: Dict[ir.ArrayInitializer, List[ir.NameRef]]):
+    value = substitute_array_refs(node.value, array_refs)
+    return ir.Return(value, node.pos)
+
+
+@replace_initializers.register
+def _(node: ir.SingleExpr, array_refs: Dict[ir.ArrayInitializer, List[ir.NameRef]]):
+    value = substitute_array_refs(node.value, array_refs)
+    if value == node.value:
+        return node
+    else:
+        return ir.SingleExpr(value, node.pos)
+
+
+@replace_initializers.register
+def _(node: ir.IfElse, array_refs: Dict[ir.ArrayInitializer, List[ir.NameRef]]):
+    test = substitute_array_refs(node.test, array_refs)
+    if test != node.test:
+        node.test = test
+    return node
+
+
+@replace_initializers.register
+def _(node: ir.WhileLoop, array_refs: Dict[ir.ArrayInitializer, List[ir.NameRef]]):
+    test = substitute_array_refs(node.test, array_refs)
+    if test != node.test:
+        node.test = test
+    return node
+
+
+def split_array_assignment(node: ir.Assign):
+    """
+    split initialization where we don't require a temporary vable
+    :param node:
+    :return:
+    """
+    assert isinstance(node.target, ir.NameRef)
+    assert isinstance(node.value, ir. ArrayInitializer)
+    value = node.value
+    alloc = ir.ArrayAlloc(value.shape, value.dtype)
+    assign = ir.Assign(node.target, alloc, node.pos)
+    if isinstance(value.fill_value, ir.NoneRef):
+        stmts = [assign]
+    else:
+        fill = ir.ArrayFill(node.target, value.fill_value, node.pos)
+        stmts = [assign, fill]
+    return stmts
+
+
+def normalize_array_initializers(func: ir.Function, symbols: SymbolTable):
+    """
+    Splits initialization from allocation. This gives us some ability to hoist or remove large allocations.
+
+    :param func:
+    :param symbols:
+    :return:
+    """
+    repl = []
+    for stmts in get_statement_lists(func):
+        has_init = False
+        for stmt in stmts:
+            array_inits = list(get_array_inits(stmt))
+            if array_inits:
+                has_init = True
+                if isinstance(stmt, ir.Assign) and isinstance(stmt.target, ir.NameRef) and isinstance(stmt.value, ir.ArrayInitializer):
+                    repl.extend(split_array_assignment(stmt))
+                else:
+                    repl_stmts, by_param = make_array_init_assigns(array_inits, symbols, stmt.pos)
+                    repl.extend(repl_stmts)
+                    repl_stmt = replace_initializers(stmt, by_param)
+                    repl.append(repl_stmt)
+            else:
+                repl.append(stmt)
+
+        if has_init:
+            stmts.clear()
+            stmts.extend(repl)
+            repl.clear()

@@ -1,4 +1,5 @@
 import ast
+import itertools
 import sys
 import typing
 import symtable
@@ -8,11 +9,12 @@ from contextlib import contextmanager
 from itertools import islice
 from pathlib import Path
 
+from typing import Dict, Tuple
+
 import npmd.ir as ir
 
-from npmd.canonicalize import replace_call
+from npmd.callspec import early_call_specialize
 from npmd.errors import CompilerError
-from npmd.folding import fold_constants, simplify_arithmetic
 from npmd.pretty_printing import PrettyFormatter
 from npmd.symbol_table import symbol, SymbolTable
 from npmd.utils import unpack_iterated
@@ -126,28 +128,22 @@ def extract_positional_info(node):
 
 class ImportHandler(ast.NodeVisitor):
     """
-    This is used to replace source aliases with fully qualified names.
+    This is used to map a bound name to a module or import method
 
     """
 
-    def __init__(self):
-        self.imports = None
-        self.func_names = None
-
-    @contextmanager
-    def make_context(self):
+    def __init__(self, module_name: str):
+        self.module_name = module_name
         self.imports = {}
-        self.func_names = []
-        yield
-        self.imports = None
-        self.func_names = []
+        self.modules = {}
 
-    def __call__(self, node):
-        with self.make_context():
-            self.visit(node)
-            return self.imports, self.func_names
+    @classmethod
+    def collect_imports(cls, node: ast.Module, modname: str) -> Tuple[Dict[str, str], Dict[str, str]]:
+        visitor = cls(modname)
+        visitor.visit(node)
+        return visitor.modules, visitor.imports
 
-    def visit_Module(self, node):
+    def visit_Module(self, node: ast.Module):
         for n in node.body:
             self.visit(n)
 
@@ -155,67 +151,84 @@ class ImportHandler(ast.NodeVisitor):
         # ignore anything that isn't an import
         pass
 
-    class ImportHandler(ast.NodeVisitor):
-        """
-        This is used to replace source aliases with fully qualified names.
-
-        """
-
-        def __init__(self):
-            self.imports = None
-            self.numpy_alias = None
-
-        @contextmanager
-        def make_context(self):
-            self.imports = {}
-            yield
-            self.imports = None
-            self.numpy_alias = None
-
-        def __call__(self, node):
-            with self.make_context():
-                self.visit(node)
-                return self.imports, self.numpy_alias
-
-        def visit_Module(self, node):
-            for n in node.body:
-                self.visit(n)
-
-        def generic_visit(self, node):
-            # ignore anything that isn't an import
-            pass
-
-        def visit_Import(self, node):
-            # import modules only
-            for name in node.names:
-                if name.name != 'numpy':
-                    names = ", ".join(name.name for name in node.names)
-                    msg = f'Single import of numpy is the only currently supported import, received: {names}'
-                    raise CompilerError(msg)
-                self.numpy_alias = ir.NameRef(getattr(name, 'asname', 'numpy'))
-
-        def visit_ImportFrom(self, node):
-            module_name = node.module
-            if module_name != 'numpy':
-                msg = f'Only some imports from numpy are supported, received "{module_name}"'
+    def visit_Import(self, node):
+        # import modules only
+        for name in node.names:
+            if name.name.endswith(self.module_name):
+                msg = f'Imported name {name} conflicts with module name {self.module_name}'
                 raise CompilerError(msg)
-            for name in node.names:
-                # assume alias node
-                imported_name = name.name
-                import_alias = getattr(name, 'asname', imported_name)
-                if imported_name in self.imports:
-                    msg = 'Name "{import_alias}" overwrites an existing assignment.'
-                    raise CompilerError(msg)
-                self.imports[ir.NameRef(import_alias)] = ir.NameRef(imported_name)
+            if name.name != 'numpy':
+                names = ", ".join(name.name for name in node.names)
+                msg = f'Single import of numpy is the only currently supported import, received: {names}'
+                raise CompilerError(msg)
+            alias = getattr(name, 'asname', name)
+            self.modules[alias] = name.name
+
+    def visit_ImportFrom(self, node: ast.ImportFrom):
+        module_name = node.module
+        if module_name != 'numpy':
+            msg = f'Only some imports from numpy are supported, received "{module_name}"'
+            raise CompilerError(msg)
+        for name in node.names:
+            # assume alias node
+            imported_name = name.name
+            import_alias = getattr(name, 'asname', imported_name)
+            if name in itertools.chain(self.imports.keys(), self.imports.values()) \
+                    or import_alias in self.imports.keys() \
+                    or import_alias in self.modules.keys():
+                msg = f'Name "{imported_name}" imported as "{import_alias}" conflicts with an existing import entry.'
+                raise CompilerError(msg)
+            if not imported_name.startswith('numpy'):
+                msg = f'This currently only supports importing a subset of Numpy and no other libraries. ' \
+                      f'Received import statement "{imported_name}".'
+                raise CompilerError(msg)
+            qualname = f'{module_name}.{imported_name}'
+            self.imports[import_alias] = qualname
+
+
+def resolve_call_target(node: ast.Call, module_imports: Dict[str, str], name_imports: Dict[str, str]):
+    name = node.func
+    attr_chain = []
+    while isinstance(name, ast.Attribute):
+        attr_chain.append(name.attr)
+        name = name.value
+    # no calling subscripted
+    assert isinstance(name, ast.Name)
+    attr_chain.append(name.id)
+    attr_chain.reverse()
+    base = attr_chain[0]
+    if len(attr_chain) == 1 and base in module_imports:
+        target = module_imports[base]
+        msg = f'Module import "{target}" with alias "{base}" is not directly callable.'
+        raise CompilerError(msg)
+    elif base in module_imports:
+        attr_chain[0] = module_imports[base]
+        qualname = '.'.join(attr_chain)
+    elif base in name_imports:
+        attr_chain[0] = name_imports[base]
+        qualname = '.'.join(attr_chain)
+    else:
+        for index, term in enumerate(itertools.islice(attr_chain, 1, None), 1):
+            base = f'{base}.{term}'
+            if base in module_imports:
+                attr_chain[0] = module_imports[base]
+                break
+            elif base in name_imports:
+                attr_chain[0] = name_imports[base]
+                break
+        qualname = '.'.join(attr_chain)
+    return qualname
 
 
 class TreeBuilder(ast.NodeVisitor):
 
-    def __init__(self):
+    def __init__(self, name_imports: Dict[str, str], module_imports: Dict[str, str]):
         self.symbols = None
         self.body = None
         self.entry = None
         self.enclosing_loop = None
+        self.name_imports = name_imports
+        self.module_imports = module_imports
         self.formatter = PrettyFormatter()
 
     @contextmanager
@@ -294,8 +307,6 @@ class TreeBuilder(ast.NodeVisitor):
             cls = unary_ops.get(type(node.op))
             operand = self.visit(node.operand)
             expr = cls(operand)
-        expr = fold_constants(expr)
-        expr = simplify_arithmetic(expr)
         return expr
 
     def visit_BinOp(self, node: ast.BinOp) -> ir.BinOp:
@@ -303,15 +314,11 @@ class TreeBuilder(ast.NodeVisitor):
         left = self.visit(node.left)
         right = self.visit(node.right)
         expr = cls(left, right)
-        expr = fold_constants(expr)
-        expr = simplify_arithmetic(expr)
         return expr
 
     def visit_BoolOp(self, node: ast.BoolOp) -> typing.Union[ir.CONSTANT, ir.AND, ir.OR]:
         cls = bool_ops.get(node.op)
         expr = cls(*(self.visit(v) for v in node.values))
-        expr = fold_constants(expr)
-        expr = simplify_arithmetic(expr)
         return expr
 
     def visit_Compare(self, node: ast.Compare) -> typing.Union[ir.BinOp, ir.AND, ir.CONSTANT]:
@@ -332,39 +339,22 @@ class TreeBuilder(ast.NodeVisitor):
         return ir.AND(*compares)
 
     def visit_Call(self, node: ast.Call) -> typing.Union[ir.ValueRef, ir.NameRef, ir.Call]:
-        if not isinstance(node.func, ast.Name):
-            raise CompilerError('Calls only supported on function names.')
-        if isinstance(node.func, ast.Name):
-            func_name = ir.NameRef(node.func.id)
-            if node.keywords:
-                # Todo: add AST positional arguments, since these are available for expressions
-                #  at Python AST level
-                msg = 'Keyword arguments are unsupported.'
-                raise CompilerError(msg)
-            args = [func_name]
-            for arg in node.args:
-                args.append(self.visit(arg))
-            call_ = ir.Call(*args)
-            # Todo: need a way to identify array creation
-            repl = replace_call(call_)
-            return repl
+        call_name = resolve_call_target(node, self.module_imports, self.name_imports)
+        args = ir.TUPLE(*(self.visit(arg) for arg in node.args))
+        # Todo: need a way to identify array creation
+        if node.keywords:
+            kwargs = []
+            for kw in node.keywords:
+                name = ir.NameRef(kw.arg)
+                value = self.visit(kw.value)
+                kwargs.append(ir.TUPLE(name, value))
+            keywords = ir.TUPLE(*kwargs)
         else:
-            no_match_msg = f'No matching supported signature for "{node}". ' \
-                           f'Non-default arguments not yet supported on reductions.'
-            arg = self.visit(node.func.value)
-            if not isinstance(node.func, ast.Attribute):
-                msg = f'Unsupported call "{node.func}". Only names and some attributes are supported as callable.'
-                raise CompilerError(msg)
-            elif len(node.keywords) or len(node.args):
-                raise CompilerError(no_match_msg)
-            if node.func.attr == 'min':
-                return ir.ARRAY_MIN(arg)
-            elif node.func.attr == 'max':
-                return ir.ARRAY_MAX(arg)
-            elif node.func.attr == 'sum':
-                return ir.ARRAY_SUM(arg)
-            else:
-                raise CompilerError(no_match_msg)
+            keywords = ir.TUPLE()
+        # Now check for aliasing
+        call_ = ir.Call(call_name, args, keywords)
+        repl = early_call_specialize(call_)
+        return repl
 
     def visit_IfExp(self, node: ast.IfExp) -> ir.ValueRef:
         predicate = self.visit(node.test)
@@ -490,7 +480,8 @@ class TreeBuilder(ast.NodeVisitor):
             for target, iterable in unpack_iterated(target_node, iter_node):
                 # check for some things that aren't currently supported
                 if isinstance(target, ir.Subscript):
-                    msg = f'Setting a subscript target in a for loop iterator is currently unsupported: line{pos.line_begin}.'
+                    msg = f'Setting a subscript target in a for loop iterator is currently ' \
+                          f'unsupported: line{pos.line_begin}.'
                     raise CompilerError(msg)
                 targets.add(target)
                 iterables.add(iterable)
@@ -671,14 +662,13 @@ def build_module_ir_and_symbols(src_path, types):
     func_symbol_tables = populate_symbol_tables(module_name, src_text, types)
     mod_ast = ast.parse(src_text, filename=path.name)
     mod_ast = ast.fix_missing_locations(mod_ast)
-    import_handler = ImportHandler()
-    import_map = import_handler(mod_ast)
+    module_imports, name_imports = ImportHandler.collect_imports(mod_ast, module_name)
     funcs_by_name = map_functions_by_name(mod_ast)
-    build_ir = TreeBuilder()
+    build_ir = TreeBuilder(module_imports, name_imports)
     funcs = []
     # Todo: register imports once interface stabilizes
     for func_name, ast_entry_point in funcs_by_name.items():
         symbol_handler = func_symbol_tables.get(func_name)
         func_ir = build_ir(ast_entry_point, symbol_handler)
         funcs.append(func_ir)
-    return ir.Module(module_name, funcs, import_map), func_symbol_tables
+    return ir.Module(module_name, funcs, module_imports, name_imports), func_symbol_tables

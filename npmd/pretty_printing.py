@@ -1,7 +1,7 @@
 import itertools
 import typing
 
-import numpy as np
+import numpy
 
 from npmd.errors import CompilerError
 
@@ -81,6 +81,15 @@ class PrettyFormatter:
         msg = f"No method to format node: {node}."
         raise NotImplementedError(msg)
 
+    @visit.register
+    def _(self, node: ir.ArrayAlloc):
+        exprs = ', '.join(self.visit(subexpr) for subexpr in node.subexprs)
+        return f'numpy.empty({exprs})'
+
+    @visit.register
+    def _(self, node: ir.ArrayFill):
+        return f'{self.visit(node.array)}[...] = {self.visit(node.fill_value)}'
+
     # adding formatting support for non-branching statements in order to print graph nodes
     @visit.register
     def _(self, node: ir.Assign):
@@ -93,12 +102,6 @@ class PrettyFormatter:
     def _(self, node: ir.Function):
         args = ', '.join(arg.name for arg in node.args)
         return f'def {node.name}({args})'
-
-    @visit.register
-    def _(self, node: ir.Case):
-        predicate, _ = next(iter(node.conditions))
-        test = self.visit(predicate)
-        return f'if {test}'
 
     @visit.register
     def _(self, node: ir.IfElse):
@@ -153,12 +156,30 @@ class PrettyFormatter:
         return 'None'
 
     @visit.register
-    def _(self, node: np.dtype):
+    def _(self, node: numpy.dtype):
         return str(node)
 
     @visit.register
     def _(self, node: ir.ArrayType):
         return str(node)
+
+    @visit.register
+    def _(self, node: ir.ArrayInitializer):
+        if isinstance(node.fill_value, ir.NoneRef):
+            name = 'empty'
+        elif node.fill_value == ir.Zero:
+            name = 'zeros'
+        elif node.fill_value == ir.One:
+            name = 'ones'
+        else:
+            msg = f'No name initializer will fill value "{self.visit(node.fill_value)}"'
+            raise CompilerError(msg)
+        if isinstance(node.shape, ir.TUPLE):
+            shape = self.parenthesized(node.shape)
+        else:
+            shape = self.visit(node.shape)
+        formatted = f'{name}({shape}, {node.dtype})'
+        return formatted
 
     @visit.register
     def _(self, node: ir.SingleDimRef):
@@ -296,8 +317,8 @@ class PrettyFormatter:
 
     @visit.register
     def _(self, node: ir.Call):
-        func_name = self.visit(node.func)
-        args = ", ".join(self.visit(arg) for arg in node.args)
+        func_name = node.func
+        args = ", ".join(self.visit(arg) for arg in node.args.subexprs)
         func = f"{func_name}({args})"
         return func
 
@@ -437,6 +458,11 @@ class PrettyPrinter:
         raise NotImplementedError(msg)
 
     @visit.register
+    def _(self, node: ir.ArrayFill):
+        line = f'{self.format(node.array)}[...] = {self.format(node.fill_value)}'
+        self.print_line(line)
+
+    @visit.register
     def _(self, node: ir.Return):
         if isinstance(node.value, ir.NoneRef):
             self.print_line("return")
@@ -518,28 +544,6 @@ class PrettyPrinter:
                 formatted_target = f"{formatted_target}: {type_}"
         stmt = f"{formatted_target} = {formatted_value}"
         self.print_line(stmt)
-
-    @visit.register
-    def _(self, node: ir.Case):
-        # Todo: this implementation precedes recent changes..
-        cond, branch = node.conditions[0]
-        cond = self.format(cond)
-        cond = f'if {cond}:'
-        self.print_line(cond)
-        with self.indented():
-            self.print_line(branch)
-        for cond, branch in itertools.islice(node.conditions, 1, None):
-            cond = self.format(cond)
-            cond = f'elif {cond}:'
-            self.print_line(cond)
-            with self.indented():
-                self.visit(branch)
-        self.print_line("else:")
-        with self.indented():
-            if node.default:
-                self.visit(node.default)
-            else:
-                self.print_line('pass')
 
     @visit.register
     def _(self, node: ir.InPlaceOp):

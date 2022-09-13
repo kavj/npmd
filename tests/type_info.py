@@ -169,6 +169,15 @@ type_detail = {"test_forifcont.py":
                        'a': array_1d,
                        'b': array_1d
                    }
+               },
+
+               'test_array_initializers.py': {
+                   'test_array_1d': {
+                       'n': np.dtype('int32')
+                   },
+                   'test_array_init': {
+                       'n': np.dtype('int32')
+                   }
                }
 
                }

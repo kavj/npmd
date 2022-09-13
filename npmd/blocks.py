@@ -13,6 +13,7 @@ import npmd.ir as ir
 
 from npmd.errors import CompilerError
 from npmd.pretty_printing import PrettyFormatter
+from npmd.traversal import get_statement_lists
 from npmd.utils import is_entry_point
 
 
@@ -288,6 +289,8 @@ class CFGBuilder:
                 self.return_blocks.append(block)
 
 
+# Todo: This needs to be linked with a sub-graph builder, so that we can check a loop nest without checking the entire
+#  code.
 def build_graph_recursive(statements: List[ir.Statement], builder: CFGBuilder, entry_point: BasicBlock):
     prior_block = entry_point
     deferrals = []  # last_block determines if we have deferrals to this one
@@ -400,6 +403,15 @@ def get_loop_header_block(graph: FlowGraph, node: ir.ForLoop) -> BasicBlock:
 
 
 def get_loop_exit_block(graph: FlowGraph, node: BasicBlock) -> Optional[BasicBlock]:
+    """
+    This will return a loop exit if there's an edge from the header block to some block outside the loop.
+    Otherwise returns None.
+
+    :param graph:
+    :param node:
+    :return:
+    """
+    assert node.is_loop_block
     for block in graph.successors(node):
         if block.depth == node.depth:
             return block
@@ -417,6 +429,7 @@ def dominator_tree(graph: FlowGraph):
 
 def get_blocks_in_loop(graph: FlowGraph, block: BasicBlock):
     """
+    This grabs all blocks in a source level loop, based on its tree representation.
     :param graph:
     :param block:
     :return:
@@ -424,17 +437,11 @@ def get_blocks_in_loop(graph: FlowGraph, block: BasicBlock):
 
     assert block.is_loop_block
     # get the exit block if there is one
-    exit_block = get_loop_exit_block(graph, block)
-    assert exit_block is not block
-    cfg = graph.graph
-    if exit_block is not None:
-        # make a disconnected sub-graph so that we don't cross divergent edges
-        nodes = set(cfg.nodes())
-        nodes.remove(exit_block)
-        cfg = nx.induced_subgraph(cfg, nodes)
-
-    loop_blocks = set(nx.descendants(cfg, block))
-
+    stmt_lists = tuple(get_statement_lists(block.first))
+    loop_blocks = []
+    for node in graph.nodes():
+        if node.statements in stmt_lists:
+            loop_blocks.append(node)
     return loop_blocks
 
 

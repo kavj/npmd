@@ -6,7 +6,3 @@ def test_simple_walk():
 
 def test_walk_parameters():
     pass
-
-
-def test_walk_nodes():
-    pass

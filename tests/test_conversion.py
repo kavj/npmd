@@ -1,3 +1,4 @@
+import itertools
 import pathlib
 import pytest
 
@@ -7,7 +8,7 @@ from npmd.ast_conversion import build_module_ir_and_symbols
 from npmd.blocks import build_function_graph
 from npmd.errors import CompilerError
 from npmd.pretty_printing import DebugPrinter
-from npmd.traversal import walk_nodes
+from npmd.traversal import get_statement_lists
 from tests.type_info import type_detail
 
 
@@ -34,7 +35,7 @@ def test_conversions():
         # Now test that conversions yield all nodes
         func = mod.functions[0]
         print(mod.name, func.name)
-        tree_stmts = [stmt for stmt in walk_nodes(func.body)]
+        tree_stmts = [stmt for stmt in itertools.chain(*get_statement_lists(func))]
         tree_stmts.append(func)
         graph = build_function_graph(func)
         graph_stmts = [stmt for stmt in graph.walk_nodes()]

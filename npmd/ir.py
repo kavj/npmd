@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import itertools
 import math
 import numbers
+import numpy
 import operator
 import typing
-
-import numpy as np
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -16,11 +14,22 @@ from npmd.errors import CompilerError
 supported_builtins = frozenset({'iter', 'range', 'enumerate', 'zip', 'all', 'any', 'max', 'min', 'abs', 'pow',
                                 'round', 'reversed'})
 
-int32 = np.dtype('int32')
-int64 = np.dtype('int64')
-float32 = np.dtype('float32')
-float64 = np.dtype('float64')
-bool_type = np.dtype('bool')
+int8 = numpy.dtype('int8')
+int16 = numpy.dtype('int16')
+int32 = numpy.dtype('int32')
+int64 = numpy.dtype('int64')
+uint8 = numpy.dtype('uint8')
+uint16 = numpy.dtype('uint16')
+uint32 = numpy.dtype('uint32')
+uint64 = numpy.dtype('uint64')
+float16 = numpy.dtype('float16')
+float32 = numpy.dtype('float32')
+float64 = numpy.dtype('float64')
+float128 = numpy.dtype('float128')
+complex64 = numpy.dtype('complex64')
+complex128 = numpy.dtype('complex128')
+complex256 = numpy.dtype('complex256')
+bool_type = numpy.dtype('bool')
 
 
 @dataclass(frozen=True, order=True)
@@ -99,12 +108,18 @@ class CONSTANT(ValueRef):
     """
     ir type for numeric constant
     """
-    value: np.number
-    dtype: typing.Union[np.dtype, type]
-    predicate: bool
+    value: numpy.number
+    is_predicate: bool
+    bool_dtypes: typing.ClassVar[typing.Set[numpy.dtype]] = {numpy.dtype('bool')}
+    int_dtypes: typing.ClassVar[typing.Set[numpy.dtype]] = {int8, int16, int32, int64, uint8, uint16, uint32, uint64}
+    float_dtypes: typing.ClassVar[typing.Set[numpy.dtype]] = {float16, float32, float64, float128}
+    complex_dtypes: typing.ClassVar[typing.Set[numpy.dtype]] = {complex64, complex128, complex256}
 
     def __bool__(self):
         return operator.truth(self.value)
+
+    def __post_init__(self):
+        assert hasattr(self.value, 'dtype') or numpy.isnan(self.value)
 
     def can_negate(self):
         if self.is_integer:
@@ -115,7 +130,11 @@ class CONSTANT(ValueRef):
     def matches(self, other: CONSTANT):
         if self.is_nan:
             return other.is_nan
-        return self.value == other.value and self.predicate == other.predicate
+        return self.value == other.value and self.is_predicate == other.is_predicate
+
+    @property
+    def dtype(self):
+        return self.value.dtype
 
     @property
     def negative(self):
@@ -123,20 +142,24 @@ class CONSTANT(ValueRef):
 
     @property
     def is_nan(self):
-        return np.isnan(self.value)
+        return numpy.isnan(self.value)
 
     @property
     def is_bool(self):
-        return isinstance(self.value, np.bool_)
+        return self.dtype in self.bool_dtypes
 
     @property
     def is_integer(self):
-        return not self.is_bool and isinstance(self.value, np.integer)
+        return self.dtype in self.int_dtypes
+
+    @property
+    def is_float(self):
+        return self.dtype in self.float_dtypes
 
 
 def is_nan(value: ValueRef):
     assert isinstance(value, ValueRef)
-    return isinstance(value, CONSTANT) and np.isnan(value.value)
+    return isinstance(value, CONSTANT) and numpy.isnan(value.value)
 
 
 @dataclass(frozen=True)
@@ -154,27 +177,33 @@ class StringConst(ValueRef):
         return operator.truth(self.value)
 
 
-def wrap_constant(c: typing.Union[str, bool, np.bool_, numbers.Number], is_predicate: bool = False):
+def wrap_constant(c: typing.Union[str, bool, numpy.bool_, numbers.Number], dtype: typing.Optional[numpy.dtype] = None, is_predicate: bool = False):
     # check if we have a supported type
     if isinstance(c, str):
         value = StringConst(c)
     elif math.isnan(c):
         # numpy uses a different nan object than math.nan
-        # but np.isnan is somewhat too strict as we don't want type coercion to float. We only need to know
+        # but numpy.isnan is somewhat too strict as we don't want type coercion to float. We only need to know
         # that the input was not a floating point nan.
-        value = CONSTANT(np.nan, type(np.nan), is_predicate)
-    elif isinstance(c, (bool, np.bool_)):
+        value = CONSTANT(numpy.nan, is_predicate)
+    elif isinstance(c, (bool, numpy.bool_)):
         # ensure we wrap the numpy bool_ type
-        c = np.bool_(c)
-        value = CONSTANT(c, np.bool_, is_predicate)
-    else:
+        if dtype is None:
+            c = numpy.bool_(c)
+        else:
+            c = dtype.type(c)
+        value = CONSTANT(c, is_predicate)
+    elif dtype is None:
         assert isinstance(c, numbers.Number)
-        min_scalar_type: np.dtype = np.min_scalar_type(c)
-        if min_scalar_type == np.dtype('O'):
+        min_scalar_type: numpy.dtype = numpy.min_scalar_type(c)
+        if min_scalar_type == numpy.dtype('O'):
             msg = f'Cannot map "{c}" to non-object type'
             raise CompilerError(msg)
         raw_value = min_scalar_type.type(c)
-        value = CONSTANT(raw_value, min_scalar_type, is_predicate)
+        value = CONSTANT(raw_value, is_predicate)
+    else:
+        raw_value = dtype.type(c)
+        value = CONSTANT(raw_value, is_predicate)
     return value
 
 
@@ -187,7 +216,19 @@ NegativeOne = wrap_constant(-1)
 NegativeTwo = wrap_constant(-2)
 TRUE = wrap_constant(True)
 FALSE = wrap_constant(False)
-NAN = wrap_constant(np.nan)
+NAN = wrap_constant(numpy.nan)
+
+
+def integer_cast(node: ValueRef):
+    while isinstance(node, CAST):
+        node = node.value
+    return CAST(node, numpy.dtype('int64'))
+
+
+def float_cast(node: ValueRef):
+    while isinstance(node, CAST):
+        node = node.value
+    return CAST(node, numpy.dtype('float64'))
 
 
 # Top Level
@@ -220,12 +261,12 @@ class NameRef(ValueRef):
 @dataclass(frozen=True)
 class ArrayType(TypeBase):
     ndims: int
-    dtype: np.dtype
+    dtype: numpy.dtype
 
     def __post_init__(self):
         assert isinstance(self.ndims, int)
         assert self.ndims > 0
-        assert isinstance(self.dtype, np.dtype)
+        assert isinstance(self.dtype, numpy.dtype)
 
     def without_leading_dim(self):
         if self.ndims == 1:
@@ -236,9 +277,9 @@ class ArrayType(TypeBase):
 
 @dataclass(frozen=True)
 class ArrayInitializer(Expression):
-    shape: TUPLE
-    dtype: np.dtype
-    fill_value: CONSTANT
+    shape: ValueRef
+    dtype: StringConst
+    fill_value: typing.Union[CONSTANT, NoneRef]
 
     @property
     def subexprs(self):
@@ -249,11 +290,46 @@ class ArrayInitializer(Expression):
         return super().reconstruct(args[0], self.dtype, self.fill_value)
 
     def __post_init__(self):
-        assert isinstance(self.shape, tuple)
-        assert isinstance(self.dtype, np.dtype)
-        if len(self.shape) > 4:
+        assert isinstance(self.dtype, StringConst)
+        if isinstance(self.shape, TUPLE) and len(self.shape) > 4:
             msg = f'Arrays with more than 4 dims are unsupported here'
             raise CompilerError(msg)
+
+
+@dataclass(frozen=True)
+class ArrayFill(StmtBase):
+    array: NameRef
+    fill_value: CONSTANT
+    pos: Position
+
+
+@dataclass(frozen=True)
+class ArrayAlloc(Expression):
+    shape: ValueRef
+    dtype: StringConst
+
+    @property
+    def subexprs(self):
+        yield self.shape
+
+    def reconstruct(self, *args):
+        assert len(args) == 1
+        return ArrayAlloc(args[0], self.dtype)
+
+    def __post_init__(self):
+        assert isinstance(self.dtype, StringConst)
+        if isinstance(self.shape, TUPLE) and len(self.shape) > 4:
+            msg = f'Arrays with more than 4 dims are unsupported here'
+            raise CompilerError(msg)
+
+
+@dataclass(frozen=True)
+class ShapeRef(Expression):
+    value: typing.Tuple[ValueRef, ...]
+
+    @property
+    def subexprs(self):
+        yield from self.value
 
 
 @dataclass(frozen=True)
@@ -276,8 +352,21 @@ class SingleDimRef(Expression):
 
 
 @dataclass(frozen=True)
+class ABSOLUTE(Expression):
+    value: ValueRef
+
+    @property
+    def subexprs(self):
+        yield self.value
+
+
+@dataclass(frozen=True)
 class FLOOR(Expression):
     value: ValueRef
+
+    @property
+    def subexprs(self):
+        yield self.value
 
 
 @dataclass(frozen=True)
@@ -304,35 +393,6 @@ class Subscript(Expression):
     def subexprs(self):
         yield self.value
         yield self.index
-
-
-# horizontal reductions
-class ArrayReduction:
-    value: ValueRef
-
-    @property
-    def subexprs(self):
-        yield self.value
-
-
-@dataclass(frozen=True)
-class ARRAY_MIN(ArrayReduction):
-    value: ValueRef
-
-
-@dataclass(frozen=True)
-class ARRAY_MAX(ArrayReduction):
-    value: ValueRef
-
-
-@dataclass(frozen=True)
-class ARRAY_SUM(ArrayReduction):
-    value: ValueRef
-
-
-@dataclass(frozen=True)
-class ARRAY_SELECT(ArrayReduction):
-    value: ValueRef
 
 
 @dataclass(frozen=True)
@@ -382,6 +442,24 @@ class MAX(Expression):
 
 
 @dataclass(frozen=True)
+class MAXELT(Expression):
+    value: ValueRef
+
+    @property
+    def subexprs(self):
+        yield self.value
+
+
+@dataclass(frozen=True)
+class MINELT(Expression):
+    value: ValueRef
+
+    @property
+    def subexprs(self):
+        yield self.value
+
+
+@dataclass(frozen=True)
 class MaxReduction(Expression):
     values: typing.FrozenSet[ValueRef, ...]
 
@@ -413,23 +491,13 @@ class Module:
     """
     name: str
     functions: typing.List[Function]
-    imports: typing.List[typing.Any]
+    module_imports: typing.Dict[str, str]
+    name_imports: typing.Dict[str, str]
 
     def lookup(self, func_name):
         for func in self.functions:
             if func.name == func_name:
                 return func
-
-
-# needed to flatten nested if else
-@dataclass
-class Case(StmtBase):
-    conditions: typing.List[typing.Tuple[ValueRef, typing.List[StmtBase]]]
-    default: typing.List[StmtBase]
-    pos: Position
-
-    def __post_init__(self):
-        assert len(self.conditions) > 1
 
 
 @dataclass(frozen=True)
@@ -479,6 +547,9 @@ class TUPLE(Expression):
             if not isinstance(e, ValueRef):
                 msg = f'Expected value refs, received "{e}".'
                 raise TypeError(msg)
+
+    def __len__(self):
+        return len(self.elements)
 
     @property
     def subexprs(self):
@@ -898,7 +969,7 @@ class OR(BoolOp):
     """
     Boolean OR
     """
-    operands: typing.FrozenSet[ValueRef, ...]
+    operands: typing.Tuple[ValueRef, ...]
 
     def __init__(self, *operands):
         object.__setattr__(self, 'operands', frozenset(operands))
@@ -909,7 +980,7 @@ class AND(BoolOp):
     """
     Boolean AND
     """
-    operands: typing.FrozenSet[ValueRef, ...]
+    operands: typing.Tuple[ValueRef, ...]
 
     def __init__(self, *operands):
         object.__setattr__(self, 'operands', frozenset(operands))
@@ -920,7 +991,7 @@ class XOR(BoolOp):
     """
     Boolean XOR
     """
-    operands: typing.FrozenSet[ValueRef, ...]
+    operands: typing.Tuple[ValueRef, ...]
 
     def __init__(self, *operands):
         object.__setattr__(self, 'operands', frozenset(operands))
@@ -999,6 +1070,33 @@ class NOT(BoolOp):
 
 
 @dataclass(frozen=True)
+class PRODUCT(Expression):
+    value: ValueRef
+
+    @property
+    def subexprs(self):
+        yield self.value
+
+
+@dataclass(frozen=True)
+class RECIPROCAL(Expression):
+    value: ValueRef
+
+    @property
+    def subexprs(self):
+        yield self.value
+
+
+@dataclass(frozen=True)
+class SUM(Expression):
+    value: ValueRef
+
+    @property
+    def subexprs(self):
+        yield self.value
+
+
+@dataclass(frozen=True)
 class Call(Expression):
     """
     An arbitrary call node. This can be replaced
@@ -1006,29 +1104,22 @@ class Call(Expression):
 
     """
 
-    def __init__(self, *args):
-        func = args[0]
-        if not isinstance(func, NameRef):
-            msg = f"Non-name callables are not supported."
-            raise TypeError(msg)
-        args_ = tuple(args[1:])
-        object.__setattr__(self, 'func', func)
-        object.__setattr__(self, 'args', args_)
-
-    func: NameRef
+    func: str
     # no support for keyword arguments, as these complicate transforms
-    args: typing.Optional[typing.Tuple[ValueRef, ...]]
+    args: TUPLE
+    kwargs: TUPLE
 
     @property
     def subexprs(self):
         # don't yield call name,
         # since this shouldn't be visited like a variable
-        for arg in self.args:
-            yield arg
+        yield self.args
+        yield self.kwargs
 
     def reconstruct(self, *args):
-        assert len(args) == len(self.args)
-        return super().reconstruct(*itertools.chain((self.func,), args))
+        args_, kwargs = args
+        assert len(args_.elements) == len(self.args.elements)
+        return Call(self.func, args_, kwargs)
 
 
 @dataclass(frozen=True)
@@ -1069,6 +1160,24 @@ class AffineSeq(Expression):
 
 
 @dataclass(frozen=True)
+class ALL(Expression):
+    value: ValueRef
+
+    @property
+    def subexprs(self):
+        yield self.value
+
+
+@dataclass(frozen=True)
+class ANY(Expression):
+    value: ValueRef
+
+    @property
+    def subexprs(self):
+        yield self.value
+
+
+@dataclass(frozen=True)
 class SELECT(Expression):
     """
     A Python if-expression.
@@ -1095,6 +1204,40 @@ class SELECT(Expression):
         yield self.predicate
         yield self.on_true
         yield self.on_false
+
+
+@dataclass(frozen=True)
+class ELTWISEOP(Expression):
+    a: ValueRef
+    b: ValueRef
+    out: ValueRef
+    where: ValueRef
+
+
+@dataclass(frozen=True)
+class ELTWISEUNARYOP(Expression):
+    a: ValueRef
+    out: ValueRef
+    where: ValueRef
+
+
+@dataclass(frozen=True)
+class LOGICAL_REDUC(Expression):
+    a: Expression
+    axis: CONSTANT
+    out: ValueRef
+    keepdims: CONSTANT
+    where: ValueRef
+
+
+@dataclass(frozen=True)
+class ARITH_REDUC(Expression):
+    a: Expression
+    axis: CONSTANT
+    out: ValueRef
+    keepdims: CONSTANT
+    initial: ValueRef
+    where: ValueRef
 
 
 @dataclass(frozen=True)
@@ -1127,10 +1270,9 @@ class Enumerate(Expression):
         nargs = len(args)
         if nargs == 1:
             iterable, = args
-            start = wrap_constant(0)
+            start = Zero
         elif nargs == 2:
             iterable, start = args
-            pass
         else:
             raise CompilerError(f'Enumerate takes 1 or 2 arguments, "{nargs}" given.')
         object.__setattr__(self, 'iterable', iterable)
@@ -1187,7 +1329,9 @@ class Assign(StmtBase):
 
     def __post_init__(self):
         # no support for assigning to arbitary constructs
-        assert isinstance(self.target, (NameRef, Subscript))
+        if not isinstance(self.target, (NameRef, Subscript)):
+            msg = f'Assign expects a name or subsccript target, received "{self.target}"'
+            raise TypeError(msg)
         assert isinstance(self.value, ValueRef)
         if isinstance(self.value, Slice):
             msg = f'Explicitly assigning slice expressions is unsupported: "{self}".'

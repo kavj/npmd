@@ -1,5 +1,5 @@
-from functools import singledispatchmethod
-from typing import Dict
+from functools import singledispatch, singledispatchmethod
+from typing import Dict, Iterable, Union
 
 import npmd.ir as ir
 
@@ -8,6 +8,7 @@ from npmd.blocks import build_function_graph
 from npmd.liveness import find_ephemeral_assigns, find_live_in_out
 from npmd.symbol_table import SymbolTable
 from npmd.type_checks import TypeHelper
+from npmd.utils import is_basic_assign
 
 
 def rewrite_expr(current: Dict[ir.ValueRef, ir.ValueRef], node: ir.ValueRef):
@@ -30,6 +31,7 @@ def rewrite_expr(current: Dict[ir.ValueRef, ir.ValueRef], node: ir.ValueRef):
 # statement rewriter doesn't create new names here
 
 def rename_ephemeral(func: ir.Function, symbols: SymbolTable):
+    # Helpful for weakening the need for type inference in cases where a type is not declared.
     graph = build_function_graph(func)
     liveness = find_live_in_out(graph)
     ephemeral = find_ephemeral_assigns(liveness)
@@ -68,10 +70,20 @@ def rename_ephemeral(func: ir.Function, symbols: SymbolTable):
         latest.clear()
 
 
-class ExprInliner:
+def get_last_basic_assign(stmts: Iterable[Union[ir.StmtBase, ir.Assign]]):
+    # simple because it doesn't rely on reversing partial views, eg itertools.islice
+    last = {}
+    for stmt in stmts:
+        if is_basic_assign(stmt):
+            last[stmt.target] = stmt
+    return last
 
-    def __init__(self, symbols: SymbolTable):
-        self.current = {}
+
+class ExprRenamer:
+
+    def __init__(self, symbols: SymbolTable, last_assign: Dict[ir.NameRef, ir.Assign]):
+        self.latest = {}
+        self.last_assign = last_assign
         self.symbols = symbols
         self.typer = TypeHelper(symbols)
 
@@ -80,9 +92,8 @@ class ExprInliner:
         target_type = self.symbols.check_type(target, allow_none=True)
         value_type = self.typer(value)
         if target_type != value_type:
-            # Todo: need can cast validation for these things..
             value = ir.CAST(value, target_type)
-        self.current[target] = value
+        self.latest[target] = value
         return value
 
     @singledispatchmethod
@@ -97,41 +108,40 @@ class ExprInliner:
     def _(self, node: ir.Assign):
         target = node.target
         # inline prior expressions
-        value = rewrite_expr(self.current, node.value)
-        if isinstance(node.target, ir.NameRef):
-            # adds casting if necessary
-            value = self.bind_target(node.target, node.value)
+        value = rewrite_expr(self.latest, node.value)
+        if is_basic_assign(node):
+            if node is self.last_assign[node.target]:
+                # ensure
+                self.latest[node.target] = node.target
+            else:
+                value = self.bind_target(node.target, node.value)
         else:
-            target = rewrite_expr(self.current, node.target)
-        repl = ir.Assign(target, value, node.pos)
-        if repl != node:
-            return repl
-        # if no changes persist, return the original rather than a copy
-        return node
+            target = rewrite_expr(self.latest, node.target)
+        if target == node.target and value == node.value:
+            return node
+        return ir.Assign(target, value, node.pos)
 
     @rewrite.register
     def _(self, node: ir.InPlaceOp):
         target = node.target
-        value = rewrite_expr(self.current, node.value)
+        value = rewrite_expr(self.latest, node.value)
         if isinstance(node.target, ir.NameRef):
             # rename anyway
             value = self.bind_target(target, value)
-        repl = ir.InPlaceOp(target, value, node.pos)
-        if repl != node:
-            return repl
-        return node
+        if target == node.target and value == node.value:
+            return node
+        return ir.InPlaceOp(target, value, node.pos)
 
     @rewrite.register
     def _(self, node: ir.SingleExpr):
-        value = rewrite_expr(self.current, node.value)
-        repl = ir.SingleExpr(value, node.pos)
-        if repl != node:
-            return repl
-        return repl
+        value = rewrite_expr(self.latest, node.value)
+        if value == node.value:
+            return node
+        return ir.SingleExpr(value, node.pos)
 
     @rewrite.register
     def _(self, node: ir.Return):
-        return ir.Return(rewrite_expr(self.current, node.value), node.pos)
+        return ir.Return(rewrite_expr(self.latest, node.value), node.pos)
 
     @rewrite.register
     def _(self, node: ir.IfElse):
@@ -147,3 +157,78 @@ class ExprInliner:
     def _(self, node: ir.WhileLoop):
         msg = f'Cannot inline across possible loop boundary, position: {node.pos}. This is probably a bug somewhere.'
         raise TypeError(msg)
+
+
+@singledispatch
+def rewrite_statement(node, latest: Dict[ir.NameRef, ir.NameRef]):
+    raise TypeError
+
+
+@rewrite_statement.register
+def _(node: ir.StmtBase, latest: Dict[ir.NameRef, ir.NameRef]):
+    return node
+
+
+@rewrite_statement.register
+def _(node: ir.Assign, latest: Dict[ir.NameRef, ir.NameRef]):
+    target = node.target
+    # inline prior expressions
+    value = rewrite_expr(latest, node.value)
+    if not is_basic_assign(node):
+        target = rewrite_expr(latest, node.target)
+    if target == node.target and value == node.value:
+        return node
+    return ir.Assign(target, value, node.pos)
+
+
+@rewrite_statement.register
+def _(node: ir.InPlaceOp, latest: Dict[ir.NameRef, ir.NameRef]):
+    target = rewrite_expr(latest, node.target)
+    value = rewrite_expr(latest, node.value)
+    if target == node.target and value == node.value:
+        return node
+    return ir.InPlaceOp(target, value, node.pos)
+
+
+@rewrite_statement.register
+def _(self, node: ir.SingleExpr):
+    value = rewrite_expr(self.latest, node.value)
+    if value == node.value:
+        return node
+    return ir.SingleExpr(value, node.pos)
+
+
+@rewrite_statement.register
+def _(node: ir.Return, latest: Dict[ir.NameRef, ir.NameRef]):
+    value = rewrite_expr(latest, node.value)
+    if value == node.value:
+        return node
+    return ir.Return(value, node.pos)
+
+
+@rewrite_statement.register
+def _(node: ir.IfElse):
+    msg = f'Cannot be applied when crossing a branch bound, position {node.pos}.'
+    raise TypeError(msg)
+
+
+@rewrite_statement.register
+def _(node: ir.ForLoop):
+    msg = f'Cannot inline across possible loop boundary, position: {node.pos}. This is probably a bug somewhere.'
+    raise TypeError(msg)
+
+
+@rewrite_statement.register
+def _(node: ir.WhileLoop):
+    msg = f'Cannot inline across possible loop boundary, position: {node.pos}. This is probably a bug somewhere.'
+    raise TypeError(msg)
+
+
+def get_target_name(node: ir.ValueRef):
+    if isinstance(node, ir.NameRef):
+        return node
+    elif isinstance(node, ir.Subscript):
+        while isinstance(node, ir.Subscript):
+            node = node.value
+        if isinstance(node, ir.NameRef):
+            return node

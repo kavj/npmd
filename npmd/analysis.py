@@ -1,17 +1,78 @@
 from __future__ import annotations
 
-from collections import Counter, deque
+from collections import Counter
 from contextlib import contextmanager
-from typing import Iterable, List, Optional, Set, Tuple
+from dataclasses import fields
+from functools import singledispatch
+from typing import Iterable, List, Optional, Union
 
 import npmd.ir as ir
 
 from npmd.errors import CompilerError
-from npmd.utils import is_entry_point, unpack_iterated
-from npmd.traversal import walk_nodes, walk_parameters
+from npmd.utils import unpack_iterated
+from npmd.traversal import get_statement_lists, walk, walk_parameters
 
 # Todo: stub
 specialized = {ir.NameRef("print")}
+
+
+def find_assigned_or_augmented(entry: Union[ir.Function, ir.ForLoop, ir.WhileLoop]):
+    for stmt in get_statement_lists(entry):
+        if isinstance(stmt, ir.ForLoop):
+            for target, _ in unpack_iterated(stmt.target, stmt.iterable):
+                yield target
+        elif isinstance(stmt, (ir.Assign, ir.InPlaceOp)):
+            if isinstance(stmt.target, ir.NameRef):
+                yield stmt.target
+            else:
+                assert isinstance(stmt.target, ir.Subscript)
+                yield stmt.target.value
+
+
+def expression_strictly_contains(a: ir.ValueRef, b: ir.ValueRef):
+    """
+    returns True if evaluation of 'b' requires evaluation of 'a'.
+
+    :param a:
+    :param b:
+    :return:
+    """
+
+    if not isinstance(b, ir.Expression) or a == b:
+        return False
+    for subexpr in walk(b):
+        if subexpr == a:
+            return True
+    return False
+
+
+def greatest_common_subexprs(a: ir.ValueRef, b: ir.ValueRef):
+    """
+    returns the broadest sub-expressions that are common to 'a' and 'b'.
+    :param a:
+    :param b:
+    :return:
+    """
+
+    if a == b:
+        return a
+
+    subexprs_a = set(walk(a))
+    subexprs_b = set(walk(b))
+
+    # get subexpression overlap if any
+    common = subexprs_a.intersection(subexprs_b)
+    if not common:
+        return common
+
+    sub = set()
+    for u in common:
+        for v in common:
+            if expression_strictly_contains(v, u):
+                # remove all expressions which are sub-expressions of any common sub-expression
+                sub.add(u)
+    common.difference_update(sub)
+    return common
 
 
 class DeclTracker:
@@ -142,97 +203,123 @@ def find_array_length_expression(node: ir.ValueRef) -> Optional[ir.ValueRef]:
         return ir.SingleDimRef(node, dim=ir.Zero)
 
 
-def get_branch_predicate_pairs(node: ir.IfElse):
-    """
-    If this branch is perfectly nested, convert it to a case statement
-
-    Note: this makes further if conversion much simpler
-    Note: we may want to break along loop uniform conditions
-
-    :param node:
-    :return:
-    """
-
-    predicates = deque()
-
-    # Note, we only care about the first true instance of any unique predicate
-    # Any duplicates become dead branches, and we need to avoid overwriting their corresponding entries
-
-    queued = [node]
-
-    while queued:
-        stmt = queued.pop()
-        predicate = stmt.test
-        predicates.append((predicate, stmt.if_branch, stmt.pos))
-        if len(stmt.else_branch) == 1 and isinstance(stmt.else_branch[0], ir.IfElse):
-            queued.append(stmt.else_branch[0])
-        else:
-            assert not queued
-            predicates.append((None, stmt.else_branch, None))
-    return predicates
-
-
-def get_read_and_assigned(stmts: Iterable[ir.StmtBase]) -> Tuple[Set[ir.NameRef], Set[ir.NameRef], Set[ir.NameRef]]:
-    uevs = set()
-    assigned = set()
-    referenced = set()
-    for stmt in stmts:
-        if isinstance(stmt, (ir.Assign, ir.InPlaceOp)):
-            for name in walk_parameters(stmt.value):
-                if name not in assigned:
-                    uevs.add(name)
-                referenced.add(name)
-            if isinstance(stmt, ir.Assign):
-                if isinstance(stmt.target, ir.NameRef):
-                    assigned.add(stmt.target)
-                else:
-                    # ensure supported target
-                    assert isinstance(stmt.target, ir.Subscript)
-                    for name in walk_parameters(stmt.target):
-                        if name not in assigned:
-                            uevs.add(name)
-                        referenced.add(name)
-        elif isinstance(stmt, (ir.SingleExpr, ir.Return)):
-            for name in walk_parameters(stmt.value):
-                if name not in assigned:
-                    uevs.add(name)
-                referenced.add(name)
-        elif is_entry_point(stmt):
-            # single statement blocks
-            if isinstance(stmt, (ir.IfElse, ir.WhileLoop)):
-                for name in walk_parameters(stmt.test):
-                    if name not in assigned:
-                        uevs.add(name)
-                    referenced.add(name)
-            else:
-                assert isinstance(stmt, ir.ForLoop)
-                for target, value in unpack_iterated(stmt.target, stmt.iterable):
-                    for p in walk_parameters(value):
-                        if p not in assigned:
-                            uevs.add(p)
-                        referenced.add(p)
-                    if isinstance(target, ir.NameRef):
-                        assigned.add(target)
-                    else:
-                        for p in walk_parameters(target):
-                            if p not in assigned:
-                                uevs.add(p)
-                            referenced.add(p)
-    return assigned, referenced, uevs
-
-
-def get_assign_counts(node: ir.Function):
+def get_assign_counts(node: Union[ir.Function, ir.ForLoop, ir.WhileLoop]):
     """
     Count the number of times each variable is assigned within the function body
     :param node:
     :return:
     """
     assign_counts = Counter()
-    for stmt in walk_nodes(node.body):
-        if isinstance(stmt, ir.Assign) and isinstance(stmt.target, ir.NameRef):
-            assign_counts[stmt.target] += 1
-        elif isinstance(stmt, ir.ForLoop):
-            for target, _ in unpack_iterated(stmt.target, stmt.iterable):
-                # it's okay to count duplicates in unpacking
-                assign_counts[target] += 1
+    for stmts in get_statement_lists(node):
+        for stmt in stmts:
+            if isinstance(stmt, ir.Assign) and isinstance(stmt.target, ir.NameRef):
+                assign_counts[stmt.target] += 1
+            elif isinstance(stmt, ir.ForLoop):
+                for target, _ in unpack_iterated(stmt.target, stmt.iterable):
+                    # it's okay to count duplicates in unpacking
+                    assign_counts[target] += 1
     return assign_counts
+
+
+def find_index_parameters(node: ir.ForLoop):
+    """
+
+    :param node:
+    :return:
+    """
+    # Todo: This should be able to handle more types
+    index_params = set()
+    for stmts in get_statement_lists(node):
+        for stmt in stmts:
+            for expr in extract_expressions(stmt):
+                for subexpr in walk(expr):
+                    if isinstance(subexpr, ir.Subscript):
+                        index_params.update(walk_parameters(subexpr))
+    return index_params
+
+
+@singledispatch
+def extract_expressions(node):
+    msg = f'No method to extract expressions from {node}'
+    raise TypeError(msg)
+
+
+@extract_expressions.register
+def _(node: ir.StmtBase):
+    return
+    yield
+
+
+@extract_expressions.register
+def _(node: ir.Assign):
+    yield node.value
+    if not isinstance(node.target, ir.NameRef):
+        yield node.target
+
+
+@extract_expressions.register
+def _(node: ir.ForLoop):
+    for target, iterable in unpack_iterated(node.target, node.iterable):
+        yield iterable
+        yield target
+
+
+@extract_expressions.register
+def _(node: ir.IfElse):
+    yield node.test
+
+
+@extract_expressions.register
+def _(node: ir.InPlaceOp):
+    yield node.value
+
+
+@extract_expressions.register
+def _(node: ir.SingleExpr):
+    yield node.value
+
+
+@extract_expressions.register
+def _(node: ir.Return):
+    yield node.value
+
+
+@extract_expressions.register
+def _(node: ir.WhileLoop):
+    yield node.test
+
+
+def extract_parameters(stmt: ir.StmtBase):
+    for expr in extract_expressions(stmt):
+        yield from walk_parameters(expr)
+
+
+def statements_match(*stmts: Iterable[ir.StmtBase]):
+    first = stmts[0]
+    first_type = type(first)
+    fields_first = fields(first)
+    assert isinstance(first, ir.StmtBase)
+    for stmt in stmts:
+        if type(stmt) != first_type:
+            return False
+        if fields_first != fields(stmt):
+            raise ValueError(f'field names do not match between "{first}" and "{stmt}"')
+        # We have matching type and fields (second should always be true unless live objects updated).
+        # Now we need to check if values other than positional information all match.
+        # We're avoiding asdict here to avoid the use of deepcopy
+        for f in fields_first:
+            name = f.name
+            if f.name == 'pos':
+                continue
+            if getattr(first, name) != getattr(stmt, name):
+                return False
+
+
+def get_possible_call_clobbers(stmt: ir.StmtBase):
+    for expr in extract_expressions(stmt):
+        for subexpr in walk(expr):
+            if isinstance(subexpr, ir.Call):
+                # anything that is passed as an argument could be augmented
+                # This is really only a risk for array arguments, but we don't want
+                # to force this to depend on argument type information
+                yield from subexpr.args

@@ -2,25 +2,111 @@ from __future__ import annotations
 import itertools
 import operator
 
-import networkx as nx
-
-from collections import Counter, defaultdict
-from functools import singledispatchmethod
+from collections import Counter, defaultdict, deque
+from functools import singledispatch, singledispatchmethod
 from typing import Dict, Iterable, Set
 
 import npmd.ir as ir
 
-from npmd.analysis import get_branch_predicate_pairs, get_read_and_assigned
-from npmd.blocks import BasicBlock, FlowGraph, build_function_graph
+from npmd.blocks import BasicBlock, FlowGraph, build_function_graph, dominator_tree
 from npmd.errors import CompilerError
 from npmd.symbol_table import SymbolTable
-from npmd.traversal import get_statement_lists, walk_nodes, walk_parameters
-from npmd.utils import is_entry_point
+from npmd.traversal import get_statement_lists, walk_parameters
+from npmd.utils import is_entry_point, unpack_iterated
 
 
 # Most of this work ended up being done elsewhere in controlflow now. This can now do slightly more precise liveness
 # The intention here is to better understand what assignments may not escape and can therefore be localized or removed
 # if dead.
+
+
+@singledispatch
+def get_assigned(node):
+    raise TypeError()
+
+
+@get_assigned.register
+def _(node: ir.StmtBase):
+    return  # avoid yielding None
+    yield
+
+
+@get_assigned.register
+def _(node: ir.Assign):
+    for p in walk_parameters(node.value):
+        if isinstance(p, ir.NameRef):
+            yield p
+
+
+@get_assigned.register
+def _(node: ir.ForLoop):
+    for target, value in unpack_iterated(node.target, node.iterable):
+        if isinstance(target, ir.NameRef):
+            yield target
+
+
+@get_assigned.register
+def _(node: ir.Function):
+    return
+    yield
+
+
+@singledispatch
+def get_referenced(node):
+    msg = f'No method to extract referenced for {node}.'
+    raise TypeError(msg)
+
+
+@get_referenced.register
+def _(node: ir.Function):
+    return
+    yield
+
+
+@get_referenced.register
+def _(node: ir.StmtBase):
+    return
+    yield
+
+
+@get_referenced.register
+def _(node: ir.Assign):
+    yield from walk_parameters(node.value)
+    if not isinstance(node.target, ir.NameRef):
+        yield from walk_parameters(node.target)
+
+
+@get_referenced.register
+def _(node: ir.InPlaceOp):
+    yield from walk_parameters(node.value)
+
+
+@get_referenced.register
+def _(node: ir.IfElse):
+    yield from walk_parameters(node.test)
+
+
+@get_referenced.register
+def _(node: ir.WhileLoop):
+    yield from walk_parameters(node.test)
+
+
+@get_referenced.register
+def _(node: ir.SingleExpr):
+    yield from walk_parameters(node.value)
+
+
+@get_referenced.register
+def _(node: ir.Return):
+    yield from walk_parameters(node.value)
+
+
+@get_referenced.register
+def _(node: ir.ForLoop):
+    for target, value in unpack_iterated(node.target, node.iterable):
+        yield from walk_parameters(value)
+        if not isinstance(target, ir.NameRef):
+            yield from walk_parameters(target)
 
 
 class LiveStatementMarker:
@@ -135,7 +221,15 @@ class BlockLiveness:
 def find_live_in_out(graph: FlowGraph) -> Dict[BasicBlock, BlockLiveness]:
     block_liveness = {}
     for node in graph.nodes():
-        kills, referenced, live_in = get_read_and_assigned(node)
+        kills = set()
+        referenced = set()
+        live_in = set()
+        for stmt in node:
+            for name in get_referenced(stmt):
+                if name not in kills:
+                    live_in.add(name)
+                referenced.add(name)
+            kills.update(get_assigned(stmt))
         single_block_liveness = BlockLiveness(live_in, kills)
         block_liveness[node] = single_block_liveness
     changed = True
@@ -175,28 +269,57 @@ def find_ephemeral_assigns(liveness: Dict[BasicBlock, BlockLiveness]) -> Set[ir.
 
 
 def check_all_assigned(graph: FlowGraph):
-    liveness = find_live_in_out(graph.graph)
     entry = graph.entry_block
     visited = {entry}
-    bound_after = {entry: {*entry.first.args}}
+    bound_after = {entry: set(entry.first.args)}
+    doms = dominator_tree(graph)
     # Todo: cascade assign shows evidence of a bug here in CFG generation... investigate
+    # prune back edges
+    maybe_unbound = set()
+
     body_entry, = graph.successors(entry)
-    for block in nx.dfs_preorder_nodes(graph.graph, body_entry):
-        # note: this wouldn't be sufficient in the presence of irreducible control flow
-        liveinfo = liveness[block]
-        # check if bound along all paths
-        bound_by = set.intersection(*(bound_after[p] for p in graph.predecessors(block) if p in visited))
-        maybe_unbound = set()
-        for name in liveinfo.live_in:
-            if name not in bound_by:
-                maybe_unbound.add(name)
-        if maybe_unbound:
-            s = ', '.join(name.name for name in maybe_unbound)
-            msg = f'Names: "{s}" do not reach along all paths'
-            raise CompilerError(msg)
-        bound_by.update(liveinfo.kills)
-        bound_after[block] = bound_by
+    queued = deque()
+    queued.append(body_entry)
+
+    def update_unbound(expr: ir.ValueRef, safe: Set[ir.NameRef]):
+        for p in walk_parameters(expr):
+            if p not in safe:
+                maybe_unbound.add(p)
+
+    while queued:
+        block = queued.popleft()
+        assigned = set.intersection(*(bound_after[p]
+                                      for p in graph.predecessors(block)
+                                      if p in visited))
+        for stmt in block:
+            if isinstance(stmt, ir.Assign):
+                update_unbound(stmt.value, assigned)
+                if isinstance(stmt.target, ir.NameRef):
+                    assigned.add(stmt.target)
+                else:
+                    update_unbound(stmt.target, assigned)
+            elif isinstance(stmt, ir.InPlaceOp):
+                for p in walk_parameters(stmt.value):
+                    if p not in assigned:
+                        maybe_unbound.add(p)
+            elif isinstance(stmt, ir.ForLoop):
+                for target, value in unpack_iterated(stmt.target, stmt.iterable):
+                    update_unbound(value, assigned)
+                    if isinstance(target, ir.NameRef):
+                        assigned.add(target)
+                    else:
+                        update_unbound(target, assigned)
+            elif isinstance(stmt, (ir.IfElse, ir.WhileLoop)):
+                update_unbound(stmt.test, assigned)
+            elif isinstance(stmt, (ir.SingleExpr, ir.Return)):
+                update_unbound(stmt.value, assigned)
+
         visited.add(block)
+        for succ in graph.successors(block):
+            if succ not in visited:
+                queued.append(succ)
+        bound_after[block] = assigned
+    return visited
 
 
 def dump_live_info(info: Dict[BasicBlock, BlockLiveness], ignores=()):
@@ -211,85 +334,26 @@ def dump_live_info(info: Dict[BasicBlock, BlockLiveness], ignores=()):
         print(f'kills:\n    {kills}')
 
 
-def drop_unused_symbols(stmts: Iterable[ir.StmtBase], args: Iterable[ir.NameRef], symbols: SymbolTable):
+def drop_unused_symbols(func: ir.Function, symbols: SymbolTable):
     """
     Purges any dead symbols from the symbol table. This is useful to remove non-ephemeral variables
     that are simply unused, so that they are not declared.
-    :param stmts:
-    :param args:
+    :param func:
     :param symbols:
     :return:
     """
-
-    assigned, referenced, _ = get_read_and_assigned(stmts)
-    referenced.update(assigned)
-    referenced.update(args)
+    assigned = set()
+    referenced = set(func.args)
+    for stmts in get_statement_lists(func):
+        for stmt in stmts:
+            assigned.update(get_assigned(stmt))
+            referenced.update(get_referenced(stmt))
     dead_names = set()
     for sym_name in symbols.all_locals:
-        if sym_name not in referenced:
+        if sym_name not in referenced and sym_name not in assigned:
             dead_names.add(sym_name)
     for name in dead_names:
         symbols.drop_symbol(name)
-
-
-def inline_constant_branches(func: ir.Function):
-    for stmt_list in get_statement_lists(func):
-        if any(isinstance(stmt, ir.IfElse) and isinstance(stmt.test, ir.CONSTANT) for stmt in stmt_list):
-            repl = []
-            for stmt in stmt_list:
-                if isinstance(stmt, ir.IfElse) and isinstance(stmt.test, ir.CONSTANT):
-                    if operator.truth(stmt.test):
-                        repl.extend(stmt.if_branch)
-                    else:
-                        repl.extend(stmt.else_branch)
-                else:
-                    repl.append(stmt)
-            stmt_list.clear()
-            stmt_list.extend(repl)
-
-
-def remove_dead_branches(func: ir.Function):
-    # first get rid of anything of the form If True:... if any
-    inline_constant_branches(func)
-    # Now look for branch nests where the predicate may be simplified due to repeated or inverse predicates
-    for stmt_list in get_statement_lists(func):
-        repl = []
-        for stmt in stmt_list:
-            if isinstance(stmt, ir.IfElse):
-                branches = get_branch_predicate_pairs(stmt)
-                # this could have just two branches but still be simplified
-                last_predicate, default_branch, _ = branches.pop()
-                assert last_predicate is None
-                assert len(branches) > 0
-                predicate, branch, pos = branches.pop()
-                innermost = ir.IfElse(predicate, branch, [], pos)
-                seen = {predicate}
-                inverse = {ir.NOT(predicate)}
-                repl.append(innermost)
-                while branches:
-                    nested_predicate, nested_branch, nested_pos = branches.popleft()
-                    if nested_predicate in seen:
-                        # duplicate if branch condition
-                        continue
-                    elif nested_predicate in inverse:
-                        # If we have seen a provable inverse, this must capture all remaining
-                        assert not innermost.else_branch
-                        innermost.else_branch = nested_branch
-                        break
-                    else:
-                        seen.add(nested_predicate)
-                        inverse.add(ir.NOT(nested_predicate))
-                        nested = ir.IfElse(nested_predicate, nested_branch, [], nested_pos)
-                        innermost.else_branch.append(nested)
-                        innermost = nested
-                else:
-                    # If this doesn't terminate early, then the last branch is reachable
-                    assert not innermost.else_branch
-                    innermost.else_branch = default_branch
-            else:
-                repl.append(stmt)
-        stmt_list.clear()
-        stmt_list.extend(repl)
 
 
 def get_unreachable_blocks(graph: FlowGraph):
@@ -329,7 +393,6 @@ def get_loop_body(graph: FlowGraph, node: BasicBlock):
 
 
 def remove_dead_edges(graph: FlowGraph):
-    # Todo: gather first.. how did this ever work?
     nodes_with_dead_edges = set()
     for node in graph.nodes():
         if node.is_branch_block:
@@ -382,7 +445,7 @@ def remove_statements_following_terminals(node: ir.Function, symbols: SymbolTabl
                 for j in range(len(stmt_list) - i - 1):
                     stmt_list.pop()
                 break
-    drop_unused_symbols(walk_nodes(node.body), node.args, symbols)
+    drop_unused_symbols(node, symbols)
 
 
 def remove_unreachable_blocks(graph: FlowGraph):
@@ -391,7 +454,11 @@ def remove_unreachable_blocks(graph: FlowGraph):
     # since this has a tendency to result in phantom blocks.
     for block in graph.nodes():
         if block.is_branch_block:
-            assert not isinstance(block.first.test, ir.CONSTANT)
+            if isinstance(block.first.test, ir.CONSTANT):
+                # These lead to extremely misleading control flow graphs, because the statements end up being replaced
+                # by an empty block due to the prescence of an ifelse node, rather than a simplified path.
+                msg = f'Remove unreachable blocks expects static constant branches to be removed. Received {block.first.test}, position: {block.first.pos}.'
+                raise CompilerError(msg)
     remove_dead_edges(graph)
     # get all unreachable nodes
     entry_block = graph.entry_block
@@ -472,23 +539,22 @@ def remove_dead_statements(node: ir.Function, symbols: SymbolTable):
     liveness = find_live_in_out(graph)
     dead = mark_dead_statements(liveness, symbols)
     repl = []
-    for stmt_list in get_statement_lists(node):
+    for stmts in get_statement_lists(node):
         changed = False
-        for stmt in stmt_list:
+        for stmt in stmts:
             if is_entry_point(stmt) or stmt not in dead:
                 repl.append(stmt)
             else:
                 changed = True
         if changed:
-            stmt_list.clear()
-            stmt_list.extend(repl)
+            stmts.clear()
+            stmts.extend(repl)
         repl.clear()
-    drop_unused_symbols(walk_nodes(node.body), node.args, symbols)
+    drop_unused_symbols(node, symbols)
 
 
 def remove_unreachable_statements(func: ir.Function, symbols: SymbolTable):
-    remove_dead_branches(func)
+    graph = build_function_graph(func)
+    remove_unreachable_blocks(graph)
     remove_dead_statements(func, symbols)
-    func_graph = build_function_graph(func)
-    remove_unreachable_blocks(func_graph)
     remove_statements_following_terminals(func, symbols)

@@ -1,5 +1,5 @@
 import networkx as nx
-import numpy as np
+import numpy
 
 from contextlib import contextmanager
 from functools import singledispatchmethod
@@ -11,31 +11,31 @@ from npmd.blocks import build_function_graph
 from npmd.errors import CompilerError
 from npmd.pretty_printing import PrettyFormatter
 from npmd.symbol_table import SymbolTable
-from npmd.traversal import walk_nodes
+from npmd.traversal import get_statement_lists
 from npmd.utils import extract_name, unpack_iterated
 
 
 int_dtypes = {
-    np.dtype('int8'),
-    np.dtype('int16'),
-    np.dtype('int32'),
-    np.dtype('int64'),
-    np.dtype('uint8'),
-    np.dtype('uint16'),
-    np.dtype('uint32'),
-    np.dtype('uint64'),
+    numpy.dtype('int8'),
+    numpy.dtype('int16'),
+    numpy.dtype('int32'),
+    numpy.dtype('int64'),
+    numpy.dtype('uint8'),
+    numpy.dtype('uint16'),
+    numpy.dtype('uint32'),
+    numpy.dtype('uint64'),
 }
 
 
 real_float_dtypes = {
-    np.dtype('float32'),
-    np.dtype('float64'),
+    numpy.dtype('float32'),
+    numpy.dtype('float64'),
 }
 
 
 complex_dtypes = {
-    np.dtype('complex64'),
-    np.dtype('complex128')
+    numpy.dtype('complex64'),
+    numpy.dtype('complex128')
 }
 
 
@@ -43,25 +43,25 @@ float_dtypes = real_float_dtypes.union(complex_dtypes)
 
 real_dtypes = int_dtypes.union(real_float_dtypes)
 
-dtype_to_suffix = {np.dtype('int8'): 's8',
-                   np.dtype('int16'): 's16',
-                   np.dtype('int32'): 's32',
-                   np.dtype('int64'): 's64',
-                   np.dtype('uint8'): 'u8',
-                   np.dtype('uint16'): 'u16',
-                   np.dtype('uint32'): 'u32',
-                   np.dtype('uint64'): 'u64',
-                   np.dtype('float32'): 'f32',
-                   np.dtype('float64'): 'f64',
-                   np.dtype('complex64'): 'f32',  # corresponding real component type for ops
-                   np.dtype('complex128'): 'f64'}  # that don't require unpacking
+dtype_to_suffix = {numpy.dtype('int8'): 's8',
+                   numpy.dtype('int16'): 's16',
+                   numpy.dtype('int32'): 's32',
+                   numpy.dtype('int64'): 's64',
+                   numpy.dtype('uint8'): 'u8',
+                   numpy.dtype('uint16'): 'u16',
+                   numpy.dtype('uint32'): 'u32',
+                   numpy.dtype('uint64'): 'u64',
+                   numpy.dtype('float32'): 'f32',
+                   numpy.dtype('float64'): 'f64',
+                   numpy.dtype('complex64'): 'f32',  # corresponding real component type for ops
+                   numpy.dtype('complex128'): 'f64'}  # that don't require unpacking
 
 
-def is_integer(dtype: np.dtype):
+def is_integer(dtype: numpy.dtype):
     return dtype in int_dtypes
 
 
-def is_float(dtype: np.dtype):
+def is_float(dtype: numpy.dtype):
     return dtype in float_dtypes
 
 
@@ -75,16 +75,26 @@ class TypeHelper:
     def __call__(self, node):
         return self.infer(node)
 
-    def promote_min_max(self, node: ir.ValueRef, types: List[Union[np.dtype, type, ir.ArrayType, ir.StringConst, ir.NoneRef]]):
+    def promote_min_max(self, node: ir.ValueRef, types: List[Union[numpy.dtype, type, ir.ArrayType, ir.StringConst, ir.NoneRef]]):
         if any(isinstance(t, ir.ArrayType) for t in types):
             msg = f'Min operator is not applicable to array "{self.format(node)}"'
             raise CompilerError(msg)
-        tentative = np.promote_types(*types)
+        tentative = numpy.promote_types(*types)
         if tentative != types[0]:
+            # TODO: promote types isn't always quite what we need.. it should snap to actually supported types
             msg = f'Min and max require that we use the first type. ' \
                   f'This is only supported in cases where this agrees with promote types: "{self.format(node)}"'
             raise CompilerError(msg)
         return tentative
+
+    def is_array(self, node: ir.ValueRef):
+        return isinstance(self.infer(node), ir.ArrayType)
+
+    def iteration_yields_array(self, node: ir.ValueRef):
+        t = self.infer(node)
+        if isinstance(t, ir.ArrayType):
+            return t.ndims > 1
+        return False
 
     @singledispatchmethod
     def raise_on_non_integer(self, node):
@@ -121,9 +131,26 @@ class TypeHelper:
         raise TypeError(msg)
 
     @infer.register
+    def _(self, node: ir.ArrayAlloc):
+        ndims = len(node.shape) if isinstance(node.shape, ir.TUPLE) else 1
+        dtype = numpy.dtype(node.dtype.value)
+        return ir.ArrayType(ndims, dtype)
+
+    @infer.register
+    def _(self, node: ir.ArrayInitializer):
+        ndims = len(node.shape) if isinstance(node.shape, ir.TUPLE) else 1
+        dtype = numpy.dtype(node.dtype.value)
+        return ir.ArrayType(ndims, dtype)
+
+    @infer.register
     def _(self, node: ir.Call):
         # Todo: This needs to actually distinguish return types
-        return ir.NoneRef
+        return ir.NoneRef()
+
+    @infer.register
+    def _(self, node: ir.CAST):
+        # TODO: verify can cast
+        return node.target_type
 
     @infer.register
     def _(self, node: ir.MIN):
@@ -169,7 +196,7 @@ class TypeHelper:
 
     @infer.register
     def _(self, node: ir.BinOp):
-        return np.promote_types(*(self.infer(subexpr) for subexpr in node.subexprs))
+        return numpy.promote_types(*(self.infer(subexpr) for subexpr in node.subexprs))
 
     @infer.register
     def _(self, node: ir.CompareOp):
@@ -178,21 +205,21 @@ class TypeHelper:
                 formatted = self.format(subexpr)
                 msg = f'Strings are ineligible for comparison, received "{formatted}"'
                 raise CompilerError(msg)
-        return np.dtype('bool')
+        return numpy.dtype('bool')
 
     @infer.register
     def _(self, node: ir.BoolOp):
         for subexpr in node.subexprs:
             self.infer(subexpr)
-        return np.dtype('bool')
+        return numpy.dtype('bool')
 
     @infer.register
     def _(self, node: ir.TRUEDIV):
         left, right = (self.infer(subexpr) for subexpr in node.subexprs)
-        left_dtype = left if isinstance(left, np.dtype) else left.dtype
-        right_dtype = right if isinstance(right, np.dtype) else right
+        left_dtype = left if isinstance(left, numpy.dtype) else left.dtype
+        right_dtype = right if isinstance(right, numpy.dtype) else right
         left_unity = left_dtype.type(1)
-        right_unity = right_dtype.dtype(1)
+        right_unity = right_dtype.type(1)
         return type(left_unity / right_unity)
 
     @infer.register
@@ -324,18 +351,19 @@ class TypeInference:
 
 def validate_types(func: ir.Function, symbols: SymbolTable):
     type_checker = TypeHelper(symbols)
-    for stmt in walk_nodes(func.body):
-        if isinstance(stmt, (ir.Assign, ir.InPlaceOp)):
-            type_checker.infer(stmt.value)
-            type_checker.infer(stmt.target)
-        elif isinstance(stmt, (ir.IfElse, ir.WhileLoop)):
-            type_checker.infer(stmt.test)
-        elif isinstance(stmt, (ir.SingleExpr, ir.Return)):
-            type_checker.infer(stmt.value)
-        elif isinstance(stmt, ir.ForLoop):
-            for target, iterable in unpack_iterated(stmt.target, stmt.iterable):
-                type_checker.iterated_type(iterable)
-                type_checker.infer(target)
+    for stmts in get_statement_lists(func):
+        for stmt in stmts:
+            if isinstance(stmt, (ir.Assign, ir.InPlaceOp)):
+                type_checker.infer(stmt.value)
+                type_checker.infer(stmt.target)
+            elif isinstance(stmt, (ir.IfElse, ir.WhileLoop)):
+                type_checker.infer(stmt.test)
+            elif isinstance(stmt, (ir.SingleExpr, ir.Return)):
+                type_checker.infer(stmt.value)
+            elif isinstance(stmt, ir.ForLoop):
+                for target, iterable in unpack_iterated(stmt.target, stmt.iterable):
+                    type_checker.iterated_type(iterable)
+                    type_checker.infer(target)
 
 
 def infer_types(func: ir.Function, symbols: SymbolTable):
@@ -356,12 +384,13 @@ def infer_types(func: ir.Function, symbols: SymbolTable):
 def check_return_type(node: ir.Function, symbols: SymbolTable):
     typer = TypeHelper(symbols)
     return_types = set()
-    for stmt in walk_nodes(node.body):
-        if isinstance(stmt, ir.Return):
-            if isinstance(stmt.value, ir.NoneRef):
-                return_types.add(ir.NoneRef())
-            else:
-                return_types.add(typer(stmt.value))
+    for stmts in get_statement_lists(node):
+        for stmt in stmts:
+            if isinstance(stmt, ir.Return):
+                if isinstance(stmt.value, ir.NoneRef):
+                    return_types.add(ir.NoneRef())
+                else:
+                    return_types.add(typer(stmt.value))
     if len(return_types) > 1:
         msg = f"Function {extract_name(node)} has more than one return type, received {return_types}."
         raise CompilerError(msg)

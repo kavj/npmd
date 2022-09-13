@@ -1,10 +1,17 @@
+import itertools
 from collections import deque
-from functools import singledispatch
-from typing import Iterable, Iterator, List, Union
+from typing import Iterator, List, Union
 
 import npmd.ir as ir
 
-from npmd.utils import is_entry_point, unpack_iterated
+from npmd.utils import is_entry_point
+
+
+def iterate_single_block(stmts: List[ir.StmtBase], start: int = 0):
+    for stmt in itertools.islice(stmts, start, None):
+        if is_entry_point(stmt):
+            break
+        yield stmt
 
 
 def walk(node: ir.ValueRef):
@@ -49,34 +56,12 @@ def walk_parameters(node: ir.ValueRef):
             yield value
 
 
-def walk_nodes(stmts: Iterable[ir.StmtBase]):
-    queued = [iter(stmts)]
-    seen = set()
-    while queued:
-        for stmt in queued[-1]:
-            stmt_id = id(stmt)
-            if stmt_id in seen:
-                # If we are visiting out of order, this avoids
-                # visiting anything from an outer scope that
-                # was seen natively
-                continue
-            seen.add(stmt_id)
-            yield stmt
-            if isinstance(stmt, ir.IfElse):
-                queued.append(iter(stmt.if_branch))
-                queued.append(iter(stmt.else_branch))
-                break
-            elif isinstance(stmt, (ir.ForLoop, ir.WhileLoop)):
-                queued.append(iter(stmt.body))
-                break
-        else:
-            queued.pop()
-
-
-def get_statement_lists(node: Union[ir.Function, ir.IfElse, ir.ForLoop, ir.WhileLoop, list]) -> Iterator[List[ir.StmtBase]]:
+def get_statement_lists(node: Union[ir.Function, ir.IfElse, ir.ForLoop, ir.WhileLoop, list],
+                        enter_loops=True) -> Iterator[List[ir.StmtBase]]:
     """
     yields all statement lists by pre-ordering, breadth first
     :param node:
+    :param enter_loops:
     :return:
     """
 
@@ -87,7 +72,8 @@ def get_statement_lists(node: Union[ir.Function, ir.IfElse, ir.ForLoop, ir.While
         queued.append(node.else_branch)
         queued.append(node.if_branch)
     elif isinstance(node, (ir.ForLoop, ir.WhileLoop)):
-        queued.append(node.body)
+        if enter_loops:
+            queued.append(node.body)
     else:  # statement list
         queued.append(node)
     while queued:
@@ -99,72 +85,5 @@ def get_statement_lists(node: Union[ir.Function, ir.IfElse, ir.ForLoop, ir.While
                 if isinstance(stmt, ir.IfElse):
                     queued.appendleft(stmt.if_branch)
                     queued.appendleft(stmt.else_branch)
-                else:
+                elif enter_loops:
                     queued.appendleft(stmt.body)
-
-
-def all_entry_points(stmts: Iterable[ir.StmtBase]):
-    for stmt in walk_nodes(stmts):
-        if isinstance(stmt, (ir.IfElse, ir.ForLoop, ir.WhileLoop)):
-            yield stmt
-
-
-def all_loops(stmts: Iterable[ir.StmtBase]):
-    for stmt in walk_nodes(stmts):
-        if isinstance(stmt, (ir.ForLoop, ir.WhileLoop)):
-            yield stmt
-
-
-@singledispatch
-def extract_expressions(node):
-    msg = f'No method to extract expressions from {node}'
-    raise TypeError(msg)
-
-
-@extract_expressions.register
-def _(node: ir.StmtBase):
-    yield
-
-
-@extract_expressions.register
-def _(node: ir.Assign):
-    yield node.value
-    yield node.target
-
-
-@extract_expressions.register
-def _(node: ir.Case):
-    for test in node.conditions:
-        yield test
-
-
-@extract_expressions.register
-def _(node: ir.ForLoop):
-    for target, iterable in unpack_iterated(node.target, node.iterable):
-        yield iterable
-        yield target
-
-
-@extract_expressions.register
-def _(node: ir.IfElse):
-    yield node.test
-
-
-@extract_expressions.register
-def _(node: ir.InPlaceOp):
-    yield node.value
-
-
-@extract_expressions.register
-def _(node: ir.SingleExpr):
-    yield node.value
-
-
-@extract_expressions.register
-def _(node: ir.Return):
-    yield node.value
-
-
-@extract_expressions.register
-def _(node: ir.WhileLoop):
-    yield node.test

@@ -5,14 +5,14 @@ from pathlib import Path
 
 from npmd.ast_conversion import build_module_ir_and_symbols
 from npmd.blocks import build_function_graph, render_dot_graph, render_dominator_tree
-from npmd.canonicalize import normalize_flow, lower_loops
+from npmd.branch_simplify import refactor_branches
+from npmd.canonicalize import add_trivial_return, expand_in_place_assignments, normalize_array_initializers, lower_loops
 from npmd.errors import CompilerError
-from npmd.liveness import check_all_assigned, dump_live_info, find_live_in_out, remove_unreachable_blocks
-from npmd.lvn import rename_ephemeral
+from npmd.liveness import check_all_assigned, drop_unused_symbols, dump_live_info, find_live_in_out, remove_unreachable_blocks, remove_unreachable_statements
 from npmd.pretty_printing import PrettyPrinter
 from npmd.pybind_gen import gen_module, gen_setup
 from npmd.symbol_table import dump_symbol_type_info
-from npmd.type_checks import infer_types
+from npmd.type_checks import infer_types, TypeHelper
 
 
 version = sys.version_info
@@ -48,11 +48,18 @@ def compile_module(file_path, types,  out_dir, verbose=False, print_result=True,
     funcs = []
     for func in mod_ir.functions:
         func_symbols = symbols.get(func.name)
-        normalize_flow(func, func_symbols)
+        add_trivial_return(func)
+        refactor_branches(func, symbols)
+        remove_unreachable_statements(func, func_symbols)
+        normalize_array_initializers(func, func_symbols)
         infer_types(func, func_symbols)
+        typer = TypeHelper(func_symbols)
+        expand_in_place_assignments(func, typer)
         lower_loops(func, func_symbols)
-        rename_ephemeral(func, func_symbols)
-        normalize_flow(func, func_symbols)
+        remove_unreachable_statements(func, func_symbols)
+        refactor_branches(func, symbols)
+        remove_unreachable_statements(func, func_symbols)
+        drop_unused_symbols(func, func_symbols)
         render_path = Path(out_dir)
         assert render_path.is_dir()
         func_graph = build_function_graph(func)

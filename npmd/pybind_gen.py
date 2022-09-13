@@ -1,11 +1,11 @@
 import pathlib
 import textwrap
 
-import numpy as np
+import numpy
 
 from contextlib import contextmanager
 from functools import singledispatchmethod
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Union
 
 import npmd.ir as ir
 
@@ -18,23 +18,23 @@ from npmd.utils import extract_name
 
 
 npy_c_type_codes = {
-    np.dtype('bool'): 'NPY_BOOL',
-    np.dtype('int8'): 'NPY_INT8',
-    np.dtype('uint8'): 'NPY_UINT8',
-    np.dtype('int32'): 'NPY_INT32',
-    np.dtype('int64'): 'NPY_INT64',
-    np.dtype('float32'): 'NPY_FLOAT32',
-    np.dtype('float64'): 'NPY_FLOAT64',
+    numpy.dtype('bool'): 'NPY_BOOL',
+    numpy.dtype('int8'): 'NPY_INT8',
+    numpy.dtype('uint8'): 'NPY_UINT8',
+    numpy.dtype('int32'): 'NPY_INT32',
+    numpy.dtype('int64'): 'NPY_INT64',
+    numpy.dtype('float32'): 'NPY_FLOAT32',
+    numpy.dtype('float64'): 'NPY_FLOAT64',
 }
 
 
-npy_map = {np.dtype('bool'): 'bool',
-           np.dtype('int8'): 'int8_t',
-           np.dtype('uint8'): 'uint8_t',
-           np.dtype('int32'): 'int32_t',
-           np.dtype('int64'): 'int64_t',
-           np.dtype('float32'): 'float',
-           np.dtype('float64'): 'double'}
+npy_map = {numpy.dtype('bool'): 'bool',
+           numpy.dtype('int8'): 'int8_t',
+           numpy.dtype('uint8'): 'uint8_t',
+           numpy.dtype('int32'): 'int32_t',
+           numpy.dtype('int64'): 'int64_t',
+           numpy.dtype('float32'): 'float',
+           numpy.dtype('float64'): 'double'}
 
 
 compare_ops = {ir.GT: '>',
@@ -161,20 +161,28 @@ def gen_setup(out_dir: pathlib.Path, modname):
 
 def get_c_array_type(array_type: ir.ArrayType):
     c_dtype = npy_map[array_type.dtype]
-    return f'py::array<{c_dtype}, py::array::c_style | py::array::forcecast>'
+    return f'py::array_t<{c_dtype}, py::array::c_style | py::array::forcecast>'
 
 
 # Todo: pybind11 source shows examples using these types internally. See how this interacts with numpy..
 
 c_type_codes = {
-    np.dtype('bool'): 'bool',
-    np.dtype('int8'): 'char',
-    np.dtype('uint8'): 'uchar',
-    np.dtype('int32'): 'int32_t',
-    np.dtype('int64'): 'int64_t',
-    np.dtype('float32'): 'float',
-    np.dtype('float64'): 'double',
+    numpy.dtype('bool'): 'bool',
+    numpy.dtype('int8'): 'char',
+    numpy.dtype('uint8'): 'uint8_t',
+    numpy.dtype('int32'): 'int32_t',
+    numpy.dtype('int64'): 'int64_t',
+    numpy.dtype('float32'): 'float',
+    numpy.dtype('float64'): 'double',
 }
+
+
+def format_type(node: Union[numpy.dtype, ir.ArrayType]):
+    if isinstance(node, numpy.dtype):
+        return c_type_codes[node]
+    else:
+        dtype = c_type_codes[node.dtype]
+        return f'py::array_t<{dtype}, py::array::c_style | py::array::forcecast>'
 
 
 def get_c_type_name(type_):
@@ -204,7 +212,7 @@ def get_function_header(func: ir.Function, symbols: SymbolTable, mangled_name: O
     if isinstance(return_type, ir.NoneRef):
         return_type = 'py::object'
     else:
-        return_type = npy_map[return_type]
+        return_type = format_type(return_type)
     func_str = f'{return_type} {func_name} ({args_str})'
     return func_str
 
@@ -223,6 +231,20 @@ class ExprFormatter:
     @render.register
     def _(self, node: ir.NoneRef):
         return 'py::none()'
+
+    @render.register
+    def _(self, node: ir.ArrayAlloc):
+        dtype = c_type_codes[numpy.dtype(node.dtype.value)]
+        if isinstance(node.shape, ir.TUPLE):
+            if len(node.shape) == 1:
+                dim, = node.shape.subexprs
+                shape = self.render(dim)
+            else:
+                dims = ', '.join(self.render(d) for d in node.shape.subexprs)
+                shape = f'py::array::ShapeContainer {{{dims}}}'
+        else:
+            shape = self.render(node.shape)
+        return f'py::array_t<{dtype}>({shape})'
 
     @render.register
     def _(self, node: ir.CAST):
@@ -257,11 +279,6 @@ class ExprFormatter:
         return f'!{expr}'
 
     @render.register
-    def _(self, node: ir.StringConst):
-        # Todo: need to think about unicode cases
-        return f'std::string({node.value})'
-
-    @render.register
     def _(self, node: ir.MaxReduction):
         expr = serialize_min_max(node)
         rendered = self.render(expr)
@@ -287,7 +304,7 @@ class ExprFormatter:
         left, right = node.subexprs
         # need casts here for consistency
         left_type = self.type_helper(left)
-        f64 = np.dtype('float64')
+        f64 = numpy.dtype('float64')
         left = self.render(left)
         if left_type == f64:
             left = f'static_cast<double>({left})'
@@ -355,16 +372,12 @@ class ExprFormatter:
 
     @render.register
     def _(self, node: ir.CONSTANT):
-        if isinstance(node.value, (bool, np.bool_)):
+        if isinstance(node.value, (bool, numpy.bool_)):
             # c casing..
             value = 'true' if node.value is True else 'false'
         else:
             value = str(node.value)
         return value
-
-    @render.register
-    def _(self, node: ir.StringConst):
-        return f'"{node.value}"'
 
     @render.register
     def _(self, node: ir.Call):
@@ -373,7 +386,7 @@ class ExprFormatter:
         if func_name == 'print':
             # quick temporary hack
             func_name = 'py::print'
-        args = ', '.join(self.render(arg) for arg in node.args)
+        args = ', '.join(self.render(arg) for arg in node.args.subexprs)
         rendered = f'{func_name}({args})'
         return rendered
 
@@ -382,6 +395,10 @@ class ExprFormatter:
         params = ', '.join(self.render(subexpr) for subexpr in node.subexprs)
         rendered = f'py::slice({params})'
         return rendered
+
+    @render.register
+    def _(self, node: ir.StringConst):
+        return f'"{node.value}"'
 
     @render.register
     def _(self, node: ir.TUPLE):
@@ -517,19 +534,6 @@ class FuncWriter:
                 self.visit(node.else_branch)
 
     @visit.register
-    def _(self, node: ir.Case):
-        for index, (predicate, branch) in enumerate(node.conditions):
-            test_str = self.render(predicate)
-            if index == 0:
-                header = f'if({test_str})'
-            else:
-                header = f'else if({test_str})'
-            with self.emitter.scope(line=header, semicolon=False):
-                self.visit(branch)
-        with self.emitter.scope(line='else', semicolon=False):
-            self.visit(node.default)
-
-    @visit.register
     def _(self, node: ir.ForLoop):
         # this should be reduced to a simple range loop
         if not isinstance(node.iterable, ir.AffineSeq) or not isinstance(node.target, ir.NameRef):
@@ -581,6 +585,18 @@ class FuncWriter:
         self.emitter.print_line(stmt)
 
     @visit.register
+    def _(self, node: ir.ArrayFill):
+        name = self.render(node.array)
+        # get size expression for std::fill
+        # this is only to be used with contiguous arrays
+        sz = f'{name}.size()'
+        # we don't have a pointer type in IR yet, thus this
+        t = self.type_helper(node.array)
+        dt = t.dtype
+        buffer = f'static_cast<{dt}*>({name}.data())'
+        self.emitter.print_line(f'std::fill({buffer}, {buffer} + {sz}, {node.fill_value.value});')
+
+    @visit.register
     def _(self, node: ir.Break):
         self.emitter.print_line('break;')
 
@@ -614,6 +630,7 @@ def gen_module(path: pathlib.Path, module_name: str, funcs: List[ir.Function], s
         # boilerplate
         emitter.print_line(line='#include <pybind11/pybind11.h>')
         emitter.print_line(line='#include <pybind11/numpy.h>')
+        emitter.print_line(line='#include <cstdint>')
         emitter.print_line(line='#include <algorithm>')
         emitter.blank_lines(count=1)
         emitter.print_line(line='namespace py = pybind11;')
