@@ -15,6 +15,7 @@ import networkx as nx
 
 import npmd.ir as ir
 
+from npmd.analysis import get_target_name
 from npmd.symbol_table import SymbolTable
 from npmd.traversal import get_statement_lists
 from npmd.type_checks import TypeHelper
@@ -41,15 +42,6 @@ def find_alias_groups(node: Union[ir.Function, ir.ForLoop, ir.WhileLoop], symbol
                             graph.add_edge(target, alias_target)
     return nx.connected_components(graph)
 
-
-def get_target_name(node: ir.ValueRef):
-    if isinstance(node, ir.NameRef):
-        return node
-    elif isinstance(node, ir.Subscript):
-        while isinstance(node, ir.Subscript):
-            node = node.value
-        if isinstance(node, ir.NameRef):
-            return node
 
 
 def find_non_aliasing_array_assigns(node: Union[ir.Function, ir.ForLoop, ir.WhileLoop], symbols: SymbolTable):

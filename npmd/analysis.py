@@ -16,6 +16,16 @@ from npmd.traversal import get_statement_lists, walk, walk_parameters
 specialized = {ir.NameRef("print")}
 
 
+def get_target_name(node: ir.ValueRef):
+    if isinstance(node, ir.NameRef):
+        return node
+    elif isinstance(node, ir.Subscript):
+        while isinstance(node, ir.Subscript):
+            node = node.value
+        if isinstance(node, ir.NameRef):
+            return node
+
+
 def find_assigned_or_augmented(entry: Union[ir.Function, ir.ForLoop, ir.WhileLoop]):
     for stmt in get_statement_lists(entry):
         if isinstance(stmt, ir.ForLoop):

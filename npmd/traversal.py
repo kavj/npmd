@@ -57,11 +57,11 @@ def walk_parameters(node: ir.ValueRef):
 
 
 def get_statement_lists(node: Union[ir.Function, ir.IfElse, ir.ForLoop, ir.WhileLoop, list],
-                        enter_loops=True) -> Iterator[List[ir.StmtBase]]:
+                        enter_nested_loops=True) -> Iterator[List[ir.StmtBase]]:
     """
     yields all statement lists by pre-ordering, breadth first
     :param node:
-    :param enter_loops:
+    :param enter_nested_loops:
     :return:
     """
 
@@ -72,8 +72,7 @@ def get_statement_lists(node: Union[ir.Function, ir.IfElse, ir.ForLoop, ir.While
         queued.append(node.else_branch)
         queued.append(node.if_branch)
     elif isinstance(node, (ir.ForLoop, ir.WhileLoop)):
-        if enter_loops:
-            queued.append(node.body)
+        queued.append(node.body)
     else:  # statement list
         queued.append(node)
     while queued:
@@ -85,5 +84,5 @@ def get_statement_lists(node: Union[ir.Function, ir.IfElse, ir.ForLoop, ir.While
                 if isinstance(stmt, ir.IfElse):
                     queued.appendleft(stmt.if_branch)
                     queued.appendleft(stmt.else_branch)
-                elif enter_loops:
+                elif enter_nested_loops:
                     queued.appendleft(stmt.body)
