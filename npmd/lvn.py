@@ -1,11 +1,13 @@
+import itertools
+from collections import defaultdict
 from functools import singledispatch, singledispatchmethod
 from typing import Dict, Iterable, Union
 
 import npmd.ir as ir
 
 from npmd.analysis import get_assign_counts
-from npmd.blocks import build_function_graph
-from npmd.liveness import find_ephemeral_assigns, find_live_in_out
+from npmd.blocks import build_function_graph, BasicBlock
+from npmd.liveness import BlockLiveness, find_ephemeral_assigns, find_live_in_out
 from npmd.symbol_table import SymbolTable
 from npmd.type_checks import TypeHelper
 from npmd.utils import is_basic_assign
@@ -29,6 +31,38 @@ def rewrite_expr(current: Dict[ir.ValueRef, ir.ValueRef], node: ir.ValueRef):
 
 
 # statement rewriter doesn't create new names here
+
+def rename_dead_on_exit(block: BasicBlock, liveness: BlockLiveness, symbols: SymbolTable):
+    """
+
+    :param block:
+    :param liveness:
+    :param symbols:
+    :return:
+    """
+    if block.is_entry_point or block.is_entry_block:
+        return
+    latest = {}
+    live_in = liveness.live_in
+    live_out = liveness.live_out
+    counts = defaultdict(int)
+    last = {}
+    for stmt in block:
+        if isinstance(stmt, ir.Assign) and isinstance(stmt.target, ir.NameRef):
+            counts += 1
+            last[stmt.target] = stmt
+
+    # only rename if we might otherwise have ambiguity
+    # rename_targets = {name for (name, count) in counts.items() if count > 1 or name in live_in}
+    # TODO: make blocks way less clunky
+    statements = block.statements
+    for index, stmt in enumerate(itertools.islice(block.statements, block.start, block.stop), block.start):
+        statements[index] = rewrite_statement(stmt, latest)
+        target = stmt.target
+        if isinstance(target, ir.NameRef) and (target not in live_out or stmt != last[target]):
+            # If this isn't live out, we can just rename here.
+            latest[stmt.target] = symbols.make_versioned(stmt.target)
+
 
 def rename_ephemeral(func: ir.Function, symbols: SymbolTable):
     # Helpful for weakening the need for type inference in cases where a type is not declared.

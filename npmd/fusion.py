@@ -1,118 +1,72 @@
-import itertools
 
 import networkx as nx
 
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import Iterable, List, Set
+from typing import List, Set
 
 import npmd.ir as ir
 
 from npmd.analysis import extract_expressions, extract_parameters
 from npmd.blocks import BasicBlock
 from npmd.liveness import BlockLiveness
+from npmd.lvn import rename_dead_on_exit
 from npmd.symbol_table import SymbolTable
 from npmd.traversal import walk
 from npmd.type_checks import TypeHelper
 
 
-def get_array_expressions(expr: ir.ValueRef, typer: TypeHelper):
+def get_block_entry_array_constraints(block: BasicBlock, liveness: BlockLiveness, typer: TypeHelper):
     """
-    Get expressions that are part of the current expression, which have an array valued output.
-    :param expr:
-    :param typer:
-    :return:
-    """
-    for subexpr in walk(expr):
-        if isinstance(subexpr, ir.Expression) and typer.is_array(subexpr):
-            yield subexpr
+    This finds array constraints that must hold before any clobbers are made.
 
+    Specifically, even if augmented, applying a op b where a and b are both arrays
+    is an error if these do not have compatible dimensions, and we want to determine
+    if any of these assumptions are violated prior to block entry.
 
-def seed_array_expr_constraints(block: BasicBlock, liveness: BlockLiveness, typer: TypeHelper):
-    """
-    This finds the initial array constraints. This avoids the problem
-    :param block:
     :param liveness:
-    :param typer:
-    :return:
-    """
-    if block.is_entry_block or block.is_loop_block or block.is_branch_block:
-        return
-    relevant = set(liveness.live_in)
-    for stmt in block:
-        if isinstance(stmt, (ir.Assign, ir.InPlaceOp)):
-            pass
-    pass
-
-
-class ArrayLengthTracking:
-
-    def __init__(self, symbols: SymbolTable):
-        self.graph = nx.Graph()
-        self.typer = TypeHelper(symbols)
-
-    def get_tracked(self):
-        # useful to distinguish what's new
-        for node in self.graph.nodes():
-            yield node
-
-    def add_expr(self, expr: ir.ValueRef):
-        # add correlation bounds constraint
-        for subexpr in walk(expr):
-            if isinstance(subexpr, ir.Expression) and self.typer.is_array(subexpr):
-                for dep in subexpr.subexprs:
-                    if self.typer.is_array(dep):
-                        # If this is an elementwise type (should be checked better), we can correlate
-                        # the parent expression with any direct array dependency, so if a,b,c are 1d arrays,
-                        # a + b * min(c) would correlate 'a' and 'b'.
-                        # Note that if we clobber
-                        self.graph.add_edge(subexpr, dep)
-
-    def bind_expr(self, target: ir.ValueRef, value: ir.ValueRef):
-        # make sure value is bound
-        self.add_expr(value)
-        if target == value:
-            # don't make self edges.
-            return
-        elif not self.typer.is_array(target):
-            return
-        assert self.typer.is_array(value)
-        if isinstance(target, ir.NameRef):
-            if isinstance(value, ir.Expression) and target in value.subexprs:
-                # no changes, as we have already added the right-hand side constraint
-                return
-            else:
-                # We have to break initial constraints on this variable, since it's being rebound
-                # There's probaby a better way to do this, but for now, preserve existing constraints
-                # connecting the neighbors of target
-                for u, v in itertools.product(nx.neighbors(self.graph, target)):
-                    self.graph.add_edge(u, v)
-                self.graph.remove_node(target)
-        else:
-            # if this is a sliced array, capture it
-            self.add_expr(target)
-        self.graph.add_edge(target, value)
-
-
-def link_correlated_expressions(block: Iterable[ir.StmtBase], typer: TypeHelper)->nx.Graph:
-    """
-    This splits any contiguous sequence of statements into fusable ones.
     :param block:
     :param typer:
     :return:
     """
+    if block.is_entry_block or block.is_entry_point:
+        return
+    # check for ephemeral
+    counts = defaultdict(int)
+    clobbers = set()
+    # we don't necessarily encounter these in order
+    # thus the need for a graph
+    graph = nx.Graph()
 
-    clusters = nx.Graph()
     for stmt in block:
-        for exprs in extract_expressions(stmt):
-            for expr in exprs:
-                for array_expr in get_array_expressions(expr, typer):
-                    # gather directly nested sub-expressions, which are also arrays
-                    array_subexprs = [subexpr for subexpr in array_expr.subexprs if typer.is_array(subexpr)]
-                    clusters.add_node(array_expr)
-                    for next_index, subexpr in enumerate(array_subexprs, 1):
-                        for other in itertools.islice(array_subexprs, next_index, None):
-                            clusters.add_edge(array_expr, other)
-    return clusters
+        if isinstance(stmt, ir.Assign) and isinstance(stmt.target, ir.NameRef):
+            counts[stmt.target] += 1
+
+    ephemeral = {name for (name, count) in counts.items() if name not in liveness.live_in and count == 1}
+
+    for stmt in block:
+        # get expressions
+        for expr in extract_expressions(stmt):
+            for subexpr in walk(expr):
+                # wondering if this should restrict to all unclobbered..
+                if isinstance(subexpr, ir.Expression):
+                    if typer.is_array(subexpr):
+                        # if subexpr is an array at this level, then this constrains
+                        # the dimensions of any directly nested array sub-expression
+                        for s in subexpr.subexprs:
+                            if typer.is_array(s):
+                                if isinstance(s, ir.Expression):
+                                    # need to know if these are safe
+                                    # TODO: finish implementation
+                                    if s in ephemeral or s not in clobbers:
+                                        graph.add_edge(subexpr, s)
+
+        if isinstance(stmt, ir.Assign) and isinstance(stmt.value, ir.NameRef):
+            # for this pass, don't consider binding operations that are not live-in, since
+            # we may not be able to determine exact constraints at block entry.
+            clobbers.add(stmt.target)
+
+    return graph
 
 
 @dataclass
@@ -122,11 +76,8 @@ class ParallelLoop:
     stmts: List[ir.StmtBase]
 
 
-def get_array_statements(stmts: Iterable[ir.StmtBase], typer: TypeHelper):
-    for stmt in stmts:
-        for parameter in extract_parameters(stmt):
-            if typer.is_array(parameter):
-                yield stmt
+def fuse_regions(block: BasicBlock, liveness: BlockLiveness, symbols: SymbolTable):
+    rename_dead_on_exit(block, liveness, symbols)
 
 
 def is_array_stmt(stmt: ir.StmtBase, typer: TypeHelper):
@@ -183,4 +134,3 @@ def make_parallel_loop(stmts: BasicBlock,
     # or may clobber
 
     pass
-
