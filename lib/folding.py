@@ -5,11 +5,11 @@ from typing import Iterable, Iterator, Union
 
 import numpy as np
 
-import npmd.ir as ir
+import lib.ir as ir
 
-from npmd.errors import CompilerError
-from npmd.traversal import walk
-from npmd.type_checks import is_integer, TypeHelper
+from lib.errors import CompilerError
+from lib.traversal import walk
+from lib.type_checks import is_integer, TypeHelper
 
 
 def make_add(a: ir.ValueRef, b: ir.ValueRef):

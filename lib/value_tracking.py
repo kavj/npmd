@@ -1,12 +1,12 @@
 import networkx as nx
 
-import npmd.ir as ir
-from npmd.blocks import BasicBlock, dominator_tree, FlowGraph, get_blocks_in_loop
-from npmd.liveness import find_live_in_out
+import lib.ir as ir
+from lib.blocks import BasicBlock, dominator_tree, FlowGraph, get_blocks_in_loop
+from lib.liveness import find_live_in_out
 from collections import defaultdict, deque
 from typing import DefaultDict
 
-from npmd.utils import unpack_iterated
+from lib.utils import unpack_iterated
 
 
 def collect_reaching(graph: nx.DiGraph, start: BasicBlock, latest: DefaultDict[BasicBlock, DefaultDict], var: ir.NameRef):

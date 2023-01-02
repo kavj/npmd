@@ -5,14 +5,14 @@ from contextlib import contextmanager
 from functools import singledispatchmethod
 from typing import Any, List, Union
 
-import npmd.ir as ir
+import lib.ir as ir
 
-from npmd.blocks import build_function_graph
-from npmd.errors import CompilerError
-from npmd.pretty_printing import PrettyFormatter
-from npmd.symbol_table import SymbolTable
-from npmd.traversal import get_statement_lists
-from npmd.utils import extract_name, unpack_iterated
+from lib.blocks import build_function_graph
+from lib.errors import CompilerError
+from lib.pretty_printing import PrettyFormatter
+from lib.symbol_table import SymbolTable
+from lib.traversal import get_statement_lists
+from lib.utils import extract_name, unpack_iterated
 
 
 int_dtypes = {

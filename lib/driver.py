@@ -3,16 +3,16 @@ import sys
 
 from pathlib import Path
 
-from npmd.ast_conversion import build_module_ir_and_symbols
-from npmd.blocks import build_function_graph, render_dot_graph, render_dominator_tree
-from npmd.branch_simplify import refactor_branches
-from npmd.canonicalize import add_trivial_return, expand_in_place_assignments, normalize_array_initializers, lower_loops
-from npmd.errors import CompilerError
-from npmd.liveness import check_all_assigned, drop_unused_symbols, dump_live_info, find_live_in_out, remove_unreachable_blocks, remove_unreachable_statements
-from npmd.pretty_printing import PrettyPrinter
-from npmd.pybind_gen import gen_module, gen_setup
-from npmd.symbol_table import dump_symbol_type_info
-from npmd.type_checks import infer_types, TypeHelper
+from lib.ast_conversion import build_module_ir_and_symbols
+from lib.blocks import build_function_graph, render_dot_graph, render_dominator_tree
+from lib.branch_simplify import refactor_branches
+from lib.canonicalize import add_trivial_return, expand_in_place_assignments, normalize_array_initializers, lower_loops
+from lib.errors import CompilerError
+from lib.liveness import check_all_assigned, drop_unused_symbols, dump_live_info, find_live_in_out, remove_unreachable_blocks, remove_unreachable_statements
+from lib.pretty_printing import PrettyPrinter
+from lib.pybind_gen import gen_module, gen_setup
+from lib.symbol_table import dump_symbol_type_info
+from lib.type_checks import infer_types, TypeHelper
 
 
 version = sys.version_info

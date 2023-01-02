@@ -3,12 +3,12 @@ import pathlib
 import pytest
 
 # Todo: this could be made into a more complete class
-from npmd.utils import statement_difference, statement_intersection
-from npmd.ast_conversion import build_module_ir_and_symbols
-from npmd.blocks import build_function_graph
-from npmd.errors import CompilerError
-from npmd.pretty_printing import DebugPrinter
-from npmd.traversal import get_statement_lists
+from lib.utils import statement_difference, statement_intersection
+from lib.ast_conversion import build_module_ir_and_symbols
+from lib.blocks import build_function_graph
+from lib.errors import CompilerError
+from lib.pretty_printing import DebugPrinter
+from lib.traversal import get_statement_lists
 from tests.type_info import type_detail
 
 

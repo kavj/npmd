@@ -1,8 +1,8 @@
 
-import npmd.ir as ir
+import lib.ir as ir
 
-from npmd.analysis import find_array_length_expression
-from npmd.pretty_printing import PrettyFormatter
+from lib.analysis import find_array_length_expression
+from lib.pretty_printing import PrettyFormatter
 
 formatter = PrettyFormatter()
 

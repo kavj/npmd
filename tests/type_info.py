@@ -1,6 +1,6 @@
 import numpy as np
 
-import npmd.ir as ir
+import lib.ir as ir
 
 array_1d = ir.ArrayType(ndims=1, dtype=ir.float64)
 array_1d_int32 = ir.ArrayType(ndims=1, dtype=ir.int32)

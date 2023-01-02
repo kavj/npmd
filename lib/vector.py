@@ -3,7 +3,7 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Union
 
-import npmd.ir as ir
+import lib.ir as ir
 
 from symbol_table import SymbolTable
 

@@ -8,10 +8,10 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-import npmd.ir as ir
+import lib.ir as ir
 
-from npmd.errors import CompilerError
-from npmd.utils import extract_name
+from lib.errors import CompilerError
+from lib.utils import extract_name
 
 
 dtype_pretty_lookup = {

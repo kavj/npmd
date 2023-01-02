@@ -6,19 +6,19 @@ from collections import defaultdict
 from functools import singledispatch
 from typing import Dict, List, Set, Tuple, Union
 
-import npmd.ir as ir
+import lib.ir as ir
 
-from npmd.analysis import compute_element_count, extract_expressions
-from npmd.blocks import build_function_graph, get_loop_exit_block
-from npmd.errors import CompilerError
-from npmd.folding import simplify
-from npmd.liveness import find_live_in_out
-from npmd.lvn import rewrite_expr
-from npmd.pretty_printing import PrettyFormatter
-from npmd.symbol_table import SymbolTable
-from npmd.traversal import get_statement_lists, walk, walk_parameters
-from npmd.type_checks import is_integer, TypeHelper
-from npmd.utils import unpack_iterated
+from lib.analysis import compute_element_count, extract_expressions
+from lib.blocks import build_function_graph, get_loop_exit_block
+from lib.errors import CompilerError
+from lib.folding import simplify
+from lib.liveness import find_live_in_out
+from lib.lvn import rewrite_expr
+from lib.pretty_printing import PrettyFormatter
+from lib.symbol_table import SymbolTable
+from lib.traversal import get_statement_lists, walk, walk_parameters
+from lib.type_checks import is_integer, TypeHelper
+from lib.utils import unpack_iterated
 
 
 def invalid_loop_iterables(node: ir.ForLoop, symbols: SymbolTable):

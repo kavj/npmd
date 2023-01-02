@@ -11,13 +11,13 @@ from pathlib import Path
 
 from typing import Dict, Tuple
 
-import npmd.ir as ir
+import lib.ir as ir
 
-from npmd.callspec import early_call_specialize
-from npmd.errors import CompilerError
-from npmd.pretty_printing import PrettyFormatter
-from npmd.symbol_table import symbol, SymbolTable
-from npmd.utils import unpack_iterated
+from lib.callspec import early_call_specialize
+from lib.errors import CompilerError
+from lib.pretty_printing import PrettyFormatter
+from lib.symbol_table import symbol, SymbolTable
+from lib.utils import unpack_iterated
 
 
 binary_op_strs = {ast.Add: "+",

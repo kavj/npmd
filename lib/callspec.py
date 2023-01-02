@@ -5,9 +5,9 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 
-import npmd.ir as ir
+import lib.ir as ir
 
-from npmd.errors import CompilerError
+from lib.errors import CompilerError
 
 # we should be able to map this to type, return_type or similar
 

@@ -2,10 +2,10 @@ import logging
 import os
 import pathlib
 
-import npmd.driver as driver
-import npmd.ir as ir
+import lib.driver as driver
+import lib.ir as ir
 
-from npmd.errors import CompilerError
+from lib.errors import CompilerError
 from tests.type_info import type_detail as uws_types
 
 

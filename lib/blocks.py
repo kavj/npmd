@@ -9,12 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple, Union
 
-import npmd.ir as ir
+import lib.ir as ir
 
-from npmd.errors import CompilerError
-from npmd.pretty_printing import PrettyFormatter
-from npmd.traversal import get_statement_lists
-from npmd.utils import is_entry_point
+from lib.errors import CompilerError
+from lib.pretty_printing import PrettyFormatter
+from lib.traversal import get_statement_lists
+from lib.utils import is_entry_point
 
 
 formatter = PrettyFormatter()

@@ -3,12 +3,12 @@ import typing
 
 import numpy
 
-from npmd.errors import CompilerError
+from lib.errors import CompilerError
 
 from functools import singledispatchmethod
 from contextlib import contextmanager
 
-import npmd.ir as ir
+import lib.ir as ir
 
 
 #     https://docs.python.org/3/reference/expressions.html#operator-precedence

@@ -1,14 +1,14 @@
 from functools import singledispatch, singledispatchmethod
 from typing import Dict, Iterable, Union
 
-import npmd.ir as ir
+import lib.ir as ir
 
-from npmd.analysis import get_assign_counts
-from npmd.blocks import build_function_graph
-from npmd.liveness import find_ephemeral_assigns, find_live_in_out
-from npmd.symbol_table import SymbolTable
-from npmd.type_checks import TypeHelper
-from npmd.utils import is_basic_assign
+from lib.analysis import get_assign_counts
+from lib.blocks import build_function_graph
+from lib.liveness import find_ephemeral_assigns, find_live_in_out
+from lib.symbol_table import SymbolTable
+from lib.type_checks import TypeHelper
+from lib.utils import is_basic_assign
 
 
 def rewrite_expr(current: Dict[ir.ValueRef, ir.ValueRef], node: ir.ValueRef):

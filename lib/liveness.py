@@ -6,13 +6,13 @@ from collections import Counter, defaultdict, deque
 from functools import singledispatch, singledispatchmethod
 from typing import Dict, Iterable, Set
 
-import npmd.ir as ir
+import lib.ir as ir
 
-from npmd.blocks import BasicBlock, FlowGraph, build_function_graph, dominator_tree
-from npmd.errors import CompilerError
-from npmd.symbol_table import SymbolTable
-from npmd.traversal import get_statement_lists, walk_parameters
-from npmd.utils import is_entry_point, unpack_iterated
+from lib.blocks import BasicBlock, FlowGraph, build_function_graph, dominator_tree
+from lib.errors import CompilerError
+from lib.symbol_table import SymbolTable
+from lib.traversal import get_statement_lists, walk_parameters
+from lib.utils import is_entry_point, unpack_iterated
 
 
 # Most of this work ended up being done elsewhere in controlflow now. This can now do slightly more precise liveness

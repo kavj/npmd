@@ -2,9 +2,9 @@ import itertools
 from collections import deque
 from typing import Iterator, List, Union
 
-import npmd.ir as ir
+import lib.ir as ir
 
-from npmd.utils import is_entry_point
+from lib.utils import is_entry_point
 
 
 def iterate_single_block(stmts: List[ir.StmtBase], start: int = 0):

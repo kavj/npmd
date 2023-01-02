@@ -2,10 +2,10 @@ from copy import copy
 from functools import singledispatch
 from typing import Iterable
 
-import npmd.ir as ir
+import lib.ir as ir
 
-from npmd.errors import CompilerError
-from npmd.pretty_printing import PrettyFormatter
+from lib.errors import CompilerError
+from lib.pretty_printing import PrettyFormatter
 
 
 def map_ids_to_statements(*stmt_seqs: Iterable[ir.StmtBase]):

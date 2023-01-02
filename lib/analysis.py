@@ -6,11 +6,11 @@ from dataclasses import fields
 from functools import singledispatch
 from typing import Iterable, List, Optional, Union
 
-import npmd.ir as ir
+import lib.ir as ir
 
-from npmd.errors import CompilerError
-from npmd.utils import unpack_iterated
-from npmd.traversal import get_statement_lists, walk, walk_parameters
+from lib.errors import CompilerError
+from lib.utils import unpack_iterated
+from lib.traversal import get_statement_lists, walk, walk_parameters
 
 # Todo: stub
 specialized = {ir.NameRef("print")}

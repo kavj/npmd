@@ -3,15 +3,15 @@ import itertools
 
 import pytest
 
-import npmd.ir as ir
+import lib.ir as ir
 
-from npmd.analysis import compute_element_count
-from npmd.ast_conversion import build_module_ir_and_symbols
-from npmd.canonicalize import lower_loops, rename_clobbered_loop_parameters
-from npmd.errors import CompilerError
-from npmd.traversal import get_statement_lists
-from npmd.type_checks import infer_types
-from npmd.utils import unpack_iterated
+from lib.analysis import compute_element_count
+from lib.ast_conversion import build_module_ir_and_symbols
+from lib.canonicalize import lower_loops, rename_clobbered_loop_parameters
+from lib.errors import CompilerError
+from lib.traversal import get_statement_lists
+from lib.type_checks import infer_types
+from lib.utils import unpack_iterated
 from tree_tests import test_indexing
 from tests.type_info import type_detail
 

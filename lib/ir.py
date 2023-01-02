@@ -9,7 +9,7 @@ import typing
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from npmd.errors import CompilerError
+from lib.errors import CompilerError
 
 supported_builtins = frozenset({'iter', 'range', 'enumerate', 'zip', 'all', 'any', 'max', 'min', 'abs', 'pow',
                                 'round', 'reversed'})

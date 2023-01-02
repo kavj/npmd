@@ -3,10 +3,10 @@ import pytest
 
 import numpy as np
 
-import npmd.ir as ir
+import lib.ir as ir
 
-from npmd.errors import CompilerError
-from npmd.folding import simplify
+from lib.errors import CompilerError
+from lib.folding import simplify
 
 
 a = ir.wrap_constant(45)

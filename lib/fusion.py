@@ -5,14 +5,14 @@ import networkx as nx
 from dataclasses import dataclass
 from typing import Iterable, List, Set
 
-import npmd.ir as ir
+import lib.ir as ir
 
-from npmd.analysis import extract_expressions, extract_parameters
-from npmd.blocks import BasicBlock
-from npmd.liveness import BlockLiveness
-from npmd.symbol_table import SymbolTable
-from npmd.traversal import walk
-from npmd.type_checks import TypeHelper
+from lib.analysis import extract_expressions, extract_parameters
+from lib.blocks import BasicBlock
+from lib.liveness import BlockLiveness
+from lib.symbol_table import SymbolTable
+from lib.traversal import walk
+from lib.type_checks import TypeHelper
 
 
 def get_array_expressions(expr: ir.ValueRef, typer: TypeHelper):

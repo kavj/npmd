@@ -13,12 +13,12 @@ from typing import Union
 
 import networkx as nx
 
-import npmd.ir as ir
+import lib.ir as ir
 
-from npmd.symbol_table import SymbolTable
-from npmd.traversal import get_statement_lists
-from npmd.type_checks import TypeHelper
-from npmd.utils import unpack_iterated
+from lib.symbol_table import SymbolTable
+from lib.traversal import get_statement_lists
+from lib.type_checks import TypeHelper
+from lib.utils import unpack_iterated
 
 
 def find_alias_groups(node: Union[ir.Function, ir.ForLoop, ir.WhileLoop], symbols: SymbolTable):

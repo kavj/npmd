@@ -3,14 +3,14 @@ import operator
 
 from typing import List
 
-import npmd.ir as ir
+import lib.ir as ir
 
-from npmd.analysis import statements_match
-from npmd.folding import make_logical_invert
-from npmd.type_checks import TypeHelper
-from npmd.symbol_table import SymbolTable
-from npmd.traversal import get_statement_lists
-from npmd.utils import is_entry_point
+from lib.analysis import statements_match
+from lib.folding import make_logical_invert
+from lib.type_checks import TypeHelper
+from lib.symbol_table import SymbolTable
+from lib.traversal import get_statement_lists
+from lib.utils import is_entry_point
 
 
 def unpack_branches(node: ir.IfElse) -> List[ir.IfElse]:

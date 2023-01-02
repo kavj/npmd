@@ -7,14 +7,14 @@ from contextlib import contextmanager
 from functools import singledispatchmethod
 from typing import Dict, List, Optional, Set, Union
 
-import npmd.ir as ir
+import lib.ir as ir
 
-from npmd.analysis import check_all_declared, DeclTracker
-from npmd.canonicalize import serialize_min_max
-from npmd.errors import CompilerError
-from npmd.symbol_table import SymbolTable
-from npmd.type_checks import TypeHelper, check_return_type
-from npmd.utils import extract_name
+from lib.analysis import check_all_declared, DeclTracker
+from lib.canonicalize import serialize_min_max
+from lib.errors import CompilerError
+from lib.symbol_table import SymbolTable
+from lib.type_checks import TypeHelper, check_return_type
+from lib.utils import extract_name
 
 
 npy_c_type_codes = {
