@@ -532,10 +532,11 @@ class TreeBuilder(ast.NodeVisitor):
         name = node.name
         # Todo: warn about unsupported argument features
         params = [ir.NameRef(arg.arg) for arg in node.args.args]
+        docstring = ast.get_docstring(node)
         with self.flow_region():
             for stmt in node.body:
                 self.visit(stmt)
-            func = ir.Function(name, params, self.body)
+            func = ir.Function(name, params, self.body, docstring)
         return func
 
     def visit_Return(self, node: ast.Return):

@@ -595,6 +595,8 @@ class DebugPrinter:
             formatted = f'{node.name}({arg_str})'
         else:
             formatted = self.format(node)
+        if node.docstring is not None:
+            formatted = f'{formatted}\n{node.docstring}'
 
         if len(formatted) > self.max_len:
             formatted = f'{formatted[:self.max_len]}...'

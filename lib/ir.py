@@ -481,6 +481,7 @@ class Function:
     name: str
     args: typing.List[NameRef]
     body: typing.List[Statement]
+    docstring: typing.Optional[str] = None
 
 
 @dataclass

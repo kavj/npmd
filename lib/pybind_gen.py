@@ -5,13 +5,14 @@ import numpy
 
 from contextlib import contextmanager
 from functools import singledispatchmethod
-from typing import Dict, List, Optional, Set, Union
+from typing import Dict, List, Optional, Union
 
 import lib.ir as ir
 
 from lib.analysis import check_all_declared, DeclTracker
 from lib.canonicalize import serialize_min_max
 from lib.errors import CompilerError
+from lib.folding import add_cast
 from lib.symbol_table import SymbolTable
 from lib.type_checks import TypeHelper, check_return_type
 from lib.utils import extract_name
@@ -134,8 +135,7 @@ class Emitter:
     def print_line(self, line, terminate=False):
         if terminate:
             line += ';'
-        lines = textwrap.wrap(initial_indent=self._indent, subsequent_indent=self._indent, break_long_words=False,
-                              text=line)
+        lines = textwrap.wrap(initial_indent=self._indent, subsequent_indent=self._indent, break_long_words=False, text=line)
         self.line_buffer.extend(lines)
 
     def flush(self):
@@ -302,17 +302,17 @@ class ExprFormatter:
     @render.register
     def _(self, node: ir.TRUEDIV):
         left, right = node.subexprs
-        # need casts here for consistency
+        # We don't have this operator in C++, so we insert cast
+        # nodes at the last second as necessary.
         left_type = self.type_helper(left)
-        f64 = numpy.dtype('float64')
-        left = self.render(left)
-        if left_type == f64:
-            left = f'static_cast<double>({left})'
         right_type = self.type_helper(right)
+        result_type = self.type_helper(node)
+        if left_type != result_type:
+            left = add_cast(left, result_type)
+        if right_type != result_type:
+            right = add_cast(right, result_type)
+        left = self.render(left)
         right = self.render(right)
-        if right_type == f64:
-            # Todo: an earlier pass should instrument cast nodes..
-            right = f'static_cast<double>({right})'
         rendered = f'{left} / {right}'
         return rendered
 
@@ -398,7 +398,7 @@ class ExprFormatter:
 
     @render.register
     def _(self, node: ir.StringConst):
-        return f'"{node.value}"'
+        return f'R"({node.value})"'
 
     @render.register
     def _(self, node: ir.TUPLE):
@@ -592,8 +592,8 @@ class FuncWriter:
         sz = f'{name}.size()'
         # we don't have a pointer type in IR yet, thus this
         t = self.type_helper(node.array)
-        dt = t.dtype
-        buffer = f'static_cast<{dt}*>({name}.data())'
+        dt = get_c_type_name(t.dtype)
+        buffer = f'static_cast<{dt}*>({name}.mutable_data())'
         self.emitter.print_line(f'std::fill({buffer}, {buffer} + {sz}, {node.fill_value.value});')
 
     @visit.register
@@ -609,13 +609,23 @@ class FuncWriter:
         self.emitter.print_line(f'return {self.render(node.value)};')
 
 
-def gen_module_def(emitter: Emitter, module_name: str, func_names: Set[str], docs: Optional[str] = None):
+def gen_module_def(emitter: Emitter, module_name: str, funcs: List[ir.Function], docs: Optional[str] = None):
     module_name_no_ext = pathlib.Path(module_name).stem
     with emitter.scope(line=f'PYBIND11_MODULE({module_name_no_ext}, m)'):
         if docs is not None:
-            emitter.print_line(line=f'm.doc() = {docs};')
-        for func_name in func_names:
-            emitter.print_line(f'm.def("{func_name}", &{func_name}, "");')
+            emitter.print_line(line=f'm.doc() = R"({docs})";')
+        for func in funcs:
+            name = f'm.def(R"({func.name})", &{func.name}'
+            header_params = [name]
+            if func.docstring is not None:
+                docstring = f'R"({func.docstring})"'
+                header_params.append(docstring)
+            if func.args:
+                header_params.extend(f'py::arg(R"({arg.name})")' for arg in func.args)
+            header = ', '.join(header_params)
+            # add closing notation
+            header = f'{header});'
+            emitter.print_line(header)
 
 
 def gen_module(path: pathlib.Path, module_name: str, funcs: List[ir.Function], symbol_tables: Dict[str, SymbolTable],
@@ -623,7 +633,6 @@ def gen_module(path: pathlib.Path, module_name: str, funcs: List[ir.Function], s
     if not module_name.endswith(".cpp"):
         module_name += '.cpp'
     emitter = Emitter(path.joinpath(module_name))
-    func_names = {func.name for func in funcs}
 
     # Todo: don't write if exception occurs
     with emitter.flush_on_exit():
@@ -642,4 +651,4 @@ def gen_module(path: pathlib.Path, module_name: str, funcs: List[ir.Function], s
             func_writer(func)
             emitter.blank_lines(count=2)
 
-        gen_module_def(emitter, module_name, func_names, docs)
+        gen_module_def(emitter, module_name, funcs, docs)
