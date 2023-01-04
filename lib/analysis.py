@@ -151,15 +151,39 @@ def check_all_declared(block: List[ir.StmtBase], tracker: Optional[DeclTracker] 
             tracker.check_undeclared(stmt.value, current_line)
 
 
-def compute_element_count(start: ir.ValueRef, stop: ir.ValueRef, step: ir.ValueRef):
+def find_element_count(node: ir.ValueRef) -> Optional[ir.ValueRef]:
     """
-    Single method to compute the number of elements for an iterable expression.
+      Find an expression for array length if countable. Otherwise returns None.
+      For example:
+          a[a > 0] is not trivially countable.
+          The predicate must be evaluated against the array
+          to determine the number of elements.
 
-    :param start:
-    :param stop:
-    :param step:
-    :return:
+          a[i::] is trivially countable. For i >= 0, len(a[i::]) == len(a) - i
+
+      :return:
     """
+
+    if isinstance(node, ir.Subscript):
+        if isinstance(node.index, ir.Slice):
+            index = node.index
+            start = index.start
+            stop = index.stop
+            base_len = find_element_count(node.value)
+            stop = ir.MIN(stop, base_len) if (stop is not None and stop != base_len) else base_len
+            step = index.step if index.step is not None else ir.One
+        else:
+            # first dim removed
+            return ir.SingleDimRef(node.value, dim=ir.One)
+    elif isinstance(node, ir.NameRef):
+        return ir.SingleDimRef(node, dim=ir.Zero)
+    elif isinstance(node, ir.AffineSeq):
+        start = node.start
+        stop = node.stop
+        step = node.step
+    else:
+        msg = f'No method to compute element count for {node}.'
+        raise CompilerError(msg)
 
     if start == ir.Zero:
         diff = stop
@@ -173,34 +197,6 @@ def compute_element_count(start: ir.ValueRef, stop: ir.ValueRef, step: ir.ValueR
     fringe = ir.SELECT(predicate=test, on_true=ir.One, on_false=ir.Zero)
     count = ir.ADD(base_count, fringe)
     return count
-
-
-def find_array_length_expression(node: ir.ValueRef) -> Optional[ir.ValueRef]:
-    """
-      Find an expression for array length if countable. Otherwise returns None.
-      For example:
-          a[a > 0] is not trivially countable.
-          The predicate must be evaluated against the array
-          to determine the number of elements.
-
-          a[i::] is trivially countable. For i >= 0, len(a[i::]) == len(a) - i
-
-      :return:
-    """
-    if isinstance(node, ir.Subscript):
-        if isinstance(node.index, ir.Slice):
-            index = node.index
-            start = index.start
-            stop = index.stop
-            base_len = ir.SingleDimRef(node.value, dim=ir.Zero)
-            if stop is not None and stop != base_len:
-                stop = ir.MIN(stop, base_len)
-            return compute_element_count(start, stop, index.step)
-        else:
-            # first dim removed
-            return ir.SingleDimRef(node.value, dim=ir.One)
-    elif isinstance(node, ir.NameRef):
-        return ir.SingleDimRef(node, dim=ir.Zero)
 
 
 def get_assign_counts(node: Union[ir.Function, ir.ForLoop, ir.WhileLoop]):

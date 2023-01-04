@@ -5,7 +5,7 @@ import pytest
 
 import lib.ir as ir
 
-from lib.analysis import compute_element_count
+from lib.analysis import find_element_count
 from lib.ast_conversion import build_module_ir_and_symbols
 from lib.canonicalize import lower_loops, rename_clobbered_loop_parameters
 from lib.errors import CompilerError
@@ -120,7 +120,7 @@ def test_different_step_sizes():
         assert iterable.start == ir.Zero
         assert iterable.step == ir.One
         # sliced subscripts
-        counts = ir.MIN(*(compute_element_count(*v.index.subexprs) for v in values))
+        counts = ir.MIN(*(find_element_count(v) for v in values))
 
         assert iterable.stop == counts
         assert loop.iterable == ir.AffineSeq(ir.Zero, counts, ir.One)

@@ -8,7 +8,7 @@ from typing import Dict, List, Set, Tuple, Union
 
 import lib.ir as ir
 
-from lib.analysis import compute_element_count, extract_expressions
+from lib.analysis import find_element_count, extract_expressions
 from lib.blocks import build_function_graph, get_loop_exit_block
 from lib.errors import CompilerError
 from lib.folding import simplify
@@ -283,7 +283,7 @@ def make_single_index_loop(header: ir.ForLoop, symbols, noescape):
     else:
         iterable_lens = []
         for expr in exprs:
-            c = compute_element_count(expr.start, expr.stop, expr.step)
+            c = find_element_count(expr)
             iterable_lens.append(c)
 
         count = ir.MinReduction(*iterable_lens)

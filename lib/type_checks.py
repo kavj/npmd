@@ -79,13 +79,9 @@ class TypeHelper:
         if any(isinstance(t, ir.ArrayType) for t in types):
             msg = f'Min operator is not applicable to array "{self.format(node)}"'
             raise CompilerError(msg)
-        tentative = numpy.promote_types(*types)
-        if tentative != types[0]:
-            # TODO: promote types isn't always quite what we need.. it should snap to actually supported types
-            msg = f'Min and max require that we use the first type. ' \
-                  f'This is only supported in cases where this agrees with promote types: "{self.format(node)}"'
-            raise CompilerError(msg)
-        return tentative
+        # this differs from CPython, which always takes the first type. The problem is, that makes type inference
+        # non-commutative, which is just too error prone and precludes min and max as output transforms.
+        return numpy.promote_types(*types)
 
     def is_array(self, node: ir.ValueRef):
         return isinstance(self.infer(node), ir.ArrayType)

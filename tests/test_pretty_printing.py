@@ -1,7 +1,7 @@
 
 import lib.ir as ir
 
-from lib.analysis import find_array_length_expression
+from lib.analysis import find_element_count
 from lib.pretty_printing import PrettyFormatter
 
 formatter = PrettyFormatter()
@@ -36,7 +36,7 @@ def test_formatting():
 
 def test_complex_len_expr():
     t0 = ir.Subscript(a, ir.Slice(j, k, m))
-    count = find_array_length_expression(t0)
+    count = find_element_count(t0)
     formatted = formatter(count)
     # Ensure that the requisite components show up here
     # Note, this isn't the safest. Should be sufficient in real world cases
