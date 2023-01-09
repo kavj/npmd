@@ -104,7 +104,7 @@ def test_different_step_sizes():
         loop = loops.pop()
         targets = []
         values = []
-        for target, value in unpack_iterated(loop.target, loop.iterable):
+        for target, value in unpack_iterated(loop):
             targets.append(target)
             values.append(value)
         loop = get_single_for_loop(func)

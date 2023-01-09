@@ -34,7 +34,7 @@ def find_alias_groups(node: Union[ir.Function, ir.ForLoop, ir.WhileLoop], symbol
                         # avoids (a + b)[i] and other weird cases
                         graph.add_edge(target_name, value_name)
             elif isinstance(stmt, ir.ForLoop):
-                for target, value in unpack_iterated(stmt.target, stmt.iterable):
+                for target, value in unpack_iterated(stmt):
                     if typer.iteration_yields_array(stmt.iterable) and isinstance(target, ir.NameRef):
                         alias_target = get_target_name(value)
                         if alias_target is not None:

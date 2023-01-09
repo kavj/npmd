@@ -1,6 +1,6 @@
 from copy import copy
 from functools import singledispatch
-from typing import Iterable
+from typing import Iterable, Union
 
 import lib.ir as ir
 
@@ -79,33 +79,32 @@ def _(node: ir.Call):
     return node.func
 
 
-def unpack_iterated(target, iterable):
-    if isinstance(iterable, ir.Zip):
-        # must unpack
-        if isinstance(target, ir.TUPLE):
+def unpack_entries(target: ir.TUPLE, iterable: ir.ValueRef):
+    if isinstance(target, ir.TUPLE):
+        if isinstance(iterable, ir.Zip):
             if len(target.elements) == len(iterable.elements):
-                for t, v in zip(target.elements, iterable.elements):
-                    yield from unpack_iterated(t, v)
-            else:
-                msg = f"Mismatched unpacking counts for {target} and {iterable}, {len(target.elements)} " \
-                      f"and {(len(iterable.elements))}."
-                raise CompilerError(msg)
-        else:
-            formatter = PrettyFormatter()
-            fiterable = formatter(iterable)
-            ftarget = formatter(target)
-            msg = f"Zip constructs must be fully unpacked. \"{fiterable}\" cannot be unpacked to \"{ftarget}\"."
-            raise CompilerError(msg)
-    elif isinstance(iterable, ir.Enumerate):
-        if isinstance(target, ir.TUPLE):
-            first_target, sec_target = target.elements
-            yield first_target, ir.AffineSeq(iterable.start, None, ir.One)
-            yield from unpack_iterated(sec_target, iterable.iterable)
-        else:
-            formatter = PrettyFormatter()
-            ftarget = formatter(target)
-            msg = f"Only tuples are supported unpacking targets. Received \"{ftarget}\" with type {type(target)}."
-            raise CompilerError(msg)
+                return zip(target.elements, iterable.elements)
+        elif isinstance(iterable, ir.Enumerate):
+            if len(target.elements) == 2:
+                return iter(((target.elements[0], ir.AffineSeq(iterable.start, None, ir.One)), (target.elements[1], iterable.iterable)))
+    msg = f'Unable to unpack expression pair {target}, {iterable}.'
+    raise CompilerError(msg)
+
+
+def unpack_iterated(node: ir.ForLoop):
+    iterable = node.iterable
+    target = node.target
+    if isinstance(target, ir.TUPLE):
+        queued = [unpack_entries(target, iterable)]
+        while queued:
+            for target, iterable in queued.pop():
+                if isinstance(target, ir.TUPLE):
+                    queued.append(unpack_entries(target, iterable))
+                    break
+                elif isinstance(iterable, (ir.Enumerate, ir.Zip)):
+                    msg = f'Unable to unpack. Received target {target} and iterable {iterable}.'
+                    raise CompilerError(msg)
+                else:
+                    yield target, iterable
     else:
-        # Array or sequence reference, with a single opaque target.
         yield target, iterable

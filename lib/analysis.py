@@ -19,7 +19,7 @@ specialized = {ir.NameRef("print")}
 def find_assigned_or_augmented(entry: Union[ir.Function, ir.ForLoop, ir.WhileLoop]):
     for stmt in get_statement_lists(entry):
         if isinstance(stmt, ir.ForLoop):
-            for target, _ in unpack_iterated(stmt.target, stmt.iterable):
+            for target, _ in unpack_iterated(stmt):
                 yield target
         elif isinstance(stmt, (ir.Assign, ir.InPlaceOp)):
             if isinstance(stmt.target, ir.NameRef):
@@ -130,7 +130,7 @@ def check_all_declared(block: List[ir.StmtBase], tracker: Optional[DeclTracker] 
             tracker.innermost().update(bound_if.intersection(bound_else))
         elif isinstance(stmt, ir.ForLoop):
             with tracker.scope():
-                for target, iterable in unpack_iterated(stmt.target, stmt.iterable):
+                for target, iterable in unpack_iterated(stmt):
                     tracker.check_undeclared(iterable, current_line)
                     tracker.declare(target)
                 with tracker.scope():
@@ -211,7 +211,7 @@ def get_assign_counts(node: Union[ir.Function, ir.ForLoop, ir.WhileLoop]):
             if isinstance(stmt, ir.Assign) and isinstance(stmt.target, ir.NameRef):
                 assign_counts[stmt.target] += 1
             elif isinstance(stmt, ir.ForLoop):
-                for target, _ in unpack_iterated(stmt.target, stmt.iterable):
+                for target, _ in unpack_iterated(stmt):
                     # it's okay to count duplicates in unpacking
                     assign_counts[target] += 1
     return assign_counts
@@ -255,7 +255,7 @@ def _(node: ir.Assign):
 
 @extract_expressions.register
 def _(node: ir.ForLoop):
-    for target, iterable in unpack_iterated(node.target, node.iterable):
+    for target, iterable in unpack_iterated(node):
         yield iterable
         yield target
 

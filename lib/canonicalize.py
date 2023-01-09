@@ -23,7 +23,7 @@ from lib.utils import unpack_iterated
 
 def invalid_loop_iterables(node: ir.ForLoop, symbols: SymbolTable):
     type_checker = TypeHelper(symbols)
-    for _, iterable in unpack_iterated(node.target, node.iterable):
+    for _, iterable in unpack_iterated(node):
         if isinstance(iterable, ir.AffineSeq):
             for subexpr in iterable.subexprs:
                 # Todo: raise here instead?
@@ -128,12 +128,12 @@ def preheader_rename_parameters(node: ir.ForLoop):
                 augmented_in_body.add(stmt.target)
 
             elif isinstance(stmt, ir.ForLoop):
-                for target, _ in unpack_iterated(stmt.target, stmt.iterable):
+                for target, _ in unpack_iterated(stmt):
                     assert isinstance(target, ir.NameRef)
                     clobbered_in_body.add(target)
     must_rename = set()
 
-    for target, iterable in unpack_iterated(node.target, node.iterable):
+    for target, iterable in unpack_iterated(node):
         if isinstance(iterable, ir.AffineSeq):
             for param in walk_parameters(iterable):
                 if param in clobbered_in_body or param in augmented_in_body:
@@ -265,7 +265,7 @@ def make_single_index_loop(header: ir.ForLoop, symbols, noescape):
 
     by_iterable = {}
     target_to_iterable = {}
-    for target, iterable in unpack_iterated(header.target, header.iterable):
+    for target, iterable in unpack_iterated(header):
         interval = make_affine_seq(iterable)
         by_iterable[iterable] = interval
         target_to_iterable[target] = iterable
@@ -305,7 +305,7 @@ def make_single_index_loop(header: ir.ForLoop, symbols, noescape):
 
     body = []
     pos = header.pos
-    for target, iterable in unpack_iterated(header.target, header.iterable):
+    for target, iterable in unpack_iterated(header):
         if target == loop_index:
             continue
         if isinstance(iterable, ir.AffineSeq):
@@ -371,7 +371,7 @@ def get_assigned_or_augmented(node: Union[ir.Function, ir.ForLoop, ir.WhileLoop]
                         augmented.add(stmt.target.value)
             elif isinstance(stmt, ir.ForLoop):
                 # nested loop should not clobber
-                for target, _ in unpack_iterated(stmt.target, stmt.iterable):
+                for target, _ in unpack_iterated(stmt):
                     if isinstance(target, ir.NameRef):
                         bound.add(target)
     return bound, augmented
@@ -383,10 +383,10 @@ def get_safe_loop_indices(stmt: ir.ForLoop, live_on_exit: Set[ir.NameRef], symbo
     # used to determine indexing
     assigned.update(augmented)
     assigned.update(live_on_exit)
-    possible_indices = [target for (target, iterable) in unpack_iterated(stmt.target, stmt.iterable) if isinstance(iterable, ir.AffineSeq) and target not in assigned]
+    possible_indices = [target for (target, iterable) in unpack_iterated(stmt) if isinstance(iterable, ir.AffineSeq) and target not in assigned]
     # check that on the off chance of multiple assignment, we go by the last assigned
     invalid = set()
-    for target, iterable in unpack_iterated(stmt.target, stmt.iterable):
+    for target, iterable in unpack_iterated(stmt):
         if not isinstance(iterable, ir.AffineSeq):
             invalid.add(target)
         else:

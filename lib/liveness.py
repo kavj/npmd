@@ -40,7 +40,7 @@ def _(node: ir.Assign):
 
 @get_assigned.register
 def _(node: ir.ForLoop):
-    for target, value in unpack_iterated(node.target, node.iterable):
+    for target, value in unpack_iterated(node):
         if isinstance(target, ir.NameRef):
             yield target
 
@@ -103,7 +103,7 @@ def _(node: ir.Return):
 
 @get_referenced.register
 def _(node: ir.ForLoop):
-    for target, value in unpack_iterated(node.target, node.iterable):
+    for target, value in unpack_iterated(node):
         yield from walk_parameters(value)
         if not isinstance(target, ir.NameRef):
             yield from walk_parameters(target)
@@ -303,7 +303,7 @@ def check_all_assigned(graph: FlowGraph):
                     if p not in assigned:
                         maybe_unbound.add(p)
             elif isinstance(stmt, ir.ForLoop):
-                for target, value in unpack_iterated(stmt.target, stmt.iterable):
+                for target, value in unpack_iterated(stmt):
                     update_unbound(value, assigned)
                     if isinstance(target, ir.NameRef):
                         assigned.add(target)

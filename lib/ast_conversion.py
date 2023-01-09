@@ -470,6 +470,10 @@ class TreeBuilder(ast.NodeVisitor):
         assert iter_node is not None
         assert target_node is not None
         pos = extract_positional_info(node)
+        with self.loop_region(node):
+            for stmt in node.body:
+                self.visit(stmt)
+            loop = ir.ForLoop(target_node, iter_node, self.body, pos)
         targets = set()
         iterables = set()
         # Do initial checks for weird issues that may arise here.
@@ -477,7 +481,7 @@ class TreeBuilder(ast.NodeVisitor):
         # additional arithmetic and not all variable types may be fully known
         # at this point.
         try:
-            for target, iterable in unpack_iterated(target_node, iter_node):
+            for target, iterable in unpack_iterated(loop):
                 # check for some things that aren't currently supported
                 if isinstance(target, ir.Subscript):
                     msg = f'Setting a subscript target in a for loop iterator is currently ' \
@@ -495,10 +499,6 @@ class TreeBuilder(ast.NodeVisitor):
             msg = f'{conflict_names} appear in both the target an iterable sequences of a for loop, ' \
                   f'line {pos.line_begin}. This is not supported.'
             raise CompilerError(msg)
-        with self.loop_region(node):
-            for stmt in node.body:
-                self.visit(stmt)
-            loop = ir.ForLoop(target_node, iter_node, self.body, pos)
         self.body.append(loop)
 
     def visit_While(self, node: ast.While):

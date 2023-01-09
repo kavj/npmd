@@ -35,7 +35,7 @@ def get_last_assign(block: BasicBlock):
     if block.is_loop_block:
         header = block.first
         if isinstance(header, ir.ForLoop):
-            return {target: value  for (target, value) in unpack_iterated(header.target, header.iterable)}
+            return {target: value  for (target, value) in unpack_iterated(header)}
         else:
             latest = {}
             for stmt in block:
@@ -66,7 +66,7 @@ def track_loop(graph: FlowGraph, entry: BasicBlock):
     all_assigned = set()
     for block in nx.topological_sort(loop_graph):
         if block.is_loop_block and isinstance(block.first, ir.ForLoop):
-            for target, iterable in unpack_iterated(block.first.target, block.first.iterable):
+            for target, iterable in unpack_iterated(block.first):
                 all_assigned.add(target)
         else:
             for stmt in block:

@@ -328,7 +328,7 @@ class TypeInference:
 
     @visit.register
     def _(self, node: ir.ForLoop):
-        for target, iterable in unpack_iterated(node.target, node.iterable):
+        for target, iterable in unpack_iterated(node):
             target_type = self.type_checker.iterated_type(iterable)
             self.bind_type(target, target_type)
 
@@ -357,7 +357,7 @@ def validate_types(func: ir.Function, symbols: SymbolTable):
             elif isinstance(stmt, (ir.SingleExpr, ir.Return)):
                 type_checker.infer(stmt.value)
             elif isinstance(stmt, ir.ForLoop):
-                for target, iterable in unpack_iterated(stmt.target, stmt.iterable):
+                for target, iterable in unpack_iterated(stmt):
                     type_checker.iterated_type(iterable)
                     type_checker.infer(target)
 
