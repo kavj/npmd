@@ -48,11 +48,11 @@ class TypeBase:
 
 
 class StmtBase:
-    pos = None
+    pos: Position
 
 
 Statement = typing.TypeVar('Statement', bound=StmtBase)
-StatementList = typing.Union[typing.List[Statement], typing.Tuple[Statement]]
+StatementList = typing.List[Statement]
 
 
 class ValueRef(ABC):
@@ -442,24 +442,6 @@ class MAX(Expression):
 
 
 @dataclass(frozen=True)
-class MAXELT(Expression):
-    value: ValueRef
-
-    @property
-    def subexprs(self):
-        yield self.value
-
-
-@dataclass(frozen=True)
-class MINELT(Expression):
-    value: ValueRef
-
-    @property
-    def subexprs(self):
-        yield self.value
-
-
-@dataclass(frozen=True)
 class MaxReduction(Expression):
     values: typing.FrozenSet[ValueRef, ...]
 
@@ -476,11 +458,10 @@ class MaxReduction(Expression):
         yield from self.values
 
 
-@dataclass
+@dataclass(frozen=True)
 class Function:
     name: str
-    args: typing.List[NameRef]
-    body: typing.List[Statement]
+    args: typing.Tuple[NameRef]
     docstring: typing.Optional[str] = None
 
 
@@ -491,7 +472,7 @@ class Module:
 
     """
     name: str
-    functions: typing.List[Function]
+    functions: typing.List[typing.Any]  # TODO: move this out of IR module so that we can type this as List[FunctionContext]
     module_imports: typing.Dict[str, str]
     name_imports: typing.Dict[str, str]
 
@@ -1071,33 +1052,6 @@ class NOT(BoolOp):
 
 
 @dataclass(frozen=True)
-class PRODUCT(Expression):
-    value: ValueRef
-
-    @property
-    def subexprs(self):
-        yield self.value
-
-
-@dataclass(frozen=True)
-class RECIPROCAL(Expression):
-    value: ValueRef
-
-    @property
-    def subexprs(self):
-        yield self.value
-
-
-@dataclass(frozen=True)
-class SUM(Expression):
-    value: ValueRef
-
-    @property
-    def subexprs(self):
-        yield self.value
-
-
-@dataclass(frozen=True)
 class Call(Expression):
     """
     An arbitrary call node. This can be replaced
@@ -1208,40 +1162,6 @@ class SELECT(Expression):
 
 
 @dataclass(frozen=True)
-class ELTWISEOP(Expression):
-    a: ValueRef
-    b: ValueRef
-    out: ValueRef
-    where: ValueRef
-
-
-@dataclass(frozen=True)
-class ELTWISEUNARYOP(Expression):
-    a: ValueRef
-    out: ValueRef
-    where: ValueRef
-
-
-@dataclass(frozen=True)
-class LOGICAL_REDUC(Expression):
-    a: Expression
-    axis: CONSTANT
-    out: ValueRef
-    keepdims: CONSTANT
-    where: ValueRef
-
-
-@dataclass(frozen=True)
-class ARITH_REDUC(Expression):
-    a: Expression
-    axis: CONSTANT
-    out: ValueRef
-    keepdims: CONSTANT
-    initial: ValueRef
-    where: ValueRef
-
-
-@dataclass(frozen=True)
 class Reversed(Expression):
     """
     Sentinel for a "reversed" object
@@ -1315,6 +1235,7 @@ class InPlaceOp(StmtBase):
         assert isinstance(self.value, BinOp)
         assert isinstance(self.target, (NameRef, Subscript))
         assert self.target in self.value.subexprs
+        assert isinstance(self.pos, Position)
 
 
 @dataclass(frozen=True)
@@ -1337,6 +1258,7 @@ class Assign(StmtBase):
         if isinstance(self.value, Slice):
             msg = f'Explicitly assigning slice expressions is unsupported: "{self}".'
             raise CompilerError(msg)
+        assert isinstance(self.pos, Position)
 
 
 @dataclass(frozen=True)
@@ -1346,23 +1268,29 @@ class SingleExpr(StmtBase):
 
     def __post_init__(self):
         assert isinstance(self.value, ValueRef)
+        assert isinstance(self.pos, Position)
 
 
 @dataclass(frozen=True)
 class Break(StmtBase):
     pos: Position
 
+    def __post_init__(self):
+        assert isinstance(self.pos, Position)
+
 
 @dataclass(frozen=True)
 class Continue(StmtBase):
     pos: Position
 
+    def __post_init__(self):
+        assert isinstance(self.pos, Position)
 
-@dataclass
+
+@dataclass(frozen=True)
 class ForLoop(StmtBase):
     target: typing.Union[NameRef, TUPLE]
     iterable: ValueRef
-    body: typing.List[Statement]
     pos: Position
 
     def __post_init__(self):
@@ -1372,17 +1300,22 @@ class ForLoop(StmtBase):
         elif not isinstance(self.iterable, ValueRef):
             msg = f'Expected ValueRef, got "{self.iterable}", type: "{type(self.iterable)}".'
             raise TypeError(msg)
+        assert isinstance(self.pos, Position)
 
 
-@dataclass
+@dataclass(frozen=True)
 class IfElse(StmtBase):
     test: ValueRef
-    if_branch: StatementList
-    else_branch: StatementList
+    if_branch: int
+    else_branch: int
     pos: Position
 
     def __post_init__(self):
         assert isinstance(self.test, ValueRef)
+        assert self.if_branch != self.else_branch
+        if self.if_branch == self.else_branch:
+            raise CompilerError('Cannot assign a matching label to both if and else branches of a branch statement.')
+        assert isinstance(self.pos, Position)
 
 
 @dataclass(frozen=True)
@@ -1394,11 +1327,11 @@ class Return(StmtBase):
         assert isinstance(self.value, ValueRef)
 
 
-@dataclass
+@dataclass(frozen=True)
 class WhileLoop(StmtBase):
     test: ValueRef
-    body: typing.List[Statement]
     pos: Position
 
     def __post_init__(self):
         assert isinstance(self.test, ValueRef)
+        assert isinstance(self.pos, Position)

@@ -1,47 +1,14 @@
-import itertools
 import typing
 
-import numpy
-
 from lib.errors import CompilerError
+from lib.blocks import BasicBlock, FunctionContext
+from lib.graph_walkers import find_branch_exit, find_loop_exit, get_reduced_graph, walk_graph
+from lib.formatting import binop_ops, PrettyFormatter
 
 from functools import singledispatchmethod
 from contextlib import contextmanager
 
 import lib.ir as ir
-
-
-#     https://docs.python.org/3/reference/expressions.html#operator-precedence
-
-binop_ordering = {"**": 1, "*": 3, "@": 3, "/": 3, "//": 3, "%": 3, "+": 4, "-": 4, "<<": 5, ">>": 5, "&": 6,
-                  "^": 7, "|": 8, "in": 9, "not in": 9, "<": 9, "<=": 9, ">": 9, ">=": 9, "!=": 9,
-                  "==": 9}
-
-
-compare_ops = {ir.EQ: "==",
-               ir.NE: "!=",
-               ir.LT: "<",
-               ir.LE: "<=",
-               ir.GT: ">",
-               ir.GE: ">=",
-               ir.IN: "in",
-               ir.NOTIN: "not in"
-               }
-
-binop_ops = {ir.ADD: "+",
-             ir.SUB: "-",
-             ir.MULT: "*",
-             ir.TRUEDIV: "/",
-             ir.FLOORDIV: "//",
-             ir.MOD: '%',
-             ir.POW: "**",
-             }
-
-
-unary_ops = {
-    ir.USUB: "-",
-    ir.UINVERT: "~"
-}
 
 
 # Todo: Given the boolean refactoring, not should probably derive from BoolOp, similar to TRUTH.
@@ -53,365 +20,22 @@ unary_ops = {
 # Note, python docs don't specify truth precedence, but it should match logical "not"
 
 
-class PrettyFormatter:
-    """
-    The pretty printer is intended as a way to show the state of the IR in a way that resembles a
-    typical source representation.
-
-    Note: This will parenthesize some expressions that are unsupported yet accepted by plain Python.
-          It's designed this way, because the alternative is more confusing.
-
-    """
-
-    def __call__(self, node, truncate_after=None):
-        expr = self.visit(node)
-        if truncate_after is not None and len(expr) > truncate_after:
-            # Todo: check how this renders with parentheses
-            expr = f'{expr[:truncate_after]}...'
-        return expr
-
-    def parenthesized(self, expr: ir.ValueRef):
-        formatted = self.visit(expr)
-        if isinstance(expr, ir.Expression):
-            formatted = f'({formatted})'
-        return formatted
-
-    @singledispatchmethod
-    def visit(self, node):
-        msg = f"No method to format node: {node}."
-        raise NotImplementedError(msg)
-
-    @visit.register
-    def _(self, node: ir.ArrayAlloc):
-        exprs = ', '.join(self.visit(subexpr) for subexpr in node.subexprs)
-        return f'numpy.empty({exprs})'
-
-    @visit.register
-    def _(self, node: ir.ArrayFill):
-        return f'{self.visit(node.array)}[...] = {self.visit(node.fill_value)}'
-
-    # adding formatting support for non-branching statements in order to print graph nodes
-    @visit.register
-    def _(self, node: ir.Assign):
-        target = self.visit(node.target)
-        value = self.visit(node.value)
-        formatted = f'{target} = {value}'
-        return formatted
-
-    @visit.register
-    def _(self, node: ir.Function):
-        args = ', '.join(arg.name for arg in node.args)
-        return f'def {node.name}({args})'
-
-    @visit.register
-    def _(self, node: ir.IfElse):
-        test = self.visit(node.test)
-        return f'if {test}'
-
-    @visit.register
-    def _(self, node: ir.ForLoop):
-        target = self.visit(node.target)
-        iterable = self.visit(node.iterable)
-        return f'for {target} in {iterable}'
-
-    @visit.register
-    def _(self, node: ir.WhileLoop):
-        test = self.visit(node.test)
-        return f'while {test}'
-
-    @visit.register
-    def _(self, node: ir.InPlaceOp):
-        left = node.target
-        right = None
-        for right in node.value.subexprs:
-            # if there's a distinct one, pick it
-            if right is not left:
-                break
-        assert right is not None
-        op = binop_ops[type(node.value)]
-        left = self.visit(left)
-        right = self.visit(right)
-        formatted = f'{left} {op}= {right}'
-        return formatted
-
-    @visit.register
-    def _(self, node: ir.SingleExpr):
-        return self.visit(node.value)
-
-    @visit.register
-    def _(self, node: ir.Break):
-        return 'break'
-
-    @visit.register
-    def _(self, node: ir.Continue):
-        return 'continue'
-
-    @visit.register
-    def _(self, node: ir.Return):
-        value = self.visit(node.value)
-        return f'return {value}'
-
-    @visit.register
-    def _(self, node: ir.NoneRef):
-        return 'None'
-
-    @visit.register
-    def _(self, node: numpy.dtype):
-        return str(node)
-
-    @visit.register
-    def _(self, node: ir.ArrayType):
-        return str(node)
-
-    @visit.register
-    def _(self, node: ir.ArrayInitializer):
-        if isinstance(node.fill_value, ir.NoneRef):
-            name = 'empty'
-        elif node.fill_value == ir.Zero:
-            name = 'zeros'
-        elif node.fill_value == ir.One:
-            name = 'ones'
-        else:
-            msg = f'No name initializer will fill value "{self.visit(node.fill_value)}"'
-            raise CompilerError(msg)
-        if isinstance(node.shape, ir.TUPLE):
-            shape = self.parenthesized(node.shape)
-        else:
-            shape = self.visit(node.shape)
-        formatted = f'{name}({shape}, {node.dtype})'
-        return formatted
-
-    @visit.register
-    def _(self, node: ir.SingleDimRef):
-        expr = self.visit(node.base)
-        if node.dim == ir.Zero:
-            return f"len({expr})"
-        else:
-            dim = self.visit(node.dim)
-            if isinstance(node.base, ir.NameRef):
-                formatted = f"{expr}.shape[{dim}]"
-            else:
-                formatted = f'({expr}).shape[{dim}]'
-            return formatted
-
-    @visit.register
-    def _(self, node: ir.MaxReduction):
-        args = ", ".join(self.visit(arg) for arg in node.subexprs)
-        return f"max({args})"
-
-    @visit.register
-    def _(self, node: ir.MAX):
-        args = ", ".join(self.visit(arg) for arg in node.subexprs)
-        return f"max({args})"
-
-    @visit.register
-    def _(self, node: ir.MinReduction):
-        args = ", ".join(self.visit(arg) for arg in node.subexprs)
-        return f"min({args})"
-
-    @visit.register
-    def _(self, node: ir.MIN):
-        args = ", ".join(self.visit(arg) for arg in node.subexprs)
-        return f"min({args})"
-
-    @visit.register
-    def _(self, node: ir.Slice):
-        start = '' if isinstance(node.start, ir.NoneRef) else self.visit(node.start)
-        stop = '' if isinstance(node.stop, ir.NoneRef) else self.visit(node.stop)
-        step = '' if isinstance(node.step, ir.NoneRef) else self.visit(node.step)
-        return f'Slice({start}:{stop}:{step})'
-
-    @visit.register
-    def _(self, node: ir.SELECT):
-        (predicate, on_true, on_false) = (self.parenthesized(term)
-                                          if isinstance(term, (ir.SELECT, ir.TUPLE)) else self.visit(term)
-                                          for term in (node.predicate, node.on_true, node.on_false))
-        expr = f"{on_true} if {predicate} else {on_false}"
-        return expr
-
-    @visit.register
-    def _(self, node: ir.CAST):
-        type_info = node.target_type
-        output = f'{str(type_info)}({node.value})'
-        return output
-
-    @visit.register
-    def _(self, node: ir.CONSTANT):
-        return str(node.value)
-
-    @visit.register
-    def _(self, node: ir.StringConst):
-        return f"\"{node.value}\""
-
-    @visit.register
-    def _(self, node: ir.BinOp):
-        op = binop_ops[type(node)]
-        op_ordering = binop_ordering[op]
-        terms = []
-        for term in node.subexprs:
-            if isinstance(term, ir.BinOp):
-                term_op = binop_ops[type(term)]
-                if op_ordering < binop_ordering[term_op]:
-                    term = self.parenthesized(term)
-                else:
-                    term = self.visit(term)
-            elif isinstance(term, ir.UnaryOp):
-                if op == "**":
-                    term = self.parenthesized(term)
-            elif isinstance(term, (ir.BoolOp, ir.CompareOp, ir.SELECT, ir.TUPLE)):
-                term = self.parenthesized(term)
-            else:
-                term = self.visit(term)
-            terms.append(term)
-        left, right = terms
-        expr = f"{left} {op} {right}"
-        return expr
-
-    @visit.register
-    def _(self, node: ir.CompareOp):
-        terms = []
-        op = compare_ops[type(node)]
-        for term in node.subexprs:
-            if isinstance(term, (ir.BoolOp, ir.CompareOp, ir.SELECT, ir.TUPLE)):
-                term = self.parenthesized(term)
-            else:
-                term = self.visit(term)
-            terms.append(term)
-        left, right = terms
-        expr = f"{left} {op} {right}"
-        return expr
-
-    @visit.register
-    def _(self, node: ir.AND):
-        # Todo: move rebalancing to external pass
-        expr = " and ".join(self.visit(operand) for operand in node.subexprs)
-        return expr
-
-    @visit.register
-    def _(self, node: ir.OR):
-        expr = " or ".join(self.visit(operand) for operand in node.subexprs)
-        return expr
-
-    @visit.register
-    def _(self, node: ir.NOT):
-        formatted = self.visit(node.operand)
-        if isinstance(node.operand, (ir.AND, ir.OR, ir.SELECT)):
-            formatted = self.parenthesized(formatted)
-        expr = f"not {formatted}"
-        return expr
-
-    @visit.register
-    def _(self, node: ir.TRUTH):
-        formatted = self.visit(node.operand)
-        if not isinstance(node, ir.CONSTANT):
-            # We don't distinguish between bools and predicates here in
-            # truth testing, since Python doesn't have any notion of
-            # predicate types.
-            formatted = f"bool({formatted})"
-        return formatted
-
-    @visit.register
-    def _(self, node: ir.NameRef):
-        expr = node.name
-        return expr
-
-    @visit.register
-    def _(self, node: ir.Call):
-        func_name = node.func
-        args = ", ".join(self.visit(arg) for arg in node.args.subexprs)
-        func = f"{func_name}({args})"
-        return func
-
-    @visit.register
-    def _(self, node: ir.Reversed):
-        return f"reversed({self.visit(node.iterable)})"
-
-    @visit.register
-    def _(self, node: ir.Subscript):
-        if isinstance(node.index, ir.Subscript):
-            index = ", ".join(self.visit(e) for e in node.index.subexprs)
-        else:
-            index = self.visit(node.index)
-        base = self.visit(node.value)
-        s = f"{base}[{index}]"
-        return s
-
-    @visit.register
-    def _(self, node: ir.AffineSeq):
-        # Initial input source may not be easily disernible,
-        # print as range
-        start = self.visit(node.start)
-        stop = self.visit(node.stop) if node.stop is not None else f"None"
-        step = self.visit(node.step)
-        return f"range({start}, {stop}, {step})"
-
-    @visit.register
-    def _(self, node: ir.TUPLE):
-        elements = []
-        for e in node.subexprs:
-            # parenthesize nested tuples, leave everything else
-            if isinstance(e, ir.TUPLE):
-                expr = self.parenthesized(e)
-            else:
-                expr = self.visit(e)
-            elements.append(expr)
-        s = ", ".join(e for e in elements)
-        return s
-
-    @visit.register
-    def _(self, node: ir.UnaryOp):
-        op = unary_ops[type(node)]
-        operand, = node.subexprs
-        if isinstance(operand, ir.BinOp):
-            if not isinstance(operand, ir.POW):
-                operand = self.parenthesized(operand)
-            else:
-                operand = self.visit(operand)
-        elif isinstance(operand, (ir.UnaryOp, ir.BoolOp, ir.SELECT)):
-            # if we have an unfolded double unary expression such as --,
-            # '--expr' would be correct but it's visually jarring. Adding
-            # unnecessary parentheses makes it '-(-expr)'.
-            operand = self.parenthesized(operand)
-        else:
-            operand = self.visit(operand)
-        expr = f"{op}({operand})"
-        return expr
-
-    @visit.register
-    def _(self, node: ir.Enumerate):
-        iterable = self.visit(node.iterable)
-        if node.start == ir.Zero:
-            expr = f"enumerate({iterable})"
-        else:
-            start = self.visit(node.start)
-            expr = f"enumerate({iterable}, {start})"
-        return expr
-
-    @visit.register
-    def _(self, node: ir.Zip):
-        exprs = []
-        for elem in node.elements:
-            formatted = self.visit(elem)
-            if isinstance(elem, ir.TUPLE):
-                # This nesting is unsupported elsewhere, but this
-                # would be a confusing place to throw an error.
-                formatted = self.parenthesized(formatted)
-            exprs.append(formatted)
-        # handle case of enumerate
-        expr = ", ".join(e for e in exprs)
-        expr = f"zip({expr})"
-        return expr
-
-
 def format_error(msg: str, pos: ir.Position,
                  named: typing.Optional[typing.Dict] = None,
                  exprs: typing.Optional[typing.Iterable[ir.ValueRef]] = None):
     pf = PrettyFormatter()
 
-    formatted_names = {pf(k): pf(v) for (k,v) in named.items()} if named is not None else ()
+    formatted_names = {pf(k): pf(v) for (k, v) in named.items()} if named is not None else ()
     formatted_exprs = {pf(e) for e in exprs} if exprs is not None else ()
     combined = "\n".join((str(pos), msg, str(formatted_names), str(formatted_exprs)))
     return combined
+
+
+def format_docstring(ds: str, indent='    '):
+    split_dst = [f'{indent}{line}' for line in ds.split('\n')]
+    joined = '\n'.join(split_dst)
+    reconstructed = f'{indent}"""\n{joined}\n{indent}"""'
+    return reconstructed
 
 
 class PrettyPrinter:
@@ -427,20 +51,38 @@ class PrettyPrinter:
         self._single_indent = single_indent
         self.print_annotations = print_annotations
         self.format = PrettyFormatter()
-        self.symbols = None
         self.allow_missing_type = allow_missing_type
-
-    def __call__(self, tree, symbols):
-        assert self.indent == ""
-        with(self.symbols_loaded(symbols)):
-            self.visit(tree)
+        self.func = None
+        self.graph = None
+        self.exit_labels = None
+        self.visited = None
+        self.by_label = None
 
     @contextmanager
-    def symbols_loaded(self, symbols):
-        assert self.symbols is None
-        self.symbols = symbols
+    def function_scope(self, func: FunctionContext):
+        assert self.graph is None
+        self.func = func
+        self.graph = get_reduced_graph(func)
+        self.visited = set()
+        self.exit_labels = set()
+        self.by_label = {block.label: block for block in walk_graph(self.graph)}
         yield
-        self.symbols = None
+        self.func = None
+        self.graph = None
+        self.exit_labels = None
+        self.visited = None
+        self.by_label = None
+
+    def __call__(self, func_ctx: FunctionContext):
+        assert self.indent == ""
+        with self.function_scope(func_ctx):
+            self.visit(func_ctx.entry_point)
+
+    def iter_successors(self, block: BasicBlock):
+        if not block.terminated:
+            for s in self.graph.successors(block):
+                if s.label not in self.exit_labels and s not in self.visited:
+                    yield s
 
     @contextmanager
     def indented(self):
@@ -456,6 +98,57 @@ class PrettyPrinter:
     def visit(self, node):
         msg = f"No method to pretty print node {node}."
         raise NotImplementedError(msg)
+
+    @visit.register
+    def _(self, node: BasicBlock):
+        if node in self.visited:
+            return
+        self.visited.add(node)
+        if node.is_function_entry:
+            self.visit(node.first)
+            body, = self.iter_successors(node)
+            with self.indented():
+                self.visit(body)
+        elif node.is_loop_block:
+            loop_header = node.first
+            self.visit(loop_header)
+            exit_block = find_loop_exit(self.func, node)
+            self.exit_labels.add(exit_block)
+            with self.indented():
+                for possible_body in self.iter_successors(node):
+                    if possible_body.depth == node.depth + 1:
+                        self.visit(possible_body)
+                        break
+            if exit_block is not None:
+                # exit_block = self.by_label[loop_header.exit_block]
+                self.visit(exit_block)
+        elif node.is_branch_block:
+            branch_header = node.first
+            if_branch = self.by_label[branch_header.if_branch]
+            else_branch = self.by_label[branch_header.else_branch]
+            test = self.format(branch_header.test)
+            exit_block = find_branch_exit(self.func, node)
+            if exit_block is not None:
+                self.exit_labels.add(exit_block)
+            self.print_line(f'if {test}:')
+            with self.indented():
+                # if we have a blank block at the beginning but it doesn't terminate the branch,
+                # then continue visiting. still not great..
+                if if_branch:
+                    self.visit(if_branch)
+                else:
+                    self.print_line('pass')
+            if else_branch:
+                self.print_line('else:')
+                with self.indented():
+                    self.visit(else_branch)
+            if exit_block is not None:
+                self.visit(exit_block)
+        else:
+            for stmt in node.statements:
+                self.visit(stmt)
+            for s in self.iter_successors(node):
+                self.visit(s)
 
     @visit.register
     def _(self, node: ir.ArrayFill):
@@ -484,8 +177,11 @@ class PrettyPrinter:
         args = ", ".join(self.format(arg) for arg in node.args)
         header = f"def {name}({args}):"
         self.print_line(header)
-        with self.indented():
-            self.visit(node.body)
+        if node.docstring is not None:
+            docstring = format_docstring(node.docstring)
+            # docstring formatting is annoying here. We have to indent each line in the string,
+            # which requires that we split
+            self.print_line(docstring)
 
     @visit.register
     def _(self, node: list):
@@ -498,38 +194,18 @@ class PrettyPrinter:
         iterable = self.format(node.iterable)
         stmt = f"for {target} in {iterable}:"
         self.print_line(stmt)
-        with self.indented():
-            if node.body:
-                self.visit(node.body)
-            else:
-                # If all loop body statements are
-                # dead/unreachable, append pass
-                self.print_line("pass")
 
     @visit.register
     def _(self, node: ir.WhileLoop):
         test = self.format(node.test)
         stmt = f"while {test}:"
         self.print_line(stmt)
-        with self.indented():
-            self.visit(node.body)
 
     @visit.register
     def _(self, node: ir.IfElse):
         test = self.format(node.test)
         stmt = f"if {test}:"
         self.print_line(stmt)
-        with self.indented():
-            if node.if_branch:
-                self.visit(node.if_branch)
-            else:
-                self.print_line("pass")
-        self.print_line("else:")
-        with self.indented():
-            if node.else_branch:
-                self.visit(node.else_branch)
-            else:
-                self.print_line("pass")
 
     @visit.register
     def _(self, node: ir.Assign):
@@ -537,7 +213,8 @@ class PrettyPrinter:
         formatted_target = self.format(node.target)
         formatted_value = self.format(node.value)
         if self.print_annotations and isinstance(target, ir.NameRef):
-            type_ = self.symbols.check_type(target, allow_none=self.allow_missing_type)
+            # type_ = self.symbols.check_type(target, allow_none=self.allow_missing_type)
+            type_ = None
             if type_ is not None:
                 # This is None if no typed symbol is registered
                 # This will be an error later.
@@ -596,7 +273,8 @@ class DebugPrinter:
         else:
             formatted = self.format(node)
         if node.docstring is not None:
-            formatted = f'{formatted}\n{node.docstring}'
+            docstring = f'"""\n{node.docstring}\n"""'
+            formatted = f'{formatted}\n{docstring}'
 
         if len(formatted) > self.max_len:
             formatted = f'{formatted[:self.max_len]}...'

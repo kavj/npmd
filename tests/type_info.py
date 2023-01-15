@@ -165,7 +165,7 @@ type_detail = {"test_forifcont.py":
                },
 
                'test_unpacking.py': {
-                   'test_unpack_0': {
+                   'test_unpack_basic': {
                        'a': array_1d,
                        'b': array_1d
                    }
@@ -177,6 +177,33 @@ type_detail = {"test_forifcont.py":
                    },
                    'test_array_init': {
                        'n': np.dtype('int32')
+                   }
+               },
+
+               'test_double_terminal.py': {
+                   'double_continue': {
+                       'a': array_1d,
+                       'b': array_1d,
+                       'u': np.dtype('float64'),
+                       'v': np.dtype('float64')
+                   },
+                   'triple_continue': {
+                       'a': array_1d,
+                       'b': array_1d,
+                       'u': np.dtype('float64'),
+                       'v': np.dtype('float64')
+                   },
+                   'incompatible_continue_break_mix': {
+                       'a': array_1d,
+                       'b': array_1d,
+                       'u': np.dtype('float64'),
+                       'v': np.dtype('float64')
+                   },
+                   'compatible_single_break_double_continue': {
+                       'a': array_1d,
+                       'b': array_1d,
+                       'u': np.dtype('float64'),
+                       'v': np.dtype('float64')
                    }
                }
 

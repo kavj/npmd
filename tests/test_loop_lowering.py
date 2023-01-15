@@ -5,19 +5,17 @@ import pytest
 
 import lib.ir as ir
 
-from lib.analysis import find_element_count
-from lib.ast_conversion import build_module_ir_and_symbols
+from lib.expression_utils import find_element_count, unpack_loop_iter
+from lib.cfg_builder import build_module_ir
 from lib.canonicalize import lower_loops, rename_clobbered_loop_parameters
 from lib.errors import CompilerError
-from lib.traversal import get_statement_lists
 from lib.type_checks import infer_types
-from lib.utils import unpack_iterated
 from tree_tests import test_indexing
 from tests.type_info import type_detail
 
 src = inspect.getfile(test_indexing)
 types = type_detail['test_indexing.py']
-mod, symbol_tables = build_module_ir_and_symbols(src, types)
+mod, symbol_tables = build_module_ir(src, types)
 
 
 def get_single_for_loop(func: ir.Function):
@@ -26,7 +24,7 @@ def get_single_for_loop(func: ir.Function):
     infer_types(func, symbols)
     lower_loops(func, symbols)
     # There should be a single loop, indexed with variable i
-    loops = [stmt for stmt in itertools.chain(*get_statement_lists(func)) if isinstance(stmt, (ir.ForLoop, ir.WhileLoop))]
+    loops = [stmt for stmt in itertools.chain(*walk_graph(func)) if isinstance(stmt, (ir.ForLoop, ir.WhileLoop))]
     assert len(loops) == 1
     loop = loops.pop()
     assert isinstance(loop, ir.ForLoop)
@@ -66,7 +64,7 @@ def test_clobbered_index():
 def test_no_index_strided_array():
     for func in itertools.islice(mod.functions, 3, 5):
         # find initial loop strides
-        headers = [stmt for stmt in itertools.chain(*get_statement_lists(func)) if isinstance(stmt, (ir.ForLoop, ir.WhileLoop))]
+        headers = [stmt for stmt in itertools.chain(*walk_graph(func)) if isinstance(stmt, (ir.ForLoop, ir.WhileLoop))]
         assert len(headers) == 1
         header = headers.pop()
         assert isinstance(header.iterable, ir.Subscript) and isinstance(header.iterable.index, ir.Slice)
@@ -99,12 +97,12 @@ def test_different_step_sizes():
     with pytest.raises(AssertionError):
         func = mod.functions[7]
         # get initial unpack
-        loops = [stmt for stmt in itertools.chain(*get_statement_lists(func)) if isinstance(stmt, (ir.ForLoop, ir.WhileLoop))]
+        loops = [stmt for stmt in itertools.chain(*walk_graph(func)) if isinstance(stmt, (ir.ForLoop, ir.WhileLoop))]
         assert len(loops) == 1
         loop = loops.pop()
         targets = []
         values = []
-        for target, value in unpack_iterated(loop):
+        for target, value in unpack_loop_iter(loop):
             targets.append(target)
             values.append(value)
         loop = get_single_for_loop(func)

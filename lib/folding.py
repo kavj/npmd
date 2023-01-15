@@ -8,7 +8,6 @@ import numpy as np
 import lib.ir as ir
 
 from lib.errors import CompilerError
-from lib.traversal import walk
 from lib.type_checks import is_integer, TypeHelper
 
 
@@ -59,13 +58,18 @@ def make_unary_negate(expr: ir.ValueRef):
     return ir.USUB(expr)
 
 
-def add_cast(expr: ir.ValueRef, cast_type: Union[ir.ArrayType, np.dtype]):
-    repl = expr
-    while isinstance(repl, ir.CAST):
-        repl = repl.value
-    if expr == repl:
-        return expr
-    return ir.CAST(expr, cast_type)
+def cast_if_type_differs(node: ir.ValueRef, repl: ir.ValueRef, typer: TypeHelper):
+    if isinstance(repl, ir.CAST):
+        while isinstance(repl, ir.CAST):
+            repl = repl.value
+    t_original = typer(node)
+    t_repl = typer(repl)
+    if t_original != t_repl:
+        if isinstance(repl, ir.CONSTANT):
+            repl = ir.wrap_constant(repl.value, t_original, repl.is_predicate)
+        else:
+            repl = ir.CAST(repl, t_original)
+    return repl
 
 
 def concatenate(args: Union[Iterable[ir.Expression], Iterator]):
@@ -84,20 +88,6 @@ def concatenate(args: Union[Iterable[ir.Expression], Iterator]):
         msg = f'Concatenate requires at least 2 valid items, received "{terms}"'
         raise ValueError(msg)
     return ir.TUPLE(*terms)
-
-
-def cast_if_type_differs(node: ir.ValueRef, repl: ir.ValueRef, typer: TypeHelper):
-    if isinstance(repl, ir.CAST):
-        while isinstance(repl, ir.CAST):
-            repl = repl.value
-    t_original = typer(node)
-    t_repl = typer(repl)
-    if t_original != t_repl:
-        if isinstance(repl, ir.CONSTANT):
-            repl = ir.wrap_constant(repl.value, t_original, repl.is_predicate)
-        else:
-            repl = ir.CAST(repl, t_original)
-    return repl
 
 
 @singledispatch
@@ -433,18 +423,3 @@ def simplify_max_reduction(node: ir.MaxReduction, typer: TypeHelper):
     if len(constants) > 0:
         varying.append(ir.wrap_constant(np.max(varying)))
     return node.reconstruct(*varying)
-
-
-def fold_casts(expr: ir.ValueRef, typer: TypeHelper):
-    if not isinstance(expr, ir.CAST) and not any(isinstance(subexpr, ir.CAST) for subexpr in walk(expr)):
-        return expr
-    updated = {}
-    for subexpr in walk(expr):
-        repl = subexpr
-        if any(s in updated for s in repl.subexprs):
-            repl = repl.reconstruct(*(updated.get(s, s) for s in repl.subexprs))
-        if isinstance(repl, ir.CAST):
-            if typer(repl.value) == repl.target_type:
-                repl = repl.value
-        updated[subexpr] = repl
-    return updated[expr]

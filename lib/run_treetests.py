@@ -27,8 +27,10 @@ tests = ('test_forifcont.py',
          'test_fold_unreachable.py',
          'test_normalize_return_flow.py',
          'test_unpack_with_subscripts.py',
+         'test_unpacking.py',
          'test_nested_if.py',
-         'test_array_initializers.py')
+         'test_array_initializers.py',
+         'test_double_terminal.py')
 
 array_2d = ir.ArrayType(ndims=2, dtype=ir.float64)
 array_1d = ir.ArrayType(ndims=1, dtype=ir.float64)
@@ -46,7 +48,6 @@ failed_tests = []
 
 for i, t in enumerate(tests):
     print(t)
-
     basepath = pathlib.Path(__file__).resolve().parent.parent.joinpath('tree_tests')
     inpath = basepath.joinpath(t)
     basename, _ = os.path.splitext(t)

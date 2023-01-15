@@ -1,5 +1,6 @@
 import ast
 import itertools
+import operator
 import sys
 import typing
 import symtable
@@ -12,12 +13,15 @@ from pathlib import Path
 from typing import Dict, Tuple
 
 import lib.ir as ir
+import networkx as nx
 
+from lib.blocks import BasicBlock, FunctionContext
 from lib.callspec import early_call_specialize
 from lib.errors import CompilerError
-from lib.pretty_printing import PrettyFormatter
+from lib.formatting import PrettyFormatter
+from lib.graph_walkers import walk_graph
 from lib.symbol_table import symbol, SymbolTable
-from lib.utils import unpack_iterated
+from lib.expression_walkers import walk_expr
 
 
 binary_op_strs = {ast.Add: "+",
@@ -220,45 +224,151 @@ def resolve_call_target(node: ast.Call, module_imports: Dict[str, str], name_imp
     return qualname
 
 
-class TreeBuilder(ast.NodeVisitor):
+def find_graph_entry_points(graph: nx.DiGraph):
+    for n in walk_graph(graph):
+        if n.is_function_entry:
+            return n
+
+
+class BuilderContext:
+    """
+    Single use context holder
+    """
+    def __init__(self, symbols: SymbolTable):
+        self.symbols = symbols
+        self.graph = nx.DiGraph()
+        self.counter = itertools.count()
+        self.loops = []
+        self.entry_block = None
+        self.current_block = None
+        self.depth = 0
+
+    def finalize(self):
+        assert not self.loops
+        assert self.depth == 0
+        assert operator.truth(self.graph)
+        entry_block = find_graph_entry_points(self.graph)
+        assert entry_block is not None
+        graph = self.graph
+        symbols = self.symbols
+        counter = self.counter
+        self.graph = None
+        self.symbols = None
+        self.counter = None
+        return FunctionContext(graph, entry_block, symbols, counter)
+
+    @contextmanager
+    def loop_region(self):
+        self.enter_loop()
+        yield
+        self.exit_loop()
+
+    @property
+    def name(self):
+        return self.symbols.namespace
+
+    @property
+    def next_label(self):
+        return next(self.counter)
+
+    @property
+    def terminated(self):
+        return self.current_block.terminated
+
+    @property
+    def unterminated(self):
+        return self.current_block.unterminated
+
+    def create_block(self):
+        label = self.next_label
+        block = BasicBlock([], label, self.depth)
+        return block
+
+    def append_statement(self, stmt: ir.Statement):
+        assert isinstance(stmt, (ir.StmtBase, ir.Function))
+        self.current_block.append_statement(stmt)
+
+    def add_edge(self, u: BasicBlock, v: BasicBlock):
+        self.graph.add_edge(u, v)
+
+    def add_block(self, parent: typing.Optional[BasicBlock] = None):
+        label = next(self.counter)
+        block = BasicBlock([], label, self.depth)
+        if parent is not None:
+            assert isinstance(parent, BasicBlock)
+            assert isinstance(block, BasicBlock)
+            self.graph.add_edge(parent, block)
+        else:
+            self.graph.add_node(block)
+        self.current_block = block
+        return block
+
+    def append_block(self):
+        label = next(self.counter)
+        block = BasicBlock([], label, self.depth)
+        if self.current_block is not None and self.current_block.unterminated:
+            self.add_edge(self.current_block, block)
+        self.current_block = block
+        return block
+
+    def enter_loop(self):
+        header = self.current_block
+        self.depth += 1
+        self.loops.append((header, []))
+        body = self.append_block()
+        self.current_block = body
+        return body
+
+    def exit_loop(self):
+        assert self.depth > 0
+        if self.current_block.unterminated:
+            self.add_back_edge()
+        header, break_blocks = self.loops.pop()
+        self.depth -= 1
+        exit_block = BasicBlock([], self.next_label, self.depth)
+        self.add_edge(header, exit_block)
+        for b in break_blocks:
+            self.add_edge(b, exit_block)
+        self.current_block = exit_block
+
+    def add_back_edge(self):
+        self.add_edge(self.current_block, self.loops[-1][0])
+
+    def add_break(self):
+        self.loops[-1][1].append(self.current_block)
+
+    def predecessors(self, block: typing.Optional[BasicBlock] = None):
+        """
+        debugging helper routine
+        :param block:
+        :return:
+        """
+        if block is None:
+            block = self.current_block
+        if block is None:
+            return []
+        return list(self.graph.predecessors(block))
+
+
+class CFGBuilder(ast.NodeVisitor):
 
     def __init__(self, name_imports: Dict[str, str], module_imports: Dict[str, str]):
-        self.symbols = None
-        self.body = None
-        self.entry = None
-        self.enclosing_loop = None
         self.name_imports = name_imports
         self.module_imports = module_imports
         self.formatter = PrettyFormatter()
+        self.builder_ctx = None
 
     @contextmanager
-    def function_context(self, symbols):
-        if self.symbols is not None:
-            msg = f"Unexpected nested function context: {symbols.namespace}"
-            raise RuntimeError(msg)
-        self.symbols = symbols
+    def function_scope(self, symbols):
+        assert self.builder_ctx is None
+        self.builder_ctx = BuilderContext(symbols)
         yield
-        self.symbols = None
+        self.builder_ctx = None
 
-    @contextmanager
-    def flow_region(self):
-        stashed = self.body
-        self.body = []
-        yield
-        self.body = stashed
-
-    @contextmanager
-    def loop_region(self, header):
-        outer = self.enclosing_loop
-        self.enclosing_loop = header
-        with self.flow_region():
-            yield
-            self.enclosing_loop = outer
-
-    def __call__(self, entry: ast.FunctionDef, symbols: SymbolTable):
-        with self.function_context(symbols):
-            func = self.visit(entry)
-        return func
+    def __call__(self, node: ast.FunctionDef, symbols: SymbolTable):
+        with self.function_scope(symbols):
+            self.visit_FunctionDef(node)
+            return self.builder_ctx.finalize()
 
     def visit_Attribute(self, node: ast.Attribute):
         v = self.visit(node.value)
@@ -296,9 +406,9 @@ class TreeBuilder(ast.NodeVisitor):
         # single expression statement
         expr = self.visit(node.value)
         pos = extract_positional_info(node)
-        # don't append single value references as statements
-        if not isinstance(expr, (ir.CONSTANT, ir.NameRef, ir.Subscript, ir.StringConst)):
-            self.body.append(ir.SingleExpr(expr, pos))
+        # don't append single value references with no side effects as statements
+        if any(isinstance(e, ir.Call) for e in walk_expr(expr)):
+            self.builder_ctx.append_statement(ir.SingleExpr(expr, pos))
 
     def visit_UnaryOp(self, node: ast.UnaryOp) -> ir.ValueRef:
         if node.op == "+":
@@ -403,7 +513,7 @@ class TreeBuilder(ast.NodeVisitor):
         pos = extract_positional_info(node)
         expr = cls(target, operand)
         assign = ir.InPlaceOp(target, expr, pos)
-        self.body.append(assign)
+        self.builder_ctx.append_statement(assign)
 
     def visit_Assign(self, node: ast.Assign):
         # first convert locally to internal IR
@@ -414,7 +524,7 @@ class TreeBuilder(ast.NodeVisitor):
             target = self.visit(target)
             for subtarget, subvalue in unpack_assignment(target, value, pos):
                 subassign = ir.Assign(subtarget, subvalue, pos)
-                self.body.append(subassign)
+                self.builder_ctx.append_statement(subassign)
 
     def visit_AnnAssign(self, node: ast.AnnAssign):
         target = self.visit(node.target)
@@ -441,7 +551,7 @@ class TreeBuilder(ast.NodeVisitor):
             # CPython will turn the syntax "var: annotation" into an AnnAssign node
             # with node.value = None. If executed, this won't bind or update the value of var.
             assign = ir.Assign(target, value, pos)
-            self.body.append(assign)
+            self.builder_ctx.append_statement(assign)
 
     def visit_Pass(self, node: ast.Pass):
         # If required and missing, AST construction
@@ -450,100 +560,115 @@ class TreeBuilder(ast.NodeVisitor):
 
     def visit_If(self, node: ast.If):
         pos = extract_positional_info(node)
-        compare = self.visit(node.test)
-        with self.flow_region():
-            for stmt in node.body:
-                self.visit(stmt)
-            on_true = self.body
-        with self.flow_region():
-            for stmt in node.orelse:
-                self.visit(stmt)
-            on_false = self.body
-        ifstat = ir.IfElse(compare, on_true, on_false, pos)
-        self.body.append(ifstat)
+        test = self.visit(node.test)
+        # make incoming edge
+        branch_block = self.builder_ctx.current_block
+        if branch_block:
+            # already contains statements
+            branch_block = self.builder_ctx.append_block()
+        if_block = self.builder_ctx.append_block()
+        for stmt in node.body:
+            self.visit(stmt)
+            if self.builder_ctx.current_block.terminated:
+                # don't follow break, continue, or return in this statement list
+                break
+        last_if_block = self.builder_ctx.current_block
+        else_block = self.builder_ctx.add_block(parent=branch_block)
+        for stmt in node.orelse:
+            self.visit(stmt)
+            if self.builder_ctx.current_block.terminated:
+                # don't follow break, continue, or return in this statement list
+                break
+        exit_block = self.builder_ctx.add_block()
+
+        # Now make a branch statement
+        branch_stmt = ir.IfElse(test,
+                                if_block.label,
+                                else_block.label,
+                                pos)
+        branch_block.append_statement(branch_stmt)
+        self.builder_ctx.current_block = exit_block
 
     def visit_For(self, node: ast.For):
         if node.orelse:
             raise CompilerError('or else clause not supported for for statements')
+        if self.builder_ctx.current_block:
+            self.builder_ctx.append_block()
+        header_block = self.builder_ctx.current_block
         iter_node = self.visit(node.iter)
         target_node = self.visit(node.target)
         assert iter_node is not None
         assert target_node is not None
         pos = extract_positional_info(node)
-        with self.loop_region(node):
+        with self.builder_ctx.loop_region():
             for stmt in node.body:
+                if isinstance(stmt, ast.Continue):
+                    # if we see a continue in this statement list,
+                    # we can terminate the loop body here without adding it
+                    break
                 self.visit(stmt)
-            loop = ir.ForLoop(target_node, iter_node, self.body, pos)
-        targets = set()
-        iterables = set()
-        # Do initial checks for weird issues that may arise here.
-        # We don't lower it fully at this point, because it injects
-        # additional arithmetic and not all variable types may be fully known
-        # at this point.
-        try:
-            for target, iterable in unpack_iterated(loop):
-                # check for some things that aren't currently supported
-                if isinstance(target, ir.Subscript):
-                    msg = f'Setting a subscript target in a for loop iterator is currently ' \
-                          f'unsupported: line{pos.line_begin}.'
-                    raise CompilerError(msg)
-                targets.add(target)
-                iterables.add(iterable)
-        except ValueError:
-            # Generator will throw an error on bad unpacking
-            msg = f'Cannot safely unpack for loop expression, line: {pos.line_begin}'
-            raise CompilerError(msg)
-        conflicts = targets.intersection(iterables)
-        if conflicts:
-            conflict_names = ", ".join(c for c in conflicts)
-            msg = f'{conflict_names} appear in both the target an iterable sequences of a for loop, ' \
-                  f'line {pos.line_begin}. This is not supported.'
-            raise CompilerError(msg)
-        self.body.append(loop)
+                if self.builder_ctx.terminated:
+                    # don't follow break, continue, or return in this statement list
+                    break
+        header = ir.ForLoop(target_node, iter_node, pos)
+        header_block.append_statement(header)
 
     def visit_While(self, node: ast.While):
         if node.orelse:
             raise CompilerError('or else clause not supported for for statements')
         test = self.visit(node.test)
         pos = extract_positional_info(node)
-        with self.loop_region(node):
+        if self.builder_ctx.current_block:
+            self.builder_ctx.append_block()
+        header_block = self.builder_ctx.current_block
+        with self.builder_ctx.loop_region():
             for stmt in node.body:
                 self.visit(stmt)
-            loop = ir.WhileLoop(test, self.body, pos)
-        self.body.append(loop)
+                if self.builder_ctx.terminated:
+                    # don't follow break, continue, or return in this statement list
+                    break
+        header = ir.WhileLoop(test, pos)
+        header_block.append_statement(header)
 
     def visit_Break(self, node: ast.Break):
-        if self.enclosing_loop is None:
-            raise CompilerError('Break encountered outside of loop.')
         pos = extract_positional_info(node)
         stmt = ir.Break(pos)
-        self.body.append(stmt)
+        self.builder_ctx.append_statement(stmt)
+        self.builder_ctx.add_break()
 
     def visit_Continue(self, node: ast.Continue):
-        if self.enclosing_loop is None:
-            raise CompilerError('Continue encountered outside of loop.')
         pos = extract_positional_info(node)
         stmt = ir.Continue(pos)
-        self.body.append(stmt)
+        self.builder_ctx.append_statement(stmt)
+        self.builder_ctx.add_back_edge()
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
         # can't check just self.blocks, since we automatically 
         # instantiate entry and exit
         name = node.name
         # Todo: warn about unsupported argument features
-        params = [ir.NameRef(arg.arg) for arg in node.args.args]
+        params = tuple(ir.NameRef(arg.arg) for arg in node.args.args)
+        # docstrings show up as a SingleExpr node, which must be explicitly removed later.
         docstring = ast.get_docstring(node)
-        with self.flow_region():
-            for stmt in node.body:
-                self.visit(stmt)
-            func = ir.Function(name, params, self.body, docstring)
-        return func
+        header = ir.Function(name, params, docstring)
+        self.builder_ctx.add_block()
+        self.builder_ctx.append_statement(header)
+        self.builder_ctx.append_block()
+        for stmt in node.body:
+            self.visit(stmt)
+            if self.builder_ctx.terminated:
+                # don't follow break, continue, or return in this statement list
+                break
+        if self.builder_ctx.unterminated:
+            pos = ir.Position(-1, -1, 1, 40)
+            stmt = ir.Return(ir.NoneRef(), pos)
+            self.builder_ctx.append_statement(stmt)
 
     def visit_Return(self, node: ast.Return):
         pos = extract_positional_info(node)
         value = self.visit(node.value) if node.value is not None else ir.NoneRef()
         stmt = ir.Return(value, pos)
-        self.body.append(stmt)
+        self.builder_ctx.append_statement(stmt)
 
     def generic_visit(self, node):
         raise CompilerError(f'{type(node)} is unsupported')
@@ -558,7 +683,7 @@ def map_functions_by_name(node: ast.Module):
     return by_name
 
 
-def populate_func_symbols(func_table, types, allow_inference=True, ignore_unbound=False):
+def build_function_symbol_table(func_table: symtable.SymbolTable, types, allow_inference=True, ignore_unbound=False):
     """
     Turns python symbol table into a typed internal representation.
 
@@ -652,11 +777,11 @@ def populate_symbol_tables(module_name, src, types):
         func_names.add(name)
         func_types = types.get(name, dict())
         # declare a header file to avoid worrying about declaration order
-        func_tables[name] = populate_func_symbols(func_table, func_types, allow_inference=True, ignore_unbound=False)
+        func_tables[name] = build_function_symbol_table(func_table, func_types, allow_inference=True, ignore_unbound=False)
     return func_tables
 
 
-def build_module_ir_and_symbols(src_path, types):
+def build_module_ir(src_path, types):
     path = Path(src_path)
     module_name = path.name
     src_text = path.read_text()
@@ -665,11 +790,11 @@ def build_module_ir_and_symbols(src_path, types):
     mod_ast = ast.fix_missing_locations(mod_ast)
     module_imports, name_imports = ImportHandler.collect_imports(mod_ast, module_name)
     funcs_by_name = map_functions_by_name(mod_ast)
-    build_ir = TreeBuilder(module_imports, name_imports)
+    builder = CFGBuilder(module_imports, name_imports)
     funcs = []
     # Todo: register imports once interface stabilizes
-    for func_name, ast_entry_point in funcs_by_name.items():
+    for func_name, func_ast in funcs_by_name.items():
         symbol_handler = func_symbol_tables.get(func_name)
-        func_ir = build_ir(ast_entry_point, symbol_handler)
-        funcs.append(func_ir)
-    return ir.Module(module_name, funcs, module_imports, name_imports), func_symbol_tables
+        func_ctx = builder(func_ast, symbol_handler)
+        funcs.append(func_ctx)
+    return ir.Module(module_name, funcs, module_imports, name_imports)

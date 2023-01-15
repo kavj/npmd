@@ -3,60 +3,58 @@ import operator
 
 import networkx as nx
 
-from collections import defaultdict
-from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Union
 
 import lib.ir as ir
 
-from lib.errors import CompilerError
-from lib.pretty_printing import PrettyFormatter
-from lib.traversal import get_statement_lists
-from lib.utils import is_entry_point
-
+from lib.formatting import PrettyFormatter
+from lib.symbol_table import SymbolTable
 
 formatter = PrettyFormatter()
 
 
-def get_entry_point(graph: nx.DiGraph):
-    for node, degree in graph.in_degree():
-        if degree == 0 and isinstance(node.first, ir.Function):
-            return node
-
-
-def matches_while_true(node: ir.Statement):
-    if isinstance(node, ir.WhileLoop):
-        if isinstance(node.test, ir.CONSTANT) and operator.truth(node.test):
-            return True
-    return False
-
-
-@dataclass(frozen=True)
+@dataclass
 class BasicBlock:
     statements: Union[List[ir.Statement], List[ir.Function]]
-    start: int
-    stop: int
     label: int  # useful in case going by statement is too verbose
     depth: int
 
-    def __post_init__(self):
-        assert isinstance(self.statements, list)
-        assert 0 <= self.start <= self.stop <= len(self.statements)
+    def replace_statement(self, stmt: ir.Statement, index: int):
+        assert 0 <= index < len(self.statements)
+        self.statements[index] = stmt
+
+    def append_statement(self, stmt: ir.Statement):
+        if self.unterminated:
+            # we don't want to add statements past any terminal statement, since this may
+            self.statements.append(stmt)
+
+    def pop_statement(self):
+        return self.statements.pop()
+
+    def replace_statements(self, stmts: List[ir.Statement]):
+        if self.statements:
+            if self.is_entry_point:
+                assert len(stmts) == 1
+                assert isinstance(stmts[0], type(self.first))
+            # maintain same object
+            self.statements.clear()
+            self.statements.extend(stmts)
 
     @property
     def first(self) -> Union[Optional[ir.Statement], Optional[ir.Function]]:
-        if self.start != self.stop:
-            return self.statements[self.start]
+        if self.statements:
+            return self.statements[0]
 
     @property
     def last(self) -> Union[Optional[ir.Statement], Optional[ir.Function]]:
-        if self.start != self.stop:
-            return self.statements[self.stop-1]
+        if self.statements:
+            return self.statements[-1]
 
     @property
-    def is_entry_block(self):
+    def is_function_entry(self):
         return isinstance(self.first, ir.Function)
 
     @property
@@ -68,41 +66,32 @@ class BasicBlock:
         return isinstance(self.first, ir.IfElse)
 
     @property
-    def is_terminated(self):
+    def break_terminated(self):
+        return isinstance(self.last, ir.Break)
+
+    @property
+    def terminated(self):
         return isinstance(self.last, (ir.Break, ir.Continue, ir.Return))
 
     @property
     def unterminated(self):
-        return not self.is_terminated
+        return not self.terminated
 
     @property
     def is_entry_point(self):
-        return self.is_loop_block or self.is_branch_block or self.is_entry_block
-
-    @property
-    def list_id(self):
-        return id(self.statements)
-
-    def append_to_block(self, stmt: ir.StmtBase):
-        assert isinstance(stmt, ir.StmtBase)
-        if self.stop != len(self.statements):
-            msg = f'Cannot append to block that does not terminate the statement list'
-            raise CompilerError(msg)
-        updated_len = self.stop + 1
-        self.statements.append(stmt)
-        object.__setattr__(self, 'stop', updated_len)
+        return self.is_loop_block or self.is_branch_block or self.is_function_entry
 
     def __bool__(self):
-        return self.start < self.stop
+        return operator.truth(self.statements)
 
     def __len__(self):
-        return self.stop - self.start
+        return len(self.statements)
 
     def __iter__(self):
-        return itertools.islice(self.statements, self.start, self.stop)
+        return iter(self.statements)
 
     def __reversed__(self):
-        return reversed(list(iter(self)))
+        return reversed(self.statements)
 
     def __str__(self):
         if self:
@@ -112,337 +101,63 @@ class BasicBlock:
                 return f'{formatted}\nindex={self.label}\ndepth={self.depth}'
             else:
                 assert isinstance(first, ir.StmtBase)
-                pos = self.first.pos.line_begin
-                formatted = formatter(self.first, truncate_after=20)
+                pos = first.pos.line_begin
+                formatted = formatter(first, truncate_after=20)
                 return f'{formatted}\nindex={self.label}\ndepth={self.depth}\nline {pos}'
         else:
             return f'index={self.label}\ndepth={self.depth}'
 
     def __hash__(self):
         return hash(self.label)
-        # return hash((id(self.statements), self.start, self.stop, self.label, self.depth))
 
 
-class FlowGraph:
+@dataclass
+class FunctionContext:
+    graph: nx.DiGraph
+    entry_point: BasicBlock
+    symbols: SymbolTable
+    labeler: Optional[itertools.count] = None
 
-    def __init__(self):
-        self.graph = nx.DiGraph()
-        self.entry_block = None
+    def __post_init__(self):
+        assert self.entry_point.is_function_entry
+        if self.labeler is None:
+            self.labeler = itertools.count()
 
-    @property
-    def func_name(self):
-        return self.entry_block.first.name
-
-    def nodes(self):
-        return self.graph.nodes()
-
-    def reachable_nodes(self):
-        return nx.dfs_preorder_nodes(self.graph, self.entry_block)
-
-    def walk_nodes(self):
-        for block in self.graph.nodes():
-            for stmt in block:
-                yield stmt
-
-    def predecessors(self, node: BasicBlock):
-        return self.graph.predecessors(node)
-
-    def successors(self, node: BasicBlock):
-        return self.graph.successors(node)
-
-    def in_degree(self, block: Optional[BasicBlock] = None):
-        if block is None:
-            return self.graph.in_degree()
-        return self.graph.in_degree(block)
-
-    def out_degree(self, block: Optional[BasicBlock] = None):
-        if block is None:
-            return self.graph.out_degree()
-        return self.graph.out_degree(block)
-
-    def remove_edge(self, source: BasicBlock, sink: BasicBlock):
-        self.graph.remove_edge(source, sink)
-
-    def get_branch_entry_points(self, block: BasicBlock) -> Tuple[Optional[BasicBlock], Optional[BasicBlock]]:
-        branch_stmt = block.first
-        entry_points = [*self.successors(block)]
-        if entry_points:
-            if len(entry_points) == 1:
-                entry_point = entry_points[0]
-                if entry_point.statements is branch_stmt.if_branch:
-                    return entry_point, None
-                else:
-                    assert entry_point.statements is branch_stmt.else_branch
-                    return None, entry_point
-            elif len(entry_points) == 2:
-                if entry_points[0].statements is branch_stmt.if_branch and entry_points[1].statements is branch_stmt.else_branch:
-                    return tuple(entry_points)
-                elif entry_points[1].statements is branch_stmt.else_branch and entry_points[0].statements is branch_stmt.else_branch:
-                    return entry_points[1], entry_points[0]
-        msg = f'Unable to split branch at line: {block.first.pos.line_begin}'
-        raise CompilerError(msg)
-
-
-def sequence_block_intervals(stmts: Iterable[ir.Statement]):
-    """
-    For reversal, cast to list and reverse.
-    This will intentionally yield a blank interval at the end and between any 2 consecutive scope points.
-    :param stmts:
-    :return:
-    """
-
-    block_start = 0
-    block_last = -1
-    for block_last, stmt in enumerate(stmts):
-        if is_entry_point(stmt):
-            if block_start < block_last:
-                yield block_start, block_last
-            next_start = block_last + 1
-            yield block_last, next_start
-            block_start = next_start
-    # always add an end block. Either it's non-empty or we need a reconvergence block
-    yield block_start, block_last + 1
-
-
-class CFGBuilder:
-
-    def __init__(self, start_from=0):
-        self.loop_entry_points = []
-        self.continue_map = defaultdict(list)
-        self.break_map = defaultdict(list)
-        self.scope_entry_blocks = {}  # map of header to initial entry blocks
-        self.scope_exit_blocks = {}  # map of header to exit
-        self.return_blocks = []
-        self.labeler = itertools.count(start_from)
-        self.graph = FlowGraph()
-        self.counter = itertools.count()
+    @cached_property
+    def name(self):
+        return self.entry_point.first.name
 
     @property
-    def entry_block(self):
-        return self.graph.entry_block
+    def args(self):
+        return self.entry_point.first.args
 
-    @property
-    def next_label(self):
-        return next(self.counter)
-
-    @contextmanager
-    def enclosing_loop(self, node: BasicBlock):
-        assert node.is_loop_block
-        self.loop_entry_points.append(node)
-        yield
-        self.loop_entry_points.pop()
-
-    @property
-    def depth(self):
-        return len(self.loop_entry_points)
-
-    def create_block(self, stmts: List[ir.StmtBase], start: int, stop: int, depth: int):
+    def add_block(self, statements: List[ir.Statement], depth, parents: Iterable[BasicBlock] = (), children: Iterable[BasicBlock] = ()):
         label = next(self.labeler)
-        block = BasicBlock(stmts, start, stop, label, depth)
-        self.graph.graph.add_node(block)
+        block = BasicBlock(statements, label, depth)
+        self.graph.add_node(block)
+        for p in parents:
+            self.graph.add_edge(p, block)
+        for c in children:
+            self.graph.add_edge(block, c)
         return block
 
-    def insert_entry_block(self, func: ir.Function):
-        assert self.entry_block is None
-        label = next(self.labeler)
-        block = BasicBlock([func], 0, 1, label, 0)
-        self.graph.graph.add_node(block)
-        self.graph.entry_block = block
 
-    def add_edge(self, source: BasicBlock, sink: BasicBlock):
-        if not isinstance(source, BasicBlock) or not isinstance(sink, BasicBlock):
-            msg = f'Expected BasicBlock type for edge endpoints. Received "{source}" and "{sink}"'
-            raise ValueError(msg)
-        assert source is not sink
-        self.graph.graph.add_edge(source, sink)
-
-    def register_scope_entry_point(self, source: BasicBlock, sink: BasicBlock):
-        assert source.is_entry_point
-        self.add_edge(source, sink)
-        self.scope_entry_blocks[source].append(sink)
-
-    def register_scope_exit_point(self, source: BasicBlock, sink: BasicBlock):
-        assert source.is_branch_block or source.is_loop_block
-        assert source not in self.scope_exit_blocks
-        self.scope_exit_blocks[source] = sink
-
-    def register_continue(self, block: BasicBlock):
-        if not self.loop_entry_points:
-            msg = f'Break: "{block.last}" encountered outside of loop.'
-            raise CompilerError(msg)
-        self.continue_map[self.loop_entry_points[-1]].append(block)
-
-    def register_break(self, block: BasicBlock):
-        if not self.loop_entry_points:
-            msg = f'Break: "{block.last}" encountered outside of loop.'
-            raise CompilerError(msg)
-        self.break_map[self.loop_entry_points[-1]].append(block)
-
-    def register_block_terminator(self, block: BasicBlock):
-        last = block.last
-        if last is not None:
-            if isinstance(last, ir.Continue):
-                self.register_continue(block)
-            elif isinstance(last, ir.Break):
-                self.register_break(block)
-            elif isinstance(last, ir.Return):
-                self.return_blocks.append(block)
+def make_temporary_assign(func: FunctionContext, base_name: Union[str, ir.NameRef], value: ir.ValueRef, pos: ir.Position):
+    if isinstance(base_name, ir.NameRef):
+        base_name = base_name.name
+    name = func.symbols.make_versioned(base_name)
+    assign = ir.Assign(name, value, pos)
+    return assign
 
 
-# Todo: This needs to be linked with a sub-graph builder, so that we can check a loop nest without checking the entire
-#  code.
-def build_graph_recursive(statements: List[ir.Statement], builder: CFGBuilder, entry_point: BasicBlock):
-    prior_block = entry_point
-    deferrals = []  # last_block determines if we have deferrals to this one
-    for start, stop in sequence_block_intervals(statements):
-        block = builder.create_block(statements, start, stop, builder.depth)
-        if prior_block is entry_point:
-            builder.add_edge(entry_point, block)
-        elif prior_block.is_branch_block:
-            # If we have blocks exiting a branch, which do not contain a terminating statement
-            # then add incoming edges to this block
-            for d in deferrals.pop():
-                builder.add_edge(d, block)
-        else:
-            if prior_block.is_loop_block:
-                # indicate loop exit block so that breaks can be connected
-                builder.register_scope_exit_point(prior_block, block)
-            # loop or normal must add edge
-            if prior_block.unterminated and not matches_while_true(prior_block.last):
-                builder.add_edge(prior_block, block)
-        # buffering taken care of by sequence block
-        if block.is_loop_block:
-            # need to preserve entry point info here..
-            loop_header_stmt = statements[start]
-            with builder.enclosing_loop(block):
-                body = loop_header_stmt.body
-                last_interior_block = build_graph_recursive(body, builder, block)
-                if last_interior_block.unterminated:
-                    builder.add_edge(last_interior_block, block)
-        elif block.is_branch_block:
-            branch_exit_points = []
-            if_stmt = statements[start]
-            if_body = if_stmt.if_branch
-            else_body = if_stmt.else_branch
-            if_exit_block = build_graph_recursive(if_body, builder, block)
-            # patch initial entry point
-            if_entry_block, = builder.graph.successors(block)
-            if if_exit_block.unterminated:
-                branch_exit_points.append(if_exit_block)
-            else_exit_block = build_graph_recursive(else_body, builder, block)
-            for s in builder.graph.successors(block):
-                assert isinstance(s, BasicBlock)
-                if s is not if_entry_block:
-                    break
-            else:
-                msg = f'No else entry block found for {statements[start]}'
-                raise ValueError(msg)
-            if else_exit_block.unterminated:
-                branch_exit_points.append(else_exit_block)
-            deferrals.append(branch_exit_points)
-        elif block.is_terminated:
-            builder.register_block_terminator(block)
-        prior_block = block
-    return prior_block
-
-
-def remove_trivial_empty_blocks(graph: FlowGraph):
-    """
-    merge blocks with single in and out degree into their predecessor if the predecessor
-    has out degree one and is not a control flow entry point.
-    :param graph:
-    :return:
-    """
-
-    # Since this is only a view of the underlying tree, only merge empty blocks.
-    worklist = [node for node in graph.nodes() if not node
-                and graph.in_degree(node) == 1 and graph.out_degree(node) == 1]
-
-    while worklist:
-        node = worklist.pop()
-        predecessor, = graph.predecessors(node)
-        if graph.out_degree(predecessor) == 1 and not predecessor.is_entry_point:
-            successor, = graph.successors(node)
-            graph.graph.remove_node(node)
-            graph.graph.add_edge(predecessor, successor)
-
-
-def build_function_graph(func: ir.Function) -> FlowGraph:
-    builder = CFGBuilder()
-    builder.insert_entry_block(func)
-    build_graph_recursive(func.body, builder, builder.entry_block)
-
-    # Now clean up the graph
-    for loop_header, continue_blocks in builder.continue_map.items():
-        for block in continue_blocks:
-            builder.add_edge(block, loop_header)
-
-    for loop_header, break_blocks in builder.break_map.items():
-        loop_exit_block = builder.scope_exit_blocks[loop_header]
-        for block in break_blocks:
-            builder.add_edge(block, loop_exit_block)
-
-    graph = builder.graph
-    remove_trivial_empty_blocks(graph)
-
-    return graph
-
-
-def get_loop_header_block(graph: FlowGraph, node: ir.ForLoop) -> BasicBlock:
-    header = None
-    # find block matching this header
-    for block in graph.nodes():
-        if block.is_loop_block:
-            if block.first is node:
-                header = block
-                break
-    if header is None:
-        msg = f'Loop header {node} was not found in the graph.'
-        raise ValueError(msg)
-    return header
-
-
-def get_loop_exit_block(graph: FlowGraph, node: BasicBlock) -> Optional[BasicBlock]:
-    """
-    This will return a loop exit if there's an edge from the header block to some block outside the loop.
-    Otherwise returns None.
-
-    :param graph:
-    :param node:
-    :return:
-    """
-    assert node.is_loop_block
-    for block in graph.successors(node):
-        if block.depth == node.depth:
-            return block
-
-
-def dominator_tree(graph: FlowGraph):
-    idoms = nx.dominance.immediate_dominators(graph.graph, graph.entry_block)
+def dominator_tree(func: FunctionContext) -> nx.DiGraph:
+    idoms = nx.dominance.immediate_dominators(func.graph, func.entry_point)
     # remove self dominance
     g = nx.DiGraph()
     for k, v in idoms.items():
         if k.label != v.label:
             g.add_edge(v, k)
     return g
-
-
-def get_blocks_in_loop(graph: FlowGraph, block: BasicBlock):
-    """
-    This grabs all blocks in a source level loop, based on its tree representation.
-    :param graph:
-    :param block:
-    :return:
-    """
-
-    assert block.is_loop_block
-    # get the exit block if there is one
-    stmt_lists = tuple(get_statement_lists(block.first))
-    loop_blocks = []
-    for node in graph.nodes():
-        if node.statements in stmt_lists:
-            loop_blocks.append(node)
-    return loop_blocks
 
 
 def render_dot_graph(graph: nx.DiGraph, name: str, out_path: Path):
@@ -452,13 +167,13 @@ def render_dot_graph(graph: nx.DiGraph, name: str, out_path: Path):
     dot_graph.write_png(render_path)
 
 
-def render_dominator_tree(graph: FlowGraph, out_path: Path):
+def render_dominator_tree(func: FunctionContext, out_path: Path):
     """
     convenience method to render a dominator tree
-    :param graph:
+    :param func:
     :param out_path:
     :return:
     """
-    dom_tree = dominator_tree(graph)
-    img_name = f'{graph.func_name}_doms'
+    dom_tree = dominator_tree(func)
+    img_name = f'{func.name}_doms'
     render_dot_graph(dom_tree, img_name, out_path)

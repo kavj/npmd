@@ -2,112 +2,25 @@ from __future__ import annotations
 import itertools
 import operator
 
-from collections import Counter, defaultdict, deque
-from functools import singledispatch, singledispatchmethod
+from collections import Counter, defaultdict
+from functools import singledispatchmethod
 from typing import Dict, Iterable, Set
+
+import networkx as nx
 
 import lib.ir as ir
 
-from lib.blocks import BasicBlock, FlowGraph, build_function_graph, dominator_tree
-from lib.errors import CompilerError
+from lib.statement_utils import get_assigned, get_expressions, get_referenced
+from lib.blocks import BasicBlock, FunctionContext
+from lib.graph_walkers import get_branch_entry_points, get_reachable_blocks,  get_loop_entry_block, \
+    get_loop_exit_block,get_reduced_graph, walk_graph
 from lib.symbol_table import SymbolTable
-from lib.traversal import get_statement_lists, walk_parameters
-from lib.utils import is_entry_point, unpack_iterated
+from lib.expression_walkers import walk_parameters
 
 
 # Most of this work ended up being done elsewhere in controlflow now. This can now do slightly more precise liveness
 # The intention here is to better understand what assignments may not escape and can therefore be localized or removed
 # if dead.
-
-
-@singledispatch
-def get_assigned(node):
-    raise TypeError()
-
-
-@get_assigned.register
-def _(node: ir.StmtBase):
-    return  # avoid yielding None
-    yield
-
-
-@get_assigned.register
-def _(node: ir.Assign):
-    for p in walk_parameters(node.value):
-        if isinstance(p, ir.NameRef):
-            yield p
-
-
-@get_assigned.register
-def _(node: ir.ForLoop):
-    for target, value in unpack_iterated(node):
-        if isinstance(target, ir.NameRef):
-            yield target
-
-
-@get_assigned.register
-def _(node: ir.Function):
-    return
-    yield
-
-
-@singledispatch
-def get_referenced(node):
-    msg = f'No method to extract referenced for {node}.'
-    raise TypeError(msg)
-
-
-@get_referenced.register
-def _(node: ir.Function):
-    return
-    yield
-
-
-@get_referenced.register
-def _(node: ir.StmtBase):
-    return
-    yield
-
-
-@get_referenced.register
-def _(node: ir.Assign):
-    yield from walk_parameters(node.value)
-    if not isinstance(node.target, ir.NameRef):
-        yield from walk_parameters(node.target)
-
-
-@get_referenced.register
-def _(node: ir.InPlaceOp):
-    yield from walk_parameters(node.value)
-
-
-@get_referenced.register
-def _(node: ir.IfElse):
-    yield from walk_parameters(node.test)
-
-
-@get_referenced.register
-def _(node: ir.WhileLoop):
-    yield from walk_parameters(node.test)
-
-
-@get_referenced.register
-def _(node: ir.SingleExpr):
-    yield from walk_parameters(node.value)
-
-
-@get_referenced.register
-def _(node: ir.Return):
-    yield from walk_parameters(node.value)
-
-
-@get_referenced.register
-def _(node: ir.ForLoop):
-    for target, value in unpack_iterated(node):
-        yield from walk_parameters(value)
-        if not isinstance(target, ir.NameRef):
-            yield from walk_parameters(target)
-
 
 class LiveStatementMarker:
 
@@ -142,7 +55,7 @@ class LiveStatementMarker:
         if not isinstance(stmt, ir.StmtBase):
             msg = f'Not a statement "{stmt}"'
             raise TypeError(msg)
-        elif is_entry_point(stmt):
+        elif isinstance(stmt, (ir.ForLoop, ir.WhileLoop, ir.IfElse)):
             msg = f'Cannot mark on entry point "{stmt}"'
             raise TypeError(msg)
         self.live.add(stmt)
@@ -218,25 +131,25 @@ class BlockLiveness:
         return changed
 
 
-def find_live_in_out(graph: FlowGraph) -> Dict[BasicBlock, BlockLiveness]:
+def find_live_in_out(graph: nx.DiGraph, tracked: Set[ir.NameRef]) -> Dict[BasicBlock, BlockLiveness]:
     block_liveness = {}
-    for node in graph.nodes():
+    for node in walk_graph(graph):
         kills = set()
         referenced = set()
         live_in = set()
         for stmt in node:
             for name in get_referenced(stmt):
-                if name not in kills:
+                if name not in kills and name in tracked:
                     live_in.add(name)
                 referenced.add(name)
-            kills.update(get_assigned(stmt))
+            kills.update(name for name in get_assigned(stmt) if name in tracked)
         single_block_liveness = BlockLiveness(live_in, kills)
         block_liveness[node] = single_block_liveness
     changed = True
     # mark basic live
     while changed:
         changed = False
-        for node in graph.nodes():
+        for node in walk_graph(graph):
             single_block_liveness = block_liveness[node]
             succ_liveness = (block_liveness[s] for s in graph.successors(node))
             changed |= single_block_liveness.update_liveness(succ_liveness)
@@ -268,58 +181,34 @@ def find_ephemeral_assigns(liveness: Dict[BasicBlock, BlockLiveness]) -> Set[ir.
     return ephemeral
 
 
-def check_all_assigned(graph: FlowGraph):
-    entry = graph.entry_block
-    visited = {entry}
-    bound_after = {entry: set(entry.first.args)}
-    doms = dominator_tree(graph)
-    # Todo: cascade assign shows evidence of a bug here in CFG generation... investigate
-    # prune back edges
-    maybe_unbound = set()
+def check_for_maybe_unbound_names(func: FunctionContext):
+    liveness = find_live_in_out(func.graph, set(func.symbols.all_locals))
+    assigned_after = {func.entry_point: func.args}
+    unbound = {}
 
-    body_entry, = graph.successors(entry)
-    queued = deque()
-    queued.append(body_entry)
+    no_backedge_graph = get_reduced_graph(func)
+    for block in nx.topological_sort(no_backedge_graph):
+        if block.is_function_entry:
+            continue
+        block_liveness = liveness[block]
+        # get everything we know is bound after this
+        bound = set(block_liveness.kills)
+        for p in no_backedge_graph.predecessors(block):
+            bound.update(assigned_after[p])
+        assigned_after[block] = bound
 
-    def update_unbound(expr: ir.ValueRef, safe: Set[ir.NameRef]):
-        for p in walk_parameters(expr):
-            if p not in safe:
-                maybe_unbound.add(p)
-
-    while queued:
-        block = queued.popleft()
-        assigned = set.intersection(*(bound_after[p]
-                                      for p in graph.predecessors(block)
-                                      if p in visited))
-        for stmt in block:
-            if isinstance(stmt, ir.Assign):
-                update_unbound(stmt.value, assigned)
-                if isinstance(stmt.target, ir.NameRef):
-                    assigned.add(stmt.target)
-                else:
-                    update_unbound(stmt.target, assigned)
-            elif isinstance(stmt, ir.InPlaceOp):
-                for p in walk_parameters(stmt.value):
-                    if p not in assigned:
-                        maybe_unbound.add(p)
-            elif isinstance(stmt, ir.ForLoop):
-                for target, value in unpack_iterated(stmt):
-                    update_unbound(value, assigned)
-                    if isinstance(target, ir.NameRef):
-                        assigned.add(target)
-                    else:
-                        update_unbound(target, assigned)
-            elif isinstance(stmt, (ir.IfElse, ir.WhileLoop)):
-                update_unbound(stmt.test, assigned)
-            elif isinstance(stmt, (ir.SingleExpr, ir.Return)):
-                update_unbound(stmt.value, assigned)
-
-        visited.add(block)
-        for succ in graph.successors(block):
-            if succ not in visited:
-                queued.append(succ)
-        bound_after[block] = assigned
-    return visited
+    # Now check if each block has any live in name references that are not guaranteed to be bound
+    # on exit by all predecessors
+    for block in get_reachable_blocks(no_backedge_graph, func.entry_point):
+        block_liveness = liveness[block]
+        if not block_liveness.live_in:
+            continue
+        bound_on_entry = set()
+        for p in no_backedge_graph.predecessors(block):
+            bound_on_entry.update(assigned_after[p])
+        if not bound_on_entry.issuperset(block_liveness.live_in):
+            unbound[block] = {name for name in block_liveness.live_in if name not in bound_on_entry}
+    return unbound, assigned_after
 
 
 def dump_live_info(info: Dict[BasicBlock, BlockLiveness], ignores=()):
@@ -334,18 +223,18 @@ def dump_live_info(info: Dict[BasicBlock, BlockLiveness], ignores=()):
         print(f'kills:\n    {kills}')
 
 
-def drop_unused_symbols(func: ir.Function, symbols: SymbolTable):
+def drop_unused_symbols(func: FunctionContext):
     """
     Purges any dead symbols from the symbol table. This is useful to remove non-ephemeral variables
     that are simply unused, so that they are not declared.
     :param func:
-    :param symbols:
     :return:
     """
     assigned = set()
-    referenced = set(func.args)
-    for stmts in get_statement_lists(func):
-        for stmt in stmts:
+    referenced = set(func.entry_point.first.args)
+    symbols = func.symbols
+    for block in get_reachable_blocks(func.graph, func.entry_point):
+        for stmt in block:
             assigned.update(get_assigned(stmt))
             referenced.update(get_referenced(stmt))
     dead_names = set()
@@ -356,45 +245,10 @@ def drop_unused_symbols(func: ir.Function, symbols: SymbolTable):
         symbols.drop_symbol(name)
 
 
-def get_unreachable_blocks(graph: FlowGraph):
-    # Note: we can't just look for in-degree 0, since we can have unreachable loops
-    # This just axes anything that isn't
-    entry_block = graph.entry_block
-    # Todo: might be an issue here.. investigate later..
-    assert entry_block is not None
-    unreachable = set(graph.nodes())
-    unreachable.difference_update(graph.reachable_nodes())
-    return unreachable
-
-
-def group_by_statement_list(blocks: Iterable[BasicBlock]):
-    by_stmt_list = defaultdict(set)
-    id_to_list = {}
-    for block in blocks:
-        statements = block.statements
-        list_id = id(statements)
-        by_stmt_list[list_id].add(block)
-        id_to_list[list_id] = statements
-    return by_stmt_list, id_to_list
-
-
-def get_loop_exit(graph: FlowGraph, node: BasicBlock):
-    assert node.is_loop_block
-    for succ in graph.successors(node):
-        if succ.depth == node.depth:
-            return succ
-
-
-def get_loop_body(graph: FlowGraph, node: BasicBlock):
-    assert node.is_loop_block
-    for succ in graph.successors(node):
-        if succ.depth == node.depth + 1:
-            return succ
-
-
-def remove_dead_edges(graph: FlowGraph):
+def remove_dead_edges(func: FunctionContext):
     nodes_with_dead_edges = set()
-    for node in graph.nodes():
+    graph = func.graph
+    for node in get_reachable_blocks(graph, func.entry_point):
         if node.is_branch_block:
             test = node.first.test
             if isinstance(test, ir.CONSTANT):
@@ -406,93 +260,29 @@ def remove_dead_edges(graph: FlowGraph):
     for node in nodes_with_dead_edges:
         if node.is_branch_block:
             test = node.first.test
-            if_block, else_block = graph.get_branch_entry_points(node)
-            if operator.truth(test) and graph.graph.has_edge(node, else_block):
+            if_block, else_block = get_branch_entry_points(func, node)
+            if operator.truth(test) and graph.has_edge(node, else_block):
                 graph.remove_edge(node, else_block)
-            elif graph.graph.has_edge(node, if_block):
+            elif graph.has_edge(node, if_block):
                 graph.remove_edge(node, if_block)
         else:
             header = node.first
             assert isinstance(header, ir.WhileLoop) and isinstance(header.test, ir.CONSTANT)
             if operator.truth(header.test):
-                exit_block = get_loop_exit(graph, node)
-                if graph.graph.has_edge(node, exit_block):
+                exit_block = get_loop_exit_block(func, node)
+                if graph.has_edge(node, exit_block):
                     graph.remove_edge(node, exit_block)
             else:
-                entry_block = get_loop_body(graph, node)
-                if graph.graph.has_edge(node, entry_block):
+                entry_block = get_loop_entry_block(func, node)
+                if graph.has_edge(node, entry_block):
                     graph.remove_edge(node, entry_block)
 
 
-def remove_trivial_continues(node: ir.Function):
-    for stmts in get_statement_lists(node):
-        for stmt in stmts:
-            if isinstance(stmt, (ir.ForLoop, ir.WhileLoop)):
-                while stmt.body and isinstance(stmt.body[-1], ir.Continue):
-                    stmt.body.pop()
-
-
-def remove_statements_following_terminals(node: ir.Function, symbols: SymbolTable):
-    """
-     Removes any statements following a break, continue, or return statement in any statement list
-     :param symbols:
-     :param node:
-     :return:
-     """
-    for stmt_list in get_statement_lists(node):
-        for i, stmt in enumerate(stmt_list):
-            if isinstance(stmt, (ir.Break, ir.Continue, ir.Return)):
-                for j in range(len(stmt_list) - i - 1):
-                    stmt_list.pop()
-                break
-    drop_unused_symbols(node, symbols)
-
-
-def remove_unreachable_blocks(graph: FlowGraph):
-    # Since the graph represents a view, we want to avoid
-    # having to clear one side of an if statement, if the branch remains intact,
-    # since this has a tendency to result in phantom blocks.
-    for block in graph.nodes():
-        if block.is_branch_block:
-            if isinstance(block.first.test, ir.CONSTANT):
-                # These lead to extremely misleading control flow graphs, because the statements end up being replaced
-                # by an empty block due to the prescence of an ifelse node, rather than a simplified path.
-                msg = f'Remove unreachable blocks expects static constant branches to be removed. Received {block.first.test}, position: {block.first.pos}.'
-                raise CompilerError(msg)
-    remove_dead_edges(graph)
-    # get all unreachable nodes
-    entry_block = graph.entry_block
-    assert entry_block is not None
-    func = entry_block.first
-    unreachable = get_unreachable_blocks(graph)
-    unreachable_grouped, unreachable_id_to_list = group_by_statement_list(unreachable)
-    grouped, id_to_list = group_by_statement_list(graph.nodes())
-    # Now find statement lists that are completely unreachable
-
-    for list_id, unreachable_blocks in unreachable_grouped.items():
-        # get total blocks
-        total_blocks = grouped[list_id]
-        reachable_blocks = total_blocks.difference(unreachable_blocks)
-        stmts = unreachable_id_to_list.pop(list_id)
-        if reachable_blocks:
-            # rebuild  from remaininive blocks, then generate the original list
-            repl = []
-            for block in sorted(reachable_blocks, key=lambda b: b.start):
-                repl.extend(block)
-            stmts.clear()
-            stmts.extend(repl)
-        else:
-            # mitigates hidden bugs, since these really are gone from the list
-            stmts.clear()
-    remove_trivial_continues(func)
-    repl_graph = build_function_graph(func)
-    # can be added better later..
-    remove_dead_edges(repl_graph)
-    unreachable = get_unreachable_blocks(repl_graph)
-    for u in unreachable:
-        repl_graph.graph.remove_node(u)
-
-    return repl_graph
+def remove_unreachable_blocks(func: FunctionContext):
+    reachable_blocks = get_reachable_blocks(func.graph, func.entry_point)
+    reachable_blocks.add(func.entry_point)
+    removable = [b for b in walk_graph(func.graph) if b not in reachable_blocks]
+    func.graph.remove_nodes_from(removable)
 
 
 def mark_dead_statements(block_to_liveness: Dict[BasicBlock, BlockLiveness], symbols: SymbolTable):
@@ -506,7 +296,7 @@ def mark_dead_statements(block_to_liveness: Dict[BasicBlock, BlockLiveness], sym
     dead = set()
 
     for block, livenesss_info in block_to_liveness.items():
-        if block.is_loop_block or block.is_branch_block or block.is_entry_block:
+        if block.is_loop_block or block.is_branch_block or block.is_function_entry:
             continue
 
         marker = LiveStatementMarker()
@@ -530,31 +320,26 @@ def mark_dead_statements(block_to_liveness: Dict[BasicBlock, BlockLiveness], sym
                 elif isinstance(stmt, ir.InPlaceOp):
                     if symbols.is_argument(stmt.target):
                         continue
+                elif any(isinstance(e, ir.Call) for e in get_expressions(stmt)):
+                    # this is only safely removable if the call has no side effects
+                    continue
                 dead.add(stmt)
     return dead
 
 
-def remove_dead_statements(node: ir.Function, symbols: SymbolTable):
-    graph = build_function_graph(node)
-    liveness = find_live_in_out(graph)
-    dead = mark_dead_statements(liveness, symbols)
-    repl = []
-    for stmts in get_statement_lists(node):
+def remove_dead_statements(func: FunctionContext):
+    liveness = find_live_in_out(func.graph, set(func.symbols.all_locals))
+    dead = mark_dead_statements(liveness, func.symbols)
+    for block in get_reachable_blocks(func.graph, func.entry_point):
         changed = False
-        for stmt in stmts:
-            if is_entry_point(stmt) or stmt not in dead:
+        if block.is_entry_point:
+            continue
+        repl = []
+        for stmt in block:
+            if stmt not in dead:
                 repl.append(stmt)
             else:
                 changed = True
         if changed:
-            stmts.clear()
-            stmts.extend(repl)
-        repl.clear()
-    drop_unused_symbols(node, symbols)
-
-
-def remove_unreachable_statements(func: ir.Function, symbols: SymbolTable):
-    graph = build_function_graph(func)
-    remove_unreachable_blocks(graph)
-    remove_dead_statements(func, symbols)
-    remove_statements_following_terminals(func, symbols)
+            block.replace_statements(repl)
+    drop_unused_symbols(func)

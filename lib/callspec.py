@@ -185,15 +185,6 @@ logical_reduc_sig = argsig(('a',),
                            True)
 
 
-arithmetic_reductions = {'amax': ir.MAXELT,
-                         'amin': ir.MINELT,
-                         'max': ir.MAXELT,
-                         'min': ir.MINELT,
-                         'prod': ir.PRODUCT,
-                         'sum': ir.SUM
-                         }
-
-
 binops = {'add': ir.ADD,
           'divide': ir.TRUEDIV,
           'floor_divide': ir.FLOORDIV,
@@ -250,27 +241,6 @@ expr_map = {
     'min': ir.MIN,
     'sub': ir.SUB
 }
-
-
-reduc_map = {
-    'all': ir.ALL,
-    'any': ir.ANY,
-    'amax': ir.MAXELT,
-    'amin': ir.MINELT,
-    'max': ir.MAXELT,
-    'min': ir.MINELT,
-    'prod': ir.PRODUCT,
-    'sum': ir.SUM
-}
-
-
-def replace_numpy_call(node: ir.Call):
-    if not node.func.startswith('numpy.'):
-        msg = f'Bad numpy substitution "{node.func}".'
-        raise ValueError(msg)
-    func_name = node.func[6:]
-    if func_name in reduc_map:
-        pass
 
 
 def format_spec(name: str, spec: argsig):
@@ -358,56 +328,4 @@ def early_call_specialize(node: ir.Call):
             if repl_call is not None:
                 repl = replace_builtin(repl_call)
                 return repl
-    elif node.func.startswith('numpy.'):
-        func_name = node.func[6:]
-        args = list(node.args.subexprs)
-        kw_to_value = map_keywords(node)
-        if func_name == 'matmul':
-            # Todo: need s spec for this
-            raise NotImplementedError('Matrix multiplication is not currently supported.')
-        if func_name in arithmetic_reductions:
-            repl_call = try_match_arg_spec(func_name, args, kw_to_value, arithmetic_reduc_sig)
-            args = deque(repl_call.args.subexprs)
-            a = args.popleft()
-            args.appendleft(arithmetic_reductions[func_name](a))
-            return ir.ARITH_REDUC(*args)
-        if func_name in initializers:
-            initial_value = ir.Zero if func_name == 'zeros' else ir.One if func_name == 'ones' else ir.NoneRef()
-            repl_call = try_match_arg_spec(func_name, args, kw_to_value, array_init_sig)
-            args = list(repl_call.args.subexprs)
-            args.append(initial_value)
-            return ir.ArrayInitializer(*args)
-        elif func_name in binops:
-            repl_call = try_match_arg_spec(func_name, args, kw_to_value, binop_sig)
-            args = deque(repl_call.args.subexprs)
-            a = args.popleft()
-            b = args.popleft()
-            expr = binops[func_name](a, b)
-            args.appendleft(expr)
-            return ir.ELTWISEOP(*args)
-        elif func_name in unaryops:
-            repl_call = try_match_arg_spec(func_name, args, kw_to_value, unary_sig)
-            args = deque(repl_call.args.subexprs)
-            a = args.popleft()
-            if repl_call.func == 'square':
-                expr = ir.MULT(a, a)
-            else:
-                expr = unaryops[func_name](a)
-            args.appendleft(expr)
-            return ir.ELTWISEUNARYOP(*args)
-        elif func_name in logical_reductions:
-            repl_call = try_match_arg_spec(func_name, args, kw_to_value, logical_reduc_sig)
-            args = deque(repl_call.args.subexprs)
-            a = args.popleft()
-            expr = logical_reductions[func_name](a)
-            args.appendleft(expr)
-            return ir.LOGICAL_REDUC(*args)
-        elif func_name in unaryops:
-            repl_call = try_match_arg_spec(func_name, args, kw_to_value, unary_sig)
-            args = deque(repl_call.args.subexprs)
-            a = args.popleft()
-            expr = unaryops[func_name](a)
-            args.appendleft(expr)
-            return ir.ELTWISEUNARYOP(*args)
-
     return node
