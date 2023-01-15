@@ -11,7 +11,6 @@ from typing import Dict, Optional
 import lib.ir as ir
 
 from lib.errors import CompilerError
-from lib.utils import extract_name
 
 
 dtype_pretty_lookup = {
@@ -58,10 +57,7 @@ class symbol:
             # this should be caught elsewhere, where function information is available
             assert self.is_local
         if self.is_arg:
-            if self.type_ is None:
-                msg = f'No type declared for argument "{self.name}"'
-                raise CompilerError(msg)
-            elif not is_allowed_identifier(self.name):
+            if not is_allowed_identifier(self.name):
                 msg = f'"{self.name}" is not an allowed identifier.'
                 raise CompilerError(msg)
 
@@ -96,16 +92,12 @@ class SymbolTable:
 
     def __init__(self, namespace: str, symbols: Dict[str, symbol], default_index_type=np.dtype(np.int_)):
         self.namespace = namespace
-        untyped_args = [name for (name, sym) in symbols.items() if sym.is_arg and sym.type_ is None]
-        if untyped_args:
-            msg = f'Arguments "{untyped_args}" are missing type annotations'
-            raise CompilerError(msg)
         self.symbols = symbols
         self.name_manglers = {}
         self.default_index_type = default_index_type
 
     def drop_symbol(self, name):
-        name = extract_name(name)
+        name = name if isinstance(name, str) else name.name
         del self.symbols[name]
         # keep in name mangler
 
@@ -162,11 +154,11 @@ class SymbolTable:
         self.symbols[name.name] = updated_sym
 
     def declares(self, name):
-        name = extract_name(name)
+        name = name if isinstance(name, str) else name.name
         return name in self.symbols
 
     def lookup(self, name):
-        name = extract_name(name)
+        name = name if isinstance(name, str) else name.name
         sym = self.symbols.get(name)
         return sym
 
@@ -186,12 +178,12 @@ class SymbolTable:
         return not sym.is_source_name
 
     def is_argument(self, name):
-        name = extract_name(name)
+        name = name if isinstance(name, str) else name.name
         sym = self.symbols[name]
         return sym.is_arg
 
     def check_type(self, name, allow_none=False):
-        name = extract_name(name)
+        name = name if isinstance(name, str) else name.name
         t = self.symbols[name].type_
         if t is None and not allow_none:
             msg = f"No type declared for symbol '{name}' in namespace '{str(self.namespace)}'."
@@ -217,7 +209,7 @@ class SymbolTable:
         """
         This is used to add a unique typed temporary variable name.
         """
-        prefix_ = extract_name(name)
+        prefix_ = name if isinstance(name, str) else name.name
         if not is_allowed_identifier(prefix_):
             msg = f'Cannot form name from disallowed prefix "{prefix_}"'
             raise CompilerError(msg)

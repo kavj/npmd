@@ -9,13 +9,10 @@ from typing import Dict, List, Optional, Union
 
 import lib.ir as ir
 
-from lib.analysis import check_all_declared, DeclTracker
 from lib.canonicalize import serialize_min_max
 from lib.errors import CompilerError
-from lib.folding import add_cast
 from lib.symbol_table import SymbolTable
 from lib.type_checks import TypeHelper, check_return_type
-from lib.utils import extract_name
 
 
 npy_c_type_codes = {
@@ -72,7 +69,6 @@ class Emitter:
         self.single_indent = indent
         self.max_line_width = max_line_width
         self.line_buffer = []
-        self.decls = DeclTracker()
 
     @property
     def indent(self):
@@ -199,11 +195,11 @@ def get_c_type_name(type_):
 
 
 def get_function_header(func: ir.Function, symbols: SymbolTable, mangled_name: Optional[str] = None):
-    func_name = extract_name(func) if mangled_name is None else mangled_name
-    return_type = check_return_type(func, symbols)
+    func_name = func.name if mangled_name is None else mangled_name
+    return_type = check_return_type(func)
     args = []
     for arg in func.args:
-        arg_str = extract_name(arg)
+        arg_str = arg.name
         arg_type = symbols.check_type(arg)
         c_type = get_c_type_name(arg_type)
         c_arg_str = f'{c_type} {arg_str}'
@@ -279,13 +275,13 @@ class ExprFormatter:
         return f'!{expr}'
 
     @render.register
-    def _(self, node: ir.MaxReduction):
+    def _(self, node: ir.MaxOf):
         expr = serialize_min_max(node)
         rendered = self.render(expr)
         return rendered
 
     @render.register
-    def _(self, node: ir.MinReduction):
+    def _(self, node: ir.MinOf):
         expr = serialize_min_max(node)
         rendered = self.render(expr)
         return rendered
@@ -308,9 +304,9 @@ class ExprFormatter:
         right_type = self.type_helper(right)
         result_type = self.type_helper(node)
         if left_type != result_type:
-            left = add_cast(left, result_type)
+            left = ir.CAST(left, result_type)
         if right_type != result_type:
-            right = add_cast(right, result_type)
+            right = ir.CAST(right, result_type)
         left = self.render(left)
         right = self.render(right)
         rendered = f'{left} / {right}'
@@ -342,12 +338,12 @@ class ExprFormatter:
         return rendered
 
     @render.register
-    def _(self, node: ir.MaxReduction):
+    def _(self, node: ir.MaxOf):
         serialized = serialize_min_max(node)
         return self.render(serialized)
 
     @render.register
-    def _(self, node: ir.MinReduction):
+    def _(self, node: ir.MinOf):
         serialized = serialize_min_max(node)
         return self.render(serialized)
 
@@ -381,7 +377,7 @@ class ExprFormatter:
 
     @render.register
     def _(self, node: ir.Call):
-        func_name = extract_name(node)
+        func_name = node.func
         # Todo: correct func replacement
         if func_name == 'print':
             # quick temporary hack
@@ -435,7 +431,7 @@ class FuncWriter:
 
     def format_target(self, name: ir.ValueRef):
         if isinstance(name, ir.NameRef):
-            name_str = extract_name(name)
+            name_str = name.name
             if self.emitter.is_declared(name):
                 return name_str
             else:
@@ -465,7 +461,7 @@ class FuncWriter:
 
     def get_output_func_name(self, node: ir.Function):
         assert isinstance(node, ir.Function)
-        return self.mangled_name if self.mangled_name is not None else extract_name(node)
+        return self.mangled_name if self.mangled_name is not None else node.name
 
     @singledispatchmethod
     def visit(self, node):
@@ -516,10 +512,10 @@ class FuncWriter:
         header = f'if({test_str})'
         # Check for things assigned in both branches yet unbound here
         with self.emitter.decls.scope():
-            check_all_declared(node.if_branch, self.emitter.decls)
+            # check_all_declared(node.if_branch, self.emitter.decls)
             if_decls = self.emitter.decls.innermost()
         with self.emitter.decls.scope():
-            check_all_declared(node.else_branch, self.emitter.decls)
+            # check_all_declared(node.else_branch, self.emitter.decls)
             else_decls = self.emitter.decls.innermost()
         hoist_decls = if_decls.intersection(else_decls)
         for decl in hoist_decls:

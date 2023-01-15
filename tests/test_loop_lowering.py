@@ -5,28 +5,32 @@ import pytest
 
 import lib.ir as ir
 
-from lib.analysis import find_element_count
-from lib.ast_conversion import build_module_ir_and_symbols
-from lib.canonicalize import lower_loops, rename_clobbered_loop_parameters
+from lib.blocks import FunctionContext
+from lib.cfg_builder import build_module_ir
 from lib.errors import CompilerError
-from lib.traversal import get_statement_lists
-from lib.type_checks import infer_types
-from lib.utils import unpack_iterated
+from lib.expression_utils import find_element_count
+from lib.walkers import walk_graph
+from lib.loop_lowering import lower_loops, rename_clobbered_loop_parameters
 from tree_tests import test_indexing
+from lib.type_checks import infer_types
 from tests.type_info import type_detail
+from lib.unpacking import unpack_loop_iter
+
 
 src = inspect.getfile(test_indexing)
 types = type_detail['test_indexing.py']
-mod, symbol_tables = build_module_ir_and_symbols(src, types)
+mod = build_module_ir(src, types)
 
 
-def get_single_for_loop(func: ir.Function):
-    symbols = symbol_tables[func.name]
-    rename_clobbered_loop_parameters(func, symbols)
-    infer_types(func, symbols)
-    lower_loops(func, symbols)
+def get_single_for_loop(func: FunctionContext):
+    loop_blocks = [block for block in walk_graph(func.graph) if block.is_loop_block]
+    assert len(loop_blocks) == 1
+    block = loop_blocks.pop()
+    rename_clobbered_loop_parameters(func, block)
+    infer_types(func)
+    lower_loops(func)
     # There should be a single loop, indexed with variable i
-    loops = [stmt for stmt in itertools.chain(*get_statement_lists(func)) if isinstance(stmt, (ir.ForLoop, ir.WhileLoop))]
+    loops = [stmt for stmt in itertools.chain(*walk_graph(func)) if isinstance(stmt, (ir.ForLoop, ir.WhileLoop))]
     assert len(loops) == 1
     loop = loops.pop()
     assert isinstance(loop, ir.ForLoop)
@@ -66,7 +70,7 @@ def test_clobbered_index():
 def test_no_index_strided_array():
     for func in itertools.islice(mod.functions, 3, 5):
         # find initial loop strides
-        headers = [stmt for stmt in itertools.chain(*get_statement_lists(func)) if isinstance(stmt, (ir.ForLoop, ir.WhileLoop))]
+        headers = [stmt for stmt in itertools.chain(*walk_graph(func.graph)) if isinstance(stmt, (ir.ForLoop, ir.WhileLoop))]
         assert len(headers) == 1
         header = headers.pop()
         assert isinstance(header.iterable, ir.Subscript) and isinstance(header.iterable.index, ir.Slice)
@@ -89,9 +93,8 @@ def test_parameter_consolidation():
 
 def test_non_integral_index_flagged():
     func = mod.functions[6]
-    symbols = symbol_tables[func.name]
     with pytest.raises(CompilerError):
-        infer_types(func, symbols)
+        infer_types(func)
 
 
 def test_different_step_sizes():
@@ -99,12 +102,12 @@ def test_different_step_sizes():
     with pytest.raises(AssertionError):
         func = mod.functions[7]
         # get initial unpack
-        loops = [stmt for stmt in itertools.chain(*get_statement_lists(func)) if isinstance(stmt, (ir.ForLoop, ir.WhileLoop))]
+        loops = [stmt for stmt in itertools.chain(*walk_graph(func.graph)) if isinstance(stmt, (ir.ForLoop, ir.WhileLoop))]
         assert len(loops) == 1
         loop = loops.pop()
         targets = []
         values = []
-        for target, value in unpack_iterated(loop):
+        for target, value in unpack_loop_iter(loop):
             targets.append(target)
             values.append(value)
         loop = get_single_for_loop(func)

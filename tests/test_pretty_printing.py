@@ -1,7 +1,7 @@
 
 import lib.ir as ir
 
-from lib.analysis import find_element_count
+from lib.expression_utils import find_element_count
 from lib.pretty_printing import PrettyFormatter
 
 formatter = PrettyFormatter()

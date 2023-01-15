@@ -3,16 +3,14 @@ import sys
 
 from pathlib import Path
 
-from lib.ast_conversion import build_module_ir_and_symbols
-from lib.blocks import build_function_graph, render_dot_graph, render_dominator_tree
-from lib.branch_simplify import refactor_branches
-from lib.canonicalize import add_trivial_return, expand_in_place_assignments, normalize_array_initializers, lower_loops
+from lib.cfg_builder import build_module_ir
+from lib.blocks import render_dot_graph
+from lib.loop_lowering import preheader_rename_parameters
 from lib.errors import CompilerError
-from lib.liveness import check_all_assigned, drop_unused_symbols, dump_live_info, find_live_in_out, remove_unreachable_blocks, remove_unreachable_statements
+from lib.branch_normalize import hoist_terminals
+from lib.liveness import check_for_maybe_unbound_names, remove_unreachable_blocks
 from lib.pretty_printing import PrettyPrinter
-from lib.pybind_gen import gen_module, gen_setup
 from lib.symbol_table import dump_symbol_type_info
-from lib.type_checks import infer_types, TypeHelper
 
 
 version = sys.version_info
@@ -44,41 +42,37 @@ def compile_module(file_path, types,  out_dir, verbose=False, print_result=True,
     if not modname:
         msg = "No module specified"
         raise CompilerError(msg)
-    mod_ir, symbols = build_module_ir_and_symbols(file_path, types)
+    mod_ir = build_module_ir(file_path, types)
     funcs = []
     for func in mod_ir.functions:
-        func_symbols = symbols.get(func.name)
-        add_trivial_return(func)
-        refactor_branches(func, symbols)
-        remove_unreachable_statements(func, func_symbols)
-        normalize_array_initializers(func, func_symbols)
-        infer_types(func, func_symbols)
-        typer = TypeHelper(func_symbols)
-        expand_in_place_assignments(func, typer)
-        lower_loops(func, func_symbols)
-        remove_unreachable_statements(func, func_symbols)
-        refactor_branches(func, symbols)
-        remove_unreachable_statements(func, func_symbols)
-        drop_unused_symbols(func, func_symbols)
+
+        pp = PrettyPrinter()
+
+        remove_unreachable_blocks(func)
+        preheader_rename_parameters(func)
+        hoist_terminals(func)
+        render_dot_graph(func.graph, 'test_graph', Path.cwd())
         render_path = Path(out_dir)
-        assert render_path.is_dir()
-        func_graph = build_function_graph(func)
-        liveness = find_live_in_out(func_graph)
-        if debug:
-            func_graph = remove_unreachable_blocks(func_graph)
-            check_all_assigned(func_graph)
-            dump_live_info(liveness, ignores=func.args)
-            render_dot_graph(func_graph.graph, func_graph.func_name, render_path)
-            render_dominator_tree(func_graph, render_path)
+        unbound_names, _ = check_for_maybe_unbound_names(func)
+        if unbound_names:
+            print(f'unbound pairs for "{func.name}":')
+            for pair in unbound_names.items():
+                print(pair)
+        # if debug:
+        #    func_graph = remove_unreachable_blocks(func_graph)
+        #    check_all_assigned(func_graph)
+        #    dump_live_info(liveness, ignores=func.args)
+        render_dot_graph(func.graph, func.name, render_path)
+        #    render_dominator_tree(func_graph, render_path)
 
         if print_result:
             print('type info..')
-            dump_symbol_type_info(func_symbols)
+            dump_symbol_type_info(func.symbols)
             print()
             pp = PrettyPrinter()
-            pp(func, func_symbols)
+            pp(func)
 
         funcs.append(func)
 
-    gen_module(out_dir, modname, funcs, symbols)
-    gen_setup(out_dir, modname)
+    # gen_module(out_dir, modname, funcs, symbols)
+    # gen_setup(out_dir, modname)
