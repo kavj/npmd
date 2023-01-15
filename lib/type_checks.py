@@ -7,7 +7,7 @@ from typing import Any, List, Union
 
 import lib.ir as ir
 
-from lib.blocks import build_function_graph
+from lib.blocks import build_graph
 from lib.errors import CompilerError
 from lib.pretty_printing import PrettyFormatter
 from lib.symbol_table import SymbolTable
@@ -364,7 +364,7 @@ def validate_types(func: ir.Function, symbols: SymbolTable):
 
 def infer_types(func: ir.Function, symbols: SymbolTable):
     type_infer = TypeInference(symbols)
-    graph = build_function_graph(func)
+    graph = build_graph(func)
     body_block, = graph.successors(graph.entry_block)
     changed = True
     while changed:

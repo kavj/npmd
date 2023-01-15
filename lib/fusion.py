@@ -35,7 +35,7 @@ def seed_array_expr_constraints(block: BasicBlock, liveness: BlockLiveness, type
     :param typer:
     :return:
     """
-    if block.is_entry_block or block.is_loop_block or block.is_branch_block:
+    if block.is_function_entry or block.is_loop_block or block.is_branch_block:
         return
     relevant = set(liveness.live_in)
     for stmt in block:

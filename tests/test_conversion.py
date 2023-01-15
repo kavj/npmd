@@ -5,7 +5,7 @@ import pytest
 # Todo: this could be made into a more complete class
 from lib.utils import statement_difference, statement_intersection
 from lib.ast_conversion import build_module_ir_and_symbols
-from lib.blocks import build_function_graph
+from lib.blocks import build_graph
 from lib.errors import CompilerError
 from lib.pretty_printing import DebugPrinter
 from lib.traversal import get_statement_lists
@@ -37,7 +37,7 @@ def test_conversions():
         print(mod.name, func.name)
         tree_stmts = [stmt for stmt in itertools.chain(*get_statement_lists(func))]
         tree_stmts.append(func)
-        graph = build_function_graph(func)
+        graph = build_graph(func)
         graph_stmts = [stmt for stmt in graph.walk_nodes()]
         tree_stmt_ids = {id(stmt) for stmt in tree_stmts}
         graph_stmt_ids = {id(stmt) for stmt in graph_stmts}

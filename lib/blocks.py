@@ -56,7 +56,7 @@ class BasicBlock:
             return self.statements[self.stop-1]
 
     @property
-    def is_entry_block(self):
+    def is_function_entry(self):
         return isinstance(self.first, ir.Function)
 
     @property
@@ -77,7 +77,7 @@ class BasicBlock:
 
     @property
     def is_entry_point(self):
-        return self.is_loop_block or self.is_branch_block or self.is_entry_block
+        return self.is_loop_block or self.is_branch_block or self.is_function_entry
 
     @property
     def list_id(self):
@@ -367,10 +367,17 @@ def remove_trivial_empty_blocks(graph: FlowGraph):
             graph.graph.add_edge(predecessor, successor)
 
 
-def build_function_graph(func: ir.Function) -> FlowGraph:
+def build_graph(entry_point: Union[ir.Function, ir.ForLoop]) -> FlowGraph:
+    """
+    This will construct a graph for a function or for loop. It will fail if continue or break appears here with respect
+    to a loop that is not included in the graph.
+    :param entry_point:
+    :return:
+    """
     builder = CFGBuilder()
-    builder.insert_entry_block(func)
-    build_graph_recursive(func.body, builder, builder.entry_block)
+    builder.insert_entry_block(entry_point)
+
+    build_graph_recursive(entry_point.body, builder, builder.entry_block)
 
     # Now clean up the graph
     for loop_header, continue_blocks in builder.continue_map.items():

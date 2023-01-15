@@ -4,7 +4,7 @@ from typing import Dict, Iterable, Union
 import lib.ir as ir
 
 from lib.analysis import get_assign_counts
-from lib.blocks import build_function_graph
+from lib.blocks import build_graph
 from lib.liveness import find_ephemeral_assigns, find_live_in_out
 from lib.symbol_table import SymbolTable
 from lib.type_checks import TypeHelper
@@ -32,7 +32,7 @@ def rewrite_expr(current: Dict[ir.ValueRef, ir.ValueRef], node: ir.ValueRef):
 
 def rename_ephemeral(func: ir.Function, symbols: SymbolTable):
     # Helpful for weakening the need for type inference in cases where a type is not declared.
-    graph = build_function_graph(func)
+    graph = build_graph(func)
     liveness = find_live_in_out(graph)
     ephemeral = find_ephemeral_assigns(liveness)
     uniquely_assigned = {name for (name, count) in get_assign_counts(func).items() if count == 1}

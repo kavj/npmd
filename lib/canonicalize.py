@@ -9,7 +9,7 @@ from typing import Dict, List, Set, Tuple, Union
 import lib.ir as ir
 
 from lib.analysis import find_element_count, extract_expressions
-from lib.blocks import build_function_graph, get_loop_exit_block
+from lib.blocks import build_graph, get_loop_exit_block
 from lib.errors import CompilerError
 from lib.folding import simplify
 from lib.liveness import find_live_in_out
@@ -398,7 +398,7 @@ def get_safe_loop_indices(stmt: ir.ForLoop, live_on_exit: Set[ir.NameRef], symbo
 
 def lower_loops(func: ir.Function, symbols: SymbolTable, verbose: bool = False):
     rename_clobbered_loop_parameters(func, symbols, verbose)
-    graph = build_function_graph(func)
+    graph = build_graph(func)
     liveness = find_live_in_out(graph)
     loop_blocks = [block for block in graph.nodes() if block.is_loop_block and isinstance(block.first, ir.ForLoop)]
     headers = []

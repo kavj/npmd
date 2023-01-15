@@ -8,7 +8,7 @@ from typing import Dict, Iterable, Set
 
 import lib.ir as ir
 
-from lib.blocks import BasicBlock, FlowGraph, build_function_graph, dominator_tree
+from lib.blocks import BasicBlock, FlowGraph, build_graph, dominator_tree
 from lib.errors import CompilerError
 from lib.symbol_table import SymbolTable
 from lib.traversal import get_statement_lists, walk_parameters
@@ -485,7 +485,7 @@ def remove_unreachable_blocks(graph: FlowGraph):
             # mitigates hidden bugs, since these really are gone from the list
             stmts.clear()
     remove_trivial_continues(func)
-    repl_graph = build_function_graph(func)
+    repl_graph = build_graph(func)
     # can be added better later..
     remove_dead_edges(repl_graph)
     unreachable = get_unreachable_blocks(repl_graph)
@@ -506,7 +506,7 @@ def mark_dead_statements(block_to_liveness: Dict[BasicBlock, BlockLiveness], sym
     dead = set()
 
     for block, livenesss_info in block_to_liveness.items():
-        if block.is_loop_block or block.is_branch_block or block.is_entry_block:
+        if block.is_loop_block or block.is_branch_block or block.is_function_entry:
             continue
 
         marker = LiveStatementMarker()
@@ -535,7 +535,7 @@ def mark_dead_statements(block_to_liveness: Dict[BasicBlock, BlockLiveness], sym
 
 
 def remove_dead_statements(node: ir.Function, symbols: SymbolTable):
-    graph = build_function_graph(node)
+    graph = build_graph(node)
     liveness = find_live_in_out(graph)
     dead = mark_dead_statements(liveness, symbols)
     repl = []
@@ -554,7 +554,7 @@ def remove_dead_statements(node: ir.Function, symbols: SymbolTable):
 
 
 def remove_unreachable_statements(func: ir.Function, symbols: SymbolTable):
-    graph = build_function_graph(func)
+    graph = build_graph(func)
     remove_unreachable_blocks(graph)
     remove_dead_statements(func, symbols)
     remove_statements_following_terminals(func, symbols)

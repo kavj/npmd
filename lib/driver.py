@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 from lib.ast_conversion import build_module_ir_and_symbols
-from lib.blocks import build_function_graph, render_dot_graph, render_dominator_tree
+from lib.blocks import build_graph, render_dot_graph, render_dominator_tree
 from lib.branch_simplify import refactor_branches
 from lib.canonicalize import add_trivial_return, expand_in_place_assignments, normalize_array_initializers, lower_loops
 from lib.errors import CompilerError
@@ -62,7 +62,7 @@ def compile_module(file_path, types,  out_dir, verbose=False, print_result=True,
         drop_unused_symbols(func, func_symbols)
         render_path = Path(out_dir)
         assert render_path.is_dir()
-        func_graph = build_function_graph(func)
+        func_graph = build_graph(func)
         liveness = find_live_in_out(func_graph)
         if debug:
             func_graph = remove_unreachable_blocks(func_graph)
