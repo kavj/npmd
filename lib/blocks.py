@@ -36,24 +36,18 @@ def matches_while_true(node: ir.Statement):
 @dataclass(frozen=True)
 class BasicBlock:
     statements: Union[List[ir.Statement], List[ir.Function]]
-    start: int
-    stop: int
     label: int  # useful in case going by statement is too verbose
     depth: int
 
-    def __post_init__(self):
-        assert isinstance(self.statements, list)
-        assert 0 <= self.start <= self.stop <= len(self.statements)
-
     @property
     def first(self) -> Union[Optional[ir.Statement], Optional[ir.Function]]:
-        if self.start != self.stop:
-            return self.statements[self.start]
+        if self.statements:
+            return self.statements[0]
 
     @property
     def last(self) -> Union[Optional[ir.Statement], Optional[ir.Function]]:
-        if self.start != self.stop:
-            return self.statements[self.stop-1]
+        if self.statements:
+            return self.statements[-1]
 
     @property
     def is_function_entry(self):
@@ -83,26 +77,17 @@ class BasicBlock:
     def list_id(self):
         return id(self.statements)
 
-    def append_to_block(self, stmt: ir.StmtBase):
-        assert isinstance(stmt, ir.StmtBase)
-        if self.stop != len(self.statements):
-            msg = f'Cannot append to block that does not terminate the statement list'
-            raise CompilerError(msg)
-        updated_len = self.stop + 1
-        self.statements.append(stmt)
-        object.__setattr__(self, 'stop', updated_len)
-
     def __bool__(self):
-        return self.start < self.stop
+        return operator.truth(self.statements)
 
     def __len__(self):
-        return self.stop - self.start
+        return len(self.statements)
 
     def __iter__(self):
-        return itertools.islice(self.statements, self.start, self.stop)
+        return iter(self.statements)
 
     def __reversed__(self):
-        return reversed(list(iter(self)))
+        return reversed(self.statements)
 
     def __str__(self):
         if self:
@@ -120,7 +105,14 @@ class BasicBlock:
 
     def __hash__(self):
         return hash(self.label)
-        # return hash((id(self.statements), self.start, self.stop, self.label, self.depth))
+
+
+@dataclass(frozen=True)
+class Function:
+    name: str
+    args: List[ir.NameRef]
+    body: List[ir.Statement]
+    docstring: Optional[str] = None
 
 
 class FlowGraph:
@@ -238,14 +230,14 @@ class CFGBuilder:
 
     def create_block(self, stmts: List[ir.StmtBase], start: int, stop: int, depth: int):
         label = next(self.labeler)
-        block = BasicBlock(stmts, start, stop, label, depth)
+        block = BasicBlock(stmts[start:stop], label, depth)
         self.graph.graph.add_node(block)
         return block
 
-    def insert_entry_block(self, func: ir.Function):
+    def insert_entry_block(self, entry_block: Union[ir.Function, ir.ForLoop]):
         assert self.entry_block is None
         label = next(self.labeler)
-        block = BasicBlock([func], 0, 1, label, 0)
+        block = BasicBlock([entry_block], label, 0)
         self.graph.graph.add_node(block)
         self.graph.entry_block = block
 
@@ -450,6 +442,17 @@ def get_blocks_in_loop(graph: FlowGraph, block: BasicBlock):
         if node.statements in stmt_lists:
             loop_blocks.append(node)
     return loop_blocks
+
+
+def graph_to_tree(graph: FlowGraph):
+    entry_block = graph.entry_block
+    entry_stmt = entry_block.first
+    if isinstance(entry_stmt, ir.Function):
+        pass
+    elif isinstance(entry_stmt, ir.IfElse):
+        pass
+    elif isinstance(entry_stmt, ir.Function):
+        assert isinstance(entry_stmt, ir.ForLoop)
 
 
 def render_dot_graph(graph: nx.DiGraph, name: str, out_path: Path):

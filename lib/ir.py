@@ -52,7 +52,7 @@ class StmtBase:
 
 
 Statement = typing.TypeVar('Statement', bound=StmtBase)
-StatementList = typing.Union[typing.List[Statement], typing.Tuple[Statement]]
+StatementList = typing.Iterable[Statement]
 
 
 class ValueRef(ABC):
@@ -480,7 +480,7 @@ class MaxReduction(Expression):
 class Function:
     name: str
     args: typing.List[NameRef]
-    body: typing.List[Statement]
+    body: StatementList
     docstring: typing.Optional[str] = None
 
 
@@ -1362,7 +1362,7 @@ class Continue(StmtBase):
 class ForLoop(StmtBase):
     target: typing.Union[NameRef, TUPLE]
     iterable: ValueRef
-    body: typing.List[Statement]
+    body: StatementList
     pos: Position
 
     def __post_init__(self):
@@ -1397,7 +1397,7 @@ class Return(StmtBase):
 @dataclass
 class WhileLoop(StmtBase):
     test: ValueRef
-    body: typing.List[Statement]
+    body: StatementList
     pos: Position
 
     def __post_init__(self):
