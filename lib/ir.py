@@ -104,6 +104,13 @@ class Expression(ValueRef):
 
 
 @dataclass(frozen=True)
+class ImportRef:
+    module: str
+    name: typing.Optional[str] = None
+    alias: typing.Optional[str] = None
+
+
+@dataclass(frozen=True)
 class CONSTANT(ValueRef):
     """
     ir type for numeric constant
@@ -150,11 +157,11 @@ class CONSTANT(ValueRef):
 
     @property
     def is_integer(self):
-        return self.dtype in self.int_dtypes
+        return isinstance(self.value, numbers.Integral)
 
     @property
     def is_float(self):
-        return self.dtype in self.float_dtypes
+        return isinstance(self.value, numbers.Real) and not isinstance(self.value, numbers.Integral)
 
 
 def is_nan(value: ValueRef):
@@ -254,6 +261,15 @@ class NameRef(ValueRef):
             msg = f'No method to make name reference from type {type(name)}.'
             raise TypeError(msg)
         object.__setattr__(self, 'name', name)
+
+
+@dataclass(frozen=True)
+class AttributeRef(ValueRef):
+    values: typing.Tuple[ValueRef,...]
+
+    @property
+    def base(self):
+        return self.values[0] if self.values else None
 
 
 # Todo: specialize for small fixed size arrays

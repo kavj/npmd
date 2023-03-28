@@ -48,13 +48,13 @@ def unpack_loop_one_level(target: ir.ValueRef, iterable: ir.ValueRef):
 
 
 def unpack_loop_iter(node: ir.ForLoop):
-    if isinstance(node.target, ir.NameRef) and isinstance(node.iterable, (ir.NameRef, ir.AffineSeq)):
+    if isinstance(node.target, ir.NameRef) and isinstance(node.iterable, (ir.NameRef, ir.AffineSeq, ir.Subscript)):
         yield node.target, node.iterable
     else:
         queued = [unpack_loop_one_level(node.target, node.iterable)]
         while queued:
             for target, iterable in queued[-1]:
-                if isinstance(target, ir.NameRef) and isinstance(iterable, (ir.NameRef, ir.AffineSeq)):
+                if isinstance(target, ir.NameRef) and isinstance(iterable, (ir.NameRef, ir.AffineSeq, ir.Subscript)):
                     yield target, iterable
                 else:
                     queued.append(unpack_loop_one_level(target, iterable))

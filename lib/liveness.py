@@ -11,9 +11,9 @@ import networkx as nx
 import lib.ir as ir
 
 from lib.statement_utils import get_assigned, get_expressions, get_referenced
-from lib.blocks import BasicBlock, FunctionContext
+from lib.blocks import BasicBlock, FunctionContext, is_loop_entry_block
 from lib.graph_walkers import get_branch_entry_points, get_reachable_blocks,  get_loop_entry_block, \
-    get_loop_exit_block,get_reduced_graph, walk_graph
+    get_loop_exit_block, get_reduced_graph, walk_graph
 from lib.symbol_table import SymbolTable
 from lib.expression_walkers import walk_parameters
 
@@ -131,7 +131,12 @@ class BlockLiveness:
         return changed
 
 
-def find_live_in_out(graph: nx.DiGraph, tracked: Set[ir.NameRef]) -> Dict[BasicBlock, BlockLiveness]:
+def find_live_in_out(graph: nx.DiGraph) -> Dict[BasicBlock, BlockLiveness]:
+    """
+    Sets name liveness per block. This skips over callables that are not bound at local scope by only visiting namerefs.
+    :param graph:
+    :return:
+    """
     block_liveness = {}
     for node in walk_graph(graph):
         kills = set()
@@ -139,10 +144,10 @@ def find_live_in_out(graph: nx.DiGraph, tracked: Set[ir.NameRef]) -> Dict[BasicB
         live_in = set()
         for stmt in node:
             for name in get_referenced(stmt):
-                if name not in kills and name in tracked:
+                if name not in kills:
                     live_in.add(name)
                 referenced.add(name)
-            kills.update(name for name in get_assigned(stmt) if name in tracked)
+            kills.update(name for name in get_assigned(stmt))
         single_block_liveness = BlockLiveness(live_in, kills)
         block_liveness[node] = single_block_liveness
     changed = True
@@ -182,32 +187,53 @@ def find_ephemeral_assigns(liveness: Dict[BasicBlock, BlockLiveness]) -> Set[ir.
 
 
 def check_for_maybe_unbound_names(func: FunctionContext):
-    liveness = find_live_in_out(func.graph, set(func.symbols.all_locals))
+    """
+    Check for any names that may not have reaching definitions along some path prior to their first use per block.
+
+    Implementation Note: This only reports variables as unbound in a block if they are used within that block. This is
+    stronger than just being live in. In the latter case, the variable may be used by a successor of the current block
+    without being bound, while the variable is unused but live out with respect to the current block.
+
+    :param func:
+    :return:
+    """
+
+    liveness = find_live_in_out(func.graph)
     assigned_after = {func.entry_point: func.args}
     unbound = {}
 
     no_backedge_graph = get_reduced_graph(func)
-    for block in nx.topological_sort(no_backedge_graph):
-        if block.is_function_entry:
-            continue
-        block_liveness = liveness[block]
-        # get everything we know is bound after this
-        bound = set(block_liveness.kills)
-        for p in no_backedge_graph.predecessors(block):
-            bound.update(assigned_after[p])
-        assigned_after[block] = bound
 
     # Now check if each block has any live in name references that are not guaranteed to be bound
     # on exit by all predecessors
-    for block in get_reachable_blocks(no_backedge_graph, func.entry_point):
+    for block in nx.topological_sort(no_backedge_graph):
         block_liveness = liveness[block]
-        if not block_liveness.live_in:
-            continue
-        bound_on_entry = set()
-        for p in no_backedge_graph.predecessors(block):
-            bound_on_entry.update(assigned_after[p])
-        if not bound_on_entry.issuperset(block_liveness.live_in):
-            unbound[block] = {name for name in block_liveness.live_in if name not in bound_on_entry}
+        if block.is_function_entry:
+            bound_on_entry = set(block.first.args)
+        else:
+            if no_backedge_graph.in_degree[block] > 0:
+                bound_on_entry = set.intersection(*(assigned_after[p] for p in no_backedge_graph.predecessors(block)))
+            else:
+                bound_on_entry = set()
+        if is_loop_entry_block(no_backedge_graph, block):
+            # if this is the first block upon entering a for loop, we need to see what variables it binds if entered
+            pred, = no_backedge_graph.predecessors(block)
+            assert pred.is_loop_block
+            bound_on_entry.update(get_assigned(pred.first))
+        maybe_unbound_names = block_liveness.live_in.difference(bound_on_entry)
+        if maybe_unbound_names and not block.is_function_entry:
+            # get the names which are referenced by this block
+            referenced = {name for name in itertools.chain(*(get_referenced(stmt) for stmt in block))}
+            maybe_unbound_names.intersection_update(referenced)
+            if maybe_unbound_names:
+                unbound[block] = maybe_unbound_names
+        if block.is_loop_block:
+            # while loop doesn't bind anything, for loop only binds target names if the loop is entered
+            bound_after = bound_on_entry
+        else:
+            bound_after = bound_on_entry.union(block_liveness.kills)
+        assigned_after[block] = bound_after
+
     return unbound, assigned_after
 
 
@@ -328,7 +354,7 @@ def mark_dead_statements(block_to_liveness: Dict[BasicBlock, BlockLiveness], sym
 
 
 def remove_dead_statements(func: FunctionContext):
-    liveness = find_live_in_out(func.graph, set(func.symbols.all_locals))
+    liveness = find_live_in_out(func.graph)
     dead = mark_dead_statements(liveness, func.symbols)
     for block in get_reachable_blocks(func.graph, func.entry_point):
         changed = False

@@ -9,7 +9,7 @@ from typing import Set
 from lib.blocks import BasicBlock, FunctionContext, make_temporary_assign
 from lib.errors import CompilerError
 from lib.expression_utils import find_element_count, make_affine_seq, make_min_affine_seq, remap_parameters
-from lib.folding import simplify
+from lib.folding import simplify_untyped_numeric
 from lib.formatting import PrettyFormatter
 from lib.graph_walkers import get_blocks_in_loop, get_reduced_graph, get_loop_entry_block, get_loop_exit_block, \
     insert_block_before, walk_graph
@@ -52,7 +52,7 @@ def rename_clobbered_loop_parameters(func: FunctionContext,  block: BasicBlock):
     """
 
     assert block.is_loop_block
-    liveness = find_live_in_out(func.graph, set(func.symbols.all_locals))
+    liveness = find_live_in_out(func.graph)
     # Since we're concerned about things crossing the loop header, we should look at SCCs for this loop and ignore
     # divergent components
     blocks = get_blocks_in_loop(func.graph, block)
@@ -169,7 +169,7 @@ def make_single_index_loop(func: FunctionContext, header_block: BasicBlock, noes
         count = ir.MinReduction(*iterable_lens)
         affine_expr = ir.AffineSeq(ir.Zero, count, ir.One)
 
-    loop_expr = simplify(affine_expr, typer)
+    loop_expr = simplify_untyped_numeric(affine_expr)
     assert isinstance(loop_expr, ir.AffineSeq)
     loop_index = None
     for target in target_to_iterable:
@@ -270,7 +270,7 @@ def get_safe_loop_indices(func: FunctionContext, block: BasicBlock, live_on_exit
 def lower_loops(func: FunctionContext):
     graph = func.graph
     symbols = func.symbols
-    liveness = find_live_in_out(graph, set(symbols.all_locals))
+    liveness = find_live_in_out(graph)
     loop_blocks = [block for block in walk_graph(func.graph) if block.is_loop_block and isinstance(block.first, ir.ForLoop)]
     headers = []
     # our graph is a volatile view rather than a transformable CFG, as this sidesteps issues of maintaining

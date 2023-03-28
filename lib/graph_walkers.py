@@ -5,7 +5,7 @@ import lib.ir as ir
 
 from typing import Generator, Iterator, List, Optional
 
-from blocks import BasicBlock, FunctionContext, dominator_tree
+from lib.blocks import BasicBlock, FunctionContext, dominator_tree
 
 
 def insert_block_before(func: FunctionContext, block: BasicBlock, statements: List[ir.Statement]):
@@ -74,6 +74,7 @@ def find_loop_exit(func: FunctionContext, header: BasicBlock):
     for block in nx.dfs_preorder_nodes(doms, header):
         if block.depth == header.depth:
             return block
+
 
 def get_reduced_graph(func: FunctionContext, doms: Optional[nx.DiGraph] = None) -> nx.DiGraph:
     if doms is None:

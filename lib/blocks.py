@@ -6,7 +6,7 @@ import networkx as nx
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import Iterable, List, Optional, Union
+from typing import Dict, Iterable, List, Optional, Union
 
 import lib.ir as ir
 
@@ -115,7 +115,7 @@ class BasicBlock:
 class FunctionContext:
     graph: nx.DiGraph
     entry_point: BasicBlock
-    symbols: SymbolTable
+    symbols: Optional[SymbolTable] = None
     labeler: Optional[itertools.count] = None
 
     def __post_init__(self):
@@ -140,6 +140,13 @@ class FunctionContext:
         for c in children:
             self.graph.add_edge(block, c)
         return block
+
+
+def is_loop_entry_block(graph: nx.DiGraph, block: BasicBlock) -> bool:
+    if block.depth == 0 or graph.in_degree[block] != 1:
+        return False
+    pred, = graph.predecessors(block)
+    return pred.is_loop_block and pred.depth == block.depth - 1
 
 
 def make_temporary_assign(func: FunctionContext, base_name: Union[str, ir.NameRef], value: ir.ValueRef, pos: ir.Position):

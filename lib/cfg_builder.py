@@ -1,11 +1,12 @@
 import ast
+import inspect
 import itertools
 import operator
 import sys
 import typing
 import symtable
-import warnings
 
+from collections import defaultdict
 from contextlib import contextmanager
 from itertools import islice
 from pathlib import Path
@@ -234,11 +235,11 @@ class BuilderContext:
     """
     Single use context holder
     """
-    def __init__(self, symbols: SymbolTable):
-        self.symbols = symbols
+    def __init__(self):
         self.graph = nx.DiGraph()
         self.counter = itertools.count()
         self.loops = []
+        self.annotations = defaultdict(list)
         self.entry_block = None
         self.current_block = None
         self.depth = 0
@@ -250,22 +251,18 @@ class BuilderContext:
         entry_block = find_graph_entry_points(self.graph)
         assert entry_block is not None
         graph = self.graph
-        symbols = self.symbols
         counter = self.counter
+        annotations = self.annotations
         self.graph = None
-        self.symbols = None
         self.counter = None
-        return FunctionContext(graph, entry_block, symbols, counter)
+        self.annotations = None
+        return FunctionContext(graph, entry_block, labeler=counter), annotations
 
     @contextmanager
     def loop_region(self):
         self.enter_loop()
         yield
         self.exit_loop()
-
-    @property
-    def name(self):
-        return self.symbols.namespace
 
     @property
     def next_label(self):
@@ -359,25 +356,27 @@ class CFGBuilder(ast.NodeVisitor):
         self.builder_ctx = None
 
     @contextmanager
-    def function_scope(self, symbols):
+    def function_scope(self):
         assert self.builder_ctx is None
-        self.builder_ctx = BuilderContext(symbols)
+        self.builder_ctx = BuilderContext()
         yield
         self.builder_ctx = None
 
-    def __call__(self, node: ast.FunctionDef, symbols: SymbolTable):
-        with self.function_scope(symbols):
+    def __call__(self, node: ast.FunctionDef):
+        with self.function_scope():
             self.visit_FunctionDef(node)
             return self.builder_ctx.finalize()
 
     def visit_Attribute(self, node: ast.Attribute):
-        v = self.visit(node.value)
-        if isinstance(v, ir.NameRef):
-            return ir.NameRef(f"{v.name}.{node.attr}")
-        else:
-            formatted = self.formatter(node.value)
-            msg = f"Attributes are disallowed on everything except name references. Received: {formatted}."
-            raise CompilerError(msg)
+        base = node.value
+        stack = [node]
+        while isinstance(base, ast.Attribute):
+            base = base.value
+            stack.append(base)
+        attributes = [self.visit(base)]
+        for s in reversed(stack):
+            attributes.append(ir.NameRef(s.attr))
+        return ir.AttributeRef(attributes)
 
     def visit_Constant(self, node: ast.Constant) -> ir.CONSTANT:
         if is_ellipsis(node.value):
@@ -528,28 +527,11 @@ class CFGBuilder(ast.NodeVisitor):
 
     def visit_AnnAssign(self, node: ast.AnnAssign):
         target = self.visit(node.target)
-        value = self.visit(node.value)
         pos = extract_positional_info(node)
         annotation = self.visit(node.annotation)
-        if isinstance(annotation, ir.NameRef):
-            # Check if type is recognized by name
-            type_ = self.symbols.type_by_name.get(annotation.name)
-            if type_ is None:
-                msg = f'Ignoring unrecognized annotation: {annotation}, line: {pos.line_begin}'
-                warnings.warn(msg)
-            else:
-                ir_type = self.symbols.get_ir_type(type_)
-                if isinstance(target, ir.NameRef):
-                    sym = self.symbols.lookup(target)
-                    existing_type = sym.type_
-                    # This is an error, since it's an actual conflict.
-                    if existing_type != ir_type:
-                        msg = f'IR type from type hint conflicts with existing ' \
-                              f'(possibly inferred) type {existing_type}, line: {pos.line_begin}'
-                        raise CompilerError(msg)
+        self.builder_ctx.annotations[target].append(annotation)
         if node.value is not None:
-            # CPython will turn the syntax "var: annotation" into an AnnAssign node
-            # with node.value = None. If executed, this won't bind or update the value of var.
+            value = self.visit(node.value)
             assign = ir.Assign(target, value, pos)
             self.builder_ctx.append_statement(assign)
 
@@ -579,7 +561,11 @@ class CFGBuilder(ast.NodeVisitor):
             if self.builder_ctx.current_block.terminated:
                 # don't follow break, continue, or return in this statement list
                 break
+        last_else_block = self.builder_ctx.current_block
         exit_block = self.builder_ctx.add_block()
+        for block in (last_if_block, last_else_block):
+            if block.unterminated:
+                self.builder_ctx.graph.add_edge(block, exit_block)
 
         # Now make a branch statement
         branch_stmt = ir.IfElse(test,
@@ -683,7 +669,7 @@ def map_functions_by_name(node: ast.Module):
     return by_name
 
 
-def build_function_symbol_table(func_table: symtable.SymbolTable, types, allow_inference=True, ignore_unbound=False):
+def build_function_symbol_table(func_table: symtable.SymbolTable, types, ignore_unbound=False):
     """
     Turns python symbol table into a typed internal representation.
 
@@ -691,22 +677,9 @@ def build_function_symbol_table(func_table: symtable.SymbolTable, types, allow_i
     # Todo: This needs a better way to deal with imports where they are used.
     # since we have basic type info here, later phases should be validating the argument
     # and type signatures used when calling imported functions
-    if allow_inference and ignore_unbound:
-        msg = 'Cannot allow type inference if unbound variable paths are allowed here.'
-        raise CompilerError(msg)
+
     func_name = func_table.get_name()
     symbols = {}
-    missing = []
-    missing_arg_types = []
-    for s in func_table.get_symbols():
-        if s.is_parameter():
-            type_ = types.get(s.get_name())
-            if type_ is None:
-                missing_arg_types.append(s.get_name())
-    if missing_arg_types:
-        missing_arg_types = ', '.join(s for s in missing_arg_types)
-        msg = f'In function: "{func_name}", missing type information for arguments "{missing_arg_types}"'
-        raise CompilerError(msg)
     for s in func_table.get_symbols():
         name = s.get_name()
         if s.is_imported():
@@ -725,8 +698,6 @@ def build_function_symbol_table(func_table: symtable.SymbolTable, types, allow_i
                       f'This is automatically treated as an error.'
                 raise CompilerError(msg)
             type_ = types.get(name)
-            if type_ is None:
-                missing.append(name)
             sym = symbol(name,
                          type_,
                          is_arg,
@@ -740,9 +711,6 @@ def build_function_symbol_table(func_table: symtable.SymbolTable, types, allow_i
             if s.is_referenced():
                 msg = f'Typed name {name} does not match an assignment.'
                 raise CompilerError(msg)
-    if missing and not allow_inference:
-        msg = f'No type provided for local variable(s): {missing}'
-        raise CompilerError(msg)
     return SymbolTable(func_name, symbols)
 
 
@@ -777,8 +745,27 @@ def populate_symbol_tables(module_name, src, types):
         func_names.add(name)
         func_types = types.get(name, dict())
         # declare a header file to avoid worrying about declaration order
-        func_tables[name] = build_function_symbol_table(func_table, func_types, allow_inference=True, ignore_unbound=False)
+        func_tables[name] = build_function_symbol_table(func_table, func_types, ignore_unbound=True)
     return func_tables
+
+
+def build_ir_from_func(func):
+    if not inspect.isfunction(func):
+        msg = f'Expected an imported function. Received: {func}'
+        raise CompilerError(msg)
+    src_path = inspect.getfile(func)
+    module_name = Path(src_path).name
+    src_text = inspect.getsource(func)
+    mod_ast = ast.parse(src_text, filename=module_name)
+    funcs_by_name = map_functions_by_name(mod_ast)
+    for func_name, func_ast in funcs_by_name.items():
+        if func_name == func.__name__:
+            builder = CFGBuilder({}, {})
+            func_ctx, annotations = builder(func_ast)
+            func_symbol_tables = populate_symbol_tables(module_name, src_text, {})
+            symbols = func_symbol_tables[func_name]
+            func_ctx.symbols = symbols
+            return func_ctx
 
 
 def build_module_ir(src_path, types):
@@ -795,6 +782,7 @@ def build_module_ir(src_path, types):
     # Todo: register imports once interface stabilizes
     for func_name, func_ast in funcs_by_name.items():
         symbol_handler = func_symbol_tables.get(func_name)
-        func_ctx = builder(func_ast, symbol_handler)
+        func_ctx, annotations = builder(func_ast)
+        func_ctx.symbols = symbol_handler
         funcs.append(func_ctx)
     return ir.Module(module_name, funcs, module_imports, name_imports)

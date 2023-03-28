@@ -57,10 +57,7 @@ class symbol:
             # this should be caught elsewhere, where function information is available
             assert self.is_local
         if self.is_arg:
-            if self.type_ is None:
-                msg = f'No type declared for argument "{self.name}"'
-                raise CompilerError(msg)
-            elif not is_allowed_identifier(self.name):
+            if not is_allowed_identifier(self.name):
                 msg = f'"{self.name}" is not an allowed identifier.'
                 raise CompilerError(msg)
 
@@ -95,10 +92,6 @@ class SymbolTable:
 
     def __init__(self, namespace: str, symbols: Dict[str, symbol], default_index_type=np.dtype(np.int_)):
         self.namespace = namespace
-        untyped_args = [name for (name, sym) in symbols.items() if sym.is_arg and sym.type_ is None]
-        if untyped_args:
-            msg = f'Arguments "{untyped_args}" are missing type annotations'
-            raise CompilerError(msg)
         self.symbols = symbols
         self.name_manglers = {}
         self.default_index_type = default_index_type

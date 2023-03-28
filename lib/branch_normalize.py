@@ -1,3 +1,5 @@
+import operator
+
 import networkx as nx
 
 import lib.ir as ir
@@ -5,6 +7,7 @@ import lib.ir as ir
 from dataclasses import fields
 from typing import Iterable
 from lib.blocks import FunctionContext, dominator_tree
+from lib.graph_walkers import walk_graph
 
 
 def statements_match(*stmts: Iterable[ir.StmtBase]):
@@ -71,3 +74,20 @@ def hoist_terminals(func: FunctionContext):
                             for b in (u, v):
                                 func.graph.remove_edge(b, u_succ)
                             func.add_block([terminal], u.depth, [u, v], [u_succ])
+
+
+def inline_const_branches(graph: nx.DiGraph):
+    """
+    Remove any constant branch nodes and link their predecessors to whatever branch remains live
+    :param graph:
+    :return:
+    """
+    inlinable_branches = [block for block in walk_graph(graph) if block.is_branch_block
+                          and isinstance(block.first.test, ir.CONSTANT)]
+    for branch in inlinable_branches:
+        header: ir.IfElse = branch.first
+        live_block_label = header.if_branch if operator.truth(header.test) else header.else_branch
+        live_block = graph[live_block_label]
+        for p in graph.predecessors(header):
+            graph.add_edge(p, live_block)
+        graph.remove_node(branch)

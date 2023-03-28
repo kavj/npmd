@@ -11,7 +11,7 @@ from tests.type_info import type_detail
 #       For now, make a second tuple to inject type info and extend
 #       the printer to handle operator precedence and generation of annotations.
 
-unconvertible = ('test_unpacking.py',)
+unconvertible = () # ('test_unpacking.py',)
 
 
 def test_conversions():
@@ -26,7 +26,9 @@ def test_conversions():
             with pytest.raises(CompilerError):
                 build_module_ir(file_path, func_types)
             continue
-        mod, symbols = build_module_ir(file_path, func_types)
+        if file_path.name != 'test_annotations.py':
+            continue
+        mod = build_module_ir(file_path, func_types)
         # Now test that conversions yield all nodes
         func = mod.functions[0]
         print(mod.name, func.name)

@@ -8,14 +8,23 @@ from typing import Dict, Optional, Union
 import lib.ir as ir
 
 from lib.errors import CompilerError
-from lib.folding import simplify
+from lib.folding import simplify_untyped_numeric
 from lib.symbol_table import SymbolTable
 from lib.expression_walkers import walk_expr
 from lib.type_checks import TypeHelper
-from lib.unpacking import unpack_loop_iter
 
 # Todo: stub
 specialized = {ir.NameRef("print")}
+
+
+def is_constant(value: ir.ValueRef):
+    if isinstance(value, ir.CONSTANT):
+        return True
+    elif isinstance(value, ir.Expression):
+        for subexpr in walk_expr(value):
+            # if we have any possibly non-constant expression, return False
+            if isinstance(subexpr, (ir.Call, ir.NameRef)):
+                return False
 
 
 def remap_parameters(expr: ir.ValueRef, cached: Dict[ir.ValueRef, ir.ValueRef]):
@@ -96,7 +105,7 @@ def make_min_affine_seq(step, start_and_stops, symbols: SymbolTable):
         diffs = []
         for start, stop in start_and_stops:
             d = ir.SUB(stop, start)
-            d = simplify(d, typer)
+            d = simplify_untyped_numeric(d)
             diffs.append(d)
         min_diff = ir.MAX(ir.MinReduction(*diffs), ir.Zero)
         return ir.AffineSeq(ir.Zero, min_diff, step)

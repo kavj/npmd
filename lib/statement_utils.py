@@ -34,25 +34,24 @@ def get_assign_counts(func: FunctionContext, entry_point: BasicBlock):
 def get_assigned_or_augmented(func: FunctionContext, node: BasicBlock) -> Tuple[Set[ir.NameRef], Set[ir.NameRef]]:
     bound = set()
     augmented = set()
-    for block in get_reachable_nodes(func.graph, node):
-        for stmt in block:
-            if isinstance(stmt, ir.Assign):
-                if isinstance(stmt.target, ir.NameRef):
-                    bound.add(stmt.target)
-                elif isinstance(stmt.target, ir.Subscript):
+    for stmt in get_reachable_nodes(func.graph, node):
+        if isinstance(stmt, ir.Assign):
+            if isinstance(stmt.target, ir.NameRef):
+                bound.add(stmt.target)
+            elif isinstance(stmt.target, ir.Subscript):
+                augmented.add(stmt.target.value)
+        elif isinstance(stmt, ir.InPlaceOp):
+            if isinstance(stmt.target, ir.NameRef):
+                augmented.add(stmt.target)
+            else:
+                assert isinstance(stmt.target, ir.Subscript)
+                if isinstance(stmt.target.value, ir.NameRef):
                     augmented.add(stmt.target.value)
-            elif isinstance(stmt, ir.InPlaceOp):
-                if isinstance(stmt.target, ir.NameRef):
-                    augmented.add(stmt.target)
-                else:
-                    assert isinstance(stmt.target, ir.Subscript)
-                    if isinstance(stmt.target.value, ir.NameRef):
-                        augmented.add(stmt.target.value)
-            elif isinstance(stmt, ir.ForLoop):
-                # nested loop should not clobber
-                for target, _ in unpack_loop_iter(stmt):
-                    if isinstance(target, ir.NameRef):
-                        bound.add(target)
+        elif isinstance(stmt, ir.ForLoop):
+            # nested loop should not clobber
+            for target, _ in unpack_loop_iter(stmt):
+                if isinstance(target, ir.NameRef):
+                    bound.add(target)
     return bound, augmented
 
 

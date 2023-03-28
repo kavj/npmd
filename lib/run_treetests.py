@@ -30,7 +30,8 @@ tests = ('test_forifcont.py',
          'test_unpacking.py',
          'test_nested_if.py',
          'test_array_initializers.py',
-         'test_double_terminal.py')
+         'test_double_terminal.py',
+         'test_annotations.py')
 
 array_2d = ir.ArrayType(ndims=2, dtype=ir.float64)
 array_1d = ir.ArrayType(ndims=1, dtype=ir.float64)

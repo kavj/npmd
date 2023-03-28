@@ -205,6 +205,11 @@ type_detail = {"test_forifcont.py":
                        'u': np.dtype('float64'),
                        'v': np.dtype('float64')
                    }
+               },
+               'test_annotations.py': {
+                   'test_numpy_scalar': {
+
+                   }
                }
 
                }
