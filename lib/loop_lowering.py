@@ -11,7 +11,7 @@ from lib.errors import CompilerError
 from lib.expression_utils import find_element_count, make_affine_seq, make_min_affine_seq, remap_parameters
 from lib.folding import simplify_untyped_numeric
 from lib.formatting import PrettyFormatter
-from lib.graph_walkers import get_blocks_in_loop, get_reduced_graph, get_loop_entry_block, get_loop_exit_block, \
+from lib.walkers import get_blocks_in_loop, get_reduced_graph, get_loop_entry_block, get_loop_exit_block, \
     insert_block_before, walk_graph
 from lib.liveness import find_live_in_out
 from lib.statement_utils import get_assigned_or_augmented
@@ -291,6 +291,6 @@ def lower_loops(func: FunctionContext):
         safe_targets = get_safe_loop_indices(func, block, live_on_exit)
 
         safe_target_lists.append(safe_targets)
-    # rename_clobbered_loop_parameters(func, )
+        rename_clobbered_loop_parameters(func, block)
 
     raise NotImplementedError('This needs a rewrite')

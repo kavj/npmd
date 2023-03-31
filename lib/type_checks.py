@@ -8,7 +8,7 @@ import lib.ir as ir
 
 from lib.blocks import FunctionContext
 from lib.errors import CompilerError
-from lib.graph_walkers import get_reachable_nodes, walk_graph
+from lib.walkers import get_reachable_nodes, walk_graph
 from lib.unpacking import unpack_loop_iter
 from lib.formatting import PrettyFormatter
 from lib.symbol_table import SymbolTable

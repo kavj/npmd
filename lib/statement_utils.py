@@ -6,8 +6,7 @@ from collections import Counter
 from functools import singledispatch
 
 from lib.blocks import BasicBlock, FunctionContext
-from lib.expression_walkers import walk_parameters
-from lib.graph_walkers import get_reduced_graph, get_reachable_nodes
+from lib.walkers import get_reduced_graph, get_reachable_nodes, walk_parameters
 from lib.unpacking import unpack_loop_iter
 
 

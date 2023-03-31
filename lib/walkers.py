@@ -3,7 +3,7 @@ import itertools
 import networkx as nx
 import lib.ir as ir
 
-from typing import Generator, Iterator, List, Optional
+from typing import Generator, Iterator, List, Optional, Union
 
 from lib.blocks import BasicBlock, FunctionContext, dominator_tree
 
@@ -87,8 +87,8 @@ def get_reduced_graph(func: FunctionContext, doms: Optional[nx.DiGraph] = None) 
     return nx.edge_subgraph(func.graph, [e for e in func.graph.edges() if e not in back_edges])
 
 
-def walk_graph(graph: nx.DiGraph) -> Iterator[BasicBlock]:
-    return iter(graph.nodes())
+def walk_graph(graph: Union[FunctionContext, nx.DiGraph]) -> Iterator[BasicBlock]:
+    return iter(graph.graph.nodes() if isinstance(graph, FunctionContext) else graph.nodes())
 
 
 def find_branch_exit(func: FunctionContext, header: BasicBlock):
@@ -135,3 +135,45 @@ def preorder_walk(graph: nx.DiGraph, entry_point: Optional[BasicBlock] = None):
 
 def postorder_walk(graph: nx.DiGraph, entry_point: Optional[BasicBlock] = None):
     return nx.dfs_postorder_nodes(graph, entry_point)
+
+
+def walk_expr(node: ir.ValueRef):
+    """
+    yields all distinct sub-expressions and the base expression based on post order
+    It was changed to include the base expression so that it's safe
+    to walk without the need for explicit dispatch mechanics in higher level
+    functions on Expression to disambiguate Expression vs non-Expression value
+    references.
+
+    :param node:
+    :return:
+    """
+    if not isinstance(node, ir.ValueRef):
+        msg = f'walk expects a value ref. Received: "{node}"'
+        raise TypeError(msg)
+    assert isinstance(node, ir.ValueRef)
+    if isinstance(node, ir.Expression):
+        seen = {node}
+        enqueued = [(node, node.subexprs)]
+        while enqueued:
+            expr, subexprs = enqueued[-1]
+            for subexpr in subexprs:
+                if subexpr in seen:
+                    continue
+                seen.add(subexpr)
+                if isinstance(subexpr, ir.Expression):
+                    enqueued.append((subexpr, subexpr.subexprs))
+                    break
+                yield subexpr
+            else:
+                # exhausted
+                yield expr
+                enqueued.pop()
+    else:
+        yield node
+
+
+def walk_parameters(node: ir.ValueRef):
+    for value in walk_expr(node):
+        if isinstance(value, ir.NameRef):
+            yield value

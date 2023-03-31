@@ -10,7 +10,7 @@ import lib.ir as ir
 from lib.errors import CompilerError
 from lib.folding import simplify_untyped_numeric
 from lib.symbol_table import SymbolTable
-from lib.expression_walkers import walk_expr
+from lib.walkers import walk_expr
 from lib.type_checks import TypeHelper
 
 # Todo: stub

@@ -1,5 +1,5 @@
 import lib.ir as ir
-from lib.expression_walkers import walk_expr, walk_parameters
+from lib.walkers import walk_expr, walk_parameters
 # check for post ordering
 
 

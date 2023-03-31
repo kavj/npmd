@@ -12,10 +12,9 @@ import lib.ir as ir
 
 from lib.statement_utils import get_assigned, get_expressions, get_referenced
 from lib.blocks import BasicBlock, FunctionContext, is_loop_entry_block
-from lib.graph_walkers import get_branch_entry_points, get_reachable_blocks,  get_loop_entry_block, \
-    get_loop_exit_block, get_reduced_graph, walk_graph
+from lib.walkers import get_branch_entry_points, get_reachable_blocks,  get_loop_entry_block, \
+    get_loop_exit_block, get_reduced_graph, walk_graph, walk_parameters
 from lib.symbol_table import SymbolTable
-from lib.expression_walkers import walk_parameters
 
 
 # Most of this work ended up being done elsewhere in controlflow now. This can now do slightly more precise liveness

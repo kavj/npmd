@@ -7,7 +7,7 @@ import lib.ir as ir
 from dataclasses import fields
 from typing import Iterable
 from lib.blocks import FunctionContext, dominator_tree
-from lib.graph_walkers import walk_graph
+from lib.walkers import walk_graph
 
 
 def statements_match(*stmts: Iterable[ir.StmtBase]):

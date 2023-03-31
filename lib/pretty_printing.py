@@ -2,7 +2,7 @@ import typing
 
 from lib.errors import CompilerError
 from lib.blocks import BasicBlock, FunctionContext
-from lib.graph_walkers import find_branch_exit, find_loop_exit, get_reduced_graph, walk_graph
+from lib.walkers import find_branch_exit, find_loop_exit, get_reduced_graph, walk_graph
 from lib.formatting import binop_ops, PrettyFormatter
 
 from functools import singledispatchmethod

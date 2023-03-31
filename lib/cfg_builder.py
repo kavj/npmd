@@ -20,9 +20,8 @@ from lib.blocks import BasicBlock, FunctionContext
 from lib.callspec import early_call_specialize
 from lib.errors import CompilerError
 from lib.formatting import PrettyFormatter
-from lib.graph_walkers import walk_graph
+from lib.walkers import walk_expr, walk_graph
 from lib.symbol_table import symbol, SymbolTable
-from lib.expression_walkers import walk_expr
 
 
 binary_op_strs = {ast.Add: "+",

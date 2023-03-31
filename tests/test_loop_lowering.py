@@ -9,7 +9,7 @@ from lib.blocks import FunctionContext
 from lib.cfg_builder import build_module_ir
 from lib.errors import CompilerError
 from lib.expression_utils import find_element_count
-from lib.graph_walkers import walk_graph
+from lib.walkers import walk_graph
 from lib.loop_lowering import lower_loops, rename_clobbered_loop_parameters
 from tree_tests import test_indexing
 from lib.type_checks import infer_types
