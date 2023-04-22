@@ -22,6 +22,7 @@ from lib.errors import CompilerError
 from lib.formatting import PrettyFormatter
 from lib.walkers import walk_expr, walk_graph
 from lib.symbol_table import symbol, SymbolTable
+from lib.unpacking import unpack_assignment
 
 
 binary_op_strs = {ast.Add: "+",
@@ -98,18 +99,6 @@ compare_ops = {ast.Eq: ir.EQ,
 
 supported_builtins = {"iter", "range", "enumerate", "zip", "all", "any", "max", "min", "abs", "pow",
                       "round", "reversed"}
-
-
-def unpack_assignment(target, value, pos):
-    if isinstance(target, ir.TUPLE) and isinstance(value, ir.TUPLE):
-        if target.length != value.length:
-            msg = f"Cannot unpack {value} with {value.length} elements using {target} with {target.length} elements: " \
-                  f"line {pos.line_begin}."
-            raise ValueError(msg)
-        for t, v in zip(target.subexprs, value.subexprs):
-            yield from unpack_assignment(t, v, pos)
-    else:
-        yield target, value
 
 
 def is_ellipsis(node):

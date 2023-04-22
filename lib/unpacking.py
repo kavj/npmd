@@ -62,3 +62,15 @@ def unpack_loop_iter(node: ir.ForLoop):
             else:
                 # exhausted
                 queued.pop()
+
+
+def unpack_assignment(target, value, pos):
+    if isinstance(target, ir.TUPLE) and isinstance(value, ir.TUPLE):
+        if target.length != value.length:
+            msg = f"Cannot unpack {value} with {value.length} elements using {target} with {target.length} elements: " \
+                  f"line {pos.line_begin}."
+            raise ValueError(msg)
+        for t, v in zip(target.subexprs, value.subexprs):
+            yield from unpack_assignment(t, v, pos)
+    else:
+        yield target, value
