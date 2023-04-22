@@ -39,15 +39,15 @@ def remap_parameters(expr: ir.ValueRef, cached: Dict[ir.ValueRef, ir.ValueRef]):
     return repl
 
 
-def serialize_min_max(node: Union[ir.MinReduction, ir.MaxReduction]):
+def serialize_min_max(node: Union[ir.MinOf, ir.MaxOf]):
     """
     Min max serialize without scraping all pairs
     :param node:
     :return:
     """
-    if isinstance(node, ir.MinReduction):
+    if isinstance(node, ir.MinOf):
         reducer = ir.MIN
-    elif isinstance(node, ir.MaxReduction):
+    elif isinstance(node, ir.MaxOf):
         reducer = ir.MAX
     else:
         msg = f"serializer requires min or max reduction. Received {node}."
@@ -57,7 +57,7 @@ def serialize_min_max(node: Union[ir.MinReduction, ir.MaxReduction]):
 
     # serialize any nested terms
     for index, term in enumerate(terms):
-        if isinstance(term, (ir.MaxReduction, ir.MinReduction)):
+        if isinstance(term, (ir.MaxOf, ir.MinOf)):
             terms[index] = serialize_min_max(term)
 
     num_terms = len(terms)
@@ -94,11 +94,11 @@ def make_min_affine_seq(step, start_and_stops, symbols: SymbolTable):
         if len(stops) == 1:
             stop = stops.pop()
         else:
-            stop = ir.MinReduction(*stops)
+            stop = ir.MinOf(*stops)
         return ir.AffineSeq(start, stop, step)
     elif len(stops) == 1:
         stop = stops.pop()
-        stop = ir.MAX(ir.SUB(stop, ir.MaxReduction(*starts)), ir.Zero)
+        stop = ir.MAX(ir.SUB(stop, ir.MaxOf(*starts)), ir.Zero)
         # need a zero here, since
         return ir.AffineSeq(ir.Zero, stop, step)
     else:
@@ -107,7 +107,7 @@ def make_min_affine_seq(step, start_and_stops, symbols: SymbolTable):
             d = ir.SUB(stop, start)
             d = simplify_untyped_numeric(d)
             diffs.append(d)
-        min_diff = ir.MAX(ir.MinReduction(*diffs), ir.Zero)
+        min_diff = ir.MAX(ir.MinOf(*diffs), ir.Zero)
         return ir.AffineSeq(ir.Zero, min_diff, step)
 
 

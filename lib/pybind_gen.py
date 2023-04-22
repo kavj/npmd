@@ -275,13 +275,13 @@ class ExprFormatter:
         return f'!{expr}'
 
     @render.register
-    def _(self, node: ir.MaxReduction):
+    def _(self, node: ir.MaxOf):
         expr = serialize_min_max(node)
         rendered = self.render(expr)
         return rendered
 
     @render.register
-    def _(self, node: ir.MinReduction):
+    def _(self, node: ir.MinOf):
         expr = serialize_min_max(node)
         rendered = self.render(expr)
         return rendered
@@ -338,12 +338,12 @@ class ExprFormatter:
         return rendered
 
     @render.register
-    def _(self, node: ir.MaxReduction):
+    def _(self, node: ir.MaxOf):
         serialized = serialize_min_max(node)
         return self.render(serialized)
 
     @render.register
-    def _(self, node: ir.MinReduction):
+    def _(self, node: ir.MinOf):
         serialized = serialize_min_max(node)
         return self.render(serialized)
 

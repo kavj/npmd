@@ -180,7 +180,7 @@ class PrettyFormatter:
             return formatted
 
     @visit.register
-    def _(self, node: ir.MaxReduction):
+    def _(self, node: ir.MaxOf):
         args = ", ".join(self.visit(arg) for arg in node.subexprs)
         return f"max({args})"
 
@@ -190,7 +190,7 @@ class PrettyFormatter:
         return f"max({args})"
 
     @visit.register
-    def _(self, node: ir.MinReduction):
+    def _(self, node: ir.MinOf):
         args = ", ".join(self.visit(arg) for arg in node.subexprs)
         return f"min({args})"
 

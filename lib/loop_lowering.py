@@ -4,6 +4,7 @@ import networkx as nx
 import lib.ir as ir
 
 from collections import defaultdict
+from functools import singledispatch
 from typing import Set
 
 from lib.blocks import BasicBlock, FunctionContext, make_temporary_assign
@@ -17,7 +18,34 @@ from lib.liveness import find_live_in_out
 from lib.statement_utils import get_assigned_or_augmented
 from lib.symbol_table import SymbolTable
 from lib.type_checks import is_integer, TypeHelper
-from lib.unpacking import unpack_loop_iter
+from lib.unpacking import unpack_loop_iter, unpack_iter
+
+
+@singledispatch
+def get_iterator_access_func(node):
+    raise NotImplementedError
+
+
+@get_iterator_access_func.register
+def _(node: ir.NameRef):
+    return ir.Zero, ir.SingleDimRef(node, ir.Zero), ir.One
+
+
+@get_iterator_access_func.register
+def _(node: ir.Subscript):
+    if isinstance(node.index, ir.Slice):
+        start = ir.Zero if node.index.start is None else node.index.start
+        max_stop = ir.SingleDimRef(node, ir.Zero)
+        stop = max_stop if node.index.stop is None else ir.MIN(max_stop, node.index.stop)
+        step = ir.One if node.index.step is None else node.index.step
+        return start, stop, step
+    else:
+        return ir.Zero, ir.SingleDimRef(node, ir.One), ir.One
+
+
+def get_access_ranges(header: ir.ForLoop):
+    for _, iterable in unpack_loop_iter(header):
+        yield get_iterator_access_func(iterable)
 
 
 def invalid_loop_iterables(node: ir.ForLoop, symbols: SymbolTable):
@@ -166,7 +194,7 @@ def make_single_index_loop(func: FunctionContext, header_block: BasicBlock, noes
             c = find_element_count(expr)
             iterable_lens.append(c)
 
-        count = ir.MinReduction(*iterable_lens)
+        count = ir.MinOf(*iterable_lens)
         affine_expr = ir.AffineSeq(ir.Zero, count, ir.One)
 
     loop_expr = simplify_untyped_numeric(affine_expr)

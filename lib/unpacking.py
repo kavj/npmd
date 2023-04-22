@@ -47,21 +47,25 @@ def unpack_loop_one_level(target: ir.ValueRef, iterable: ir.ValueRef):
     return zip(target.elements, iterable.elements)
 
 
-def unpack_loop_iter(node: ir.ForLoop):
-    if isinstance(node.target, ir.NameRef) and isinstance(node.iterable, (ir.NameRef, ir.AffineSeq, ir.Subscript)):
-        yield node.target, node.iterable
+def unpack_iter(target: ir.ValueRef, iterable: ir.ValueRef):
+    if isinstance(target, ir.NameRef) and isinstance(iterable, (ir.NameRef, ir.AffineSeq, ir.Subscript)):
+        yield target, iterable
     else:
-        queued = [unpack_loop_one_level(node.target, node.iterable)]
+        queued = [unpack_loop_one_level(target, iterable)]
         while queued:
-            for target, iterable in queued[-1]:
-                if isinstance(target, ir.NameRef) and isinstance(iterable, (ir.NameRef, ir.AffineSeq, ir.Subscript)):
-                    yield target, iterable
+            for sub_target, sub_iterable in queued[-1]:
+                if isinstance(sub_target, ir.NameRef) and isinstance(sub_iterable, (ir.NameRef, ir.AffineSeq, ir.Subscript)):
+                    yield sub_target, sub_iterable
                 else:
-                    queued.append(unpack_loop_one_level(target, iterable))
+                    queued.append(unpack_loop_one_level(sub_target, sub_iterable))
                     break
             else:
                 # exhausted
                 queued.pop()
+
+
+def unpack_loop_iter(node: ir.ForLoop):
+    yield from unpack_iter(node.target, node.iterable)
 
 
 def unpack_assignment(target, value, pos):

@@ -430,7 +430,7 @@ class MIN(Expression):
 
 
 @dataclass(frozen=True)
-class MinReduction(Expression):
+class MinOf(Expression):
     values: typing.FrozenSet[ValueRef, ...]
 
     def __init__(self, *values):
@@ -458,7 +458,7 @@ class MAX(Expression):
 
 
 @dataclass(frozen=True)
-class MaxReduction(Expression):
+class MaxOf(Expression):
     values: typing.FrozenSet[ValueRef, ...]
 
     def __init__(self, *values):
